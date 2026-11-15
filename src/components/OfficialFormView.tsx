@@ -98,20 +98,20 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
       <WatermarkOverlay show={Boolean(showWatermark)} />
 
       {/* Official Form Header */}
-      <div className="mb-3">
-        <p className="text-[10px] text-slate-700 mb-1 text-left font-serif">
+      <div className="ofv-header">
+        <p className="ofv-kicker">
           [별지 서식] 사회통합정보망(www.socinet.go.kr) - 민원서식
         </p>
-        <h1 className="text-[23px] font-bold text-center tracking-[3px] mt-1 font-serif text-black">
+        <h1 className="ofv-title">
           사회통합프로그램 연계 신청서
         </h1>
-        <p className="text-[11px] text-center text-slate-600 mt-0.5 tracking-wider font-sans">
+        <p className="ofv-subtitle">
           (Application for Korea Immigration & Integration Program Linkage)
         </p>
       </div>
 
       {/* Main Form Table */}
-      <table className="official-form-table w-full border-collapse border-2 border-black text-[13px] leading-snug">
+      <table className="official-form-table">
         <colgroup>
           <col style={{ width: '18%' }} />
           <col style={{ width: '16%' }} />
@@ -121,18 +121,18 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
         </colgroup>
         <tbody>
           {/* Block 1: 신청 대상 */}
-          <tr className="border-t-2 border-black">
+          <tr className="ofv-tr-top">
             <td
               rowSpan={2}
-              className="bg-[#f2f2f2] font-bold text-center align-middle p-2 border border-black text-[12.5px]"
+              className="ofv-label-cell ofv-label-target"
             >
               신청 대상
               <br />
-              <span className="text-[10px] font-normal text-slate-600 font-sans">
+              <span className="ofv-sub-note">
                 (※해당√표)
               </span>
             </td>
-            <td colSpan={4} className="p-2 border border-black">
+            <td colSpan={4} className="ofv-data-cell">
               {editable ? (
                 <label className="inline-flex items-center gap-2 cursor-pointer font-serif">
                   <input
@@ -144,10 +144,10 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
                   <b className="text-[13px]">한국어능력시험(TOPIK) 연계평가 신청</b>
                 </label>
               ) : (
-                <div className="official-checkbox-row flex items-center gap-2 font-serif font-bold text-[13px] leading-[1.25]">
-                  <span className="official-checkbox-box inline-flex items-center justify-center w-3.5 h-3.5 border-[1.25px] border-black bg-white shrink-0">
+                <div className="ofv-checkbox-row ofv-checkbox-row-bold">
+                  <span className="ofv-checkbox-box">
                     {formData.applyType === 'topik' && (
-                      <svg viewBox="0 0 12 12" className="w-2.5 h-2.5 stroke-black" fill="none" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <svg viewBox="0 0 12 12" width="10" height="10" stroke="#000000" fill="none" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                         <polyline points="2.2,6.2 5,9 9.8,3" />
                       </svg>
                     )}
@@ -157,8 +157,8 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
               )}
             </td>
           </tr>
-          <tr className="border-b-2 border-black">
-            <td colSpan={4} className="p-2 border border-black">
+          <tr className="ofv-tr-bottom">
+            <td colSpan={4} className="ofv-data-cell">
               {editable ? (
                 <label className="inline-flex items-center gap-2 cursor-pointer font-serif text-slate-700">
                   <input
@@ -172,10 +172,10 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
                   </span>
                 </label>
               ) : (
-                <div className="official-checkbox-row flex items-center gap-2 font-serif text-[13px] text-slate-800 leading-[1.25]">
-                  <span className="official-checkbox-box inline-flex items-center justify-center w-3.5 h-3.5 border-[1.25px] border-black bg-white shrink-0">
+                <div className="ofv-checkbox-row ofv-checkbox-row-muted">
+                  <span className="ofv-checkbox-box">
                     {formData.applyType === 'marriage' && (
-                      <svg viewBox="0 0 12 12" className="w-2.5 h-2.5 stroke-black" fill="none" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                      <svg viewBox="0 0 12 12" width="10" height="10" stroke="#000000" fill="none" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                         <polyline points="2.2,6.2 5,9 9.8,3" />
                       </svg>
                     )}
@@ -189,17 +189,17 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
           </tr>
 
           {/* Block 2: 신청인 */}
-          <tr className="border-t-2 border-black">
+          <tr className="ofv-tr-top">
             <td
               rowSpan={6}
-              className="bg-[#f2f2f2] font-bold text-center align-middle p-1.5 border border-black tracking-widest text-[13px]"
+              className="ofv-label-cell ofv-label-applicant"
             >
               신&nbsp;청&nbsp;인
             </td>
-            <td className="bg-[#f2f2f2] font-bold text-center p-1 border border-black">
+            <td className="ofv-label-cell">
               성&nbsp;&nbsp;&nbsp;&nbsp;명
             </td>
-            <td colSpan={3} className="p-1 border border-black text-left">
+            <td colSpan={3} className="ofv-data-cell ofv-text-left">
               {editable ? (
                 <input
                   type="text"
@@ -209,7 +209,7 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
                   placeholder="SOK SRORNG"
                 />
               ) : (
-                <div className="font-serif font-bold text-[14px] px-2 text-left leading-[1.25] text-black">
+                <div className="ofv-val-name">
                   {renderWithNotoSansNumbers(formData.name || '')}
                 </div>
               )}
@@ -217,12 +217,12 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
           </tr>
 
           <tr>
-            <td className="bg-[#f2f2f2] font-bold text-center p-1 border border-black leading-tight text-[11.5px]">
+            <td className="ofv-label-cell ofv-label-reg">
               외국인(주민)
               <br />
               등록번호
             </td>
-            <td className="p-1 border border-black">
+            <td className="ofv-data-cell">
               {editable ? (
                 <div className="flex items-center justify-center gap-1 w-full">
                   <input
@@ -248,15 +248,15 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
                   />
                 </div>
               ) : (
-                <div className="font-num-kr font-bold text-[14px] text-center leading-[1.25] tracking-wider">
+                <div className="ofv-val-reg">
                   {formData.regNumber1 && formData.regNumber2 ? `${formData.regNumber1} - ${formData.regNumber2}` : (formData.regNumber1 || formData.regNumber2 || '')}
                 </div>
               )}
             </td>
-            <td className="bg-[#f2f2f2] font-bold text-center p-1 border border-black">
+            <td className="ofv-label-cell">
               성&nbsp;&nbsp;별
             </td>
-            <td className="p-1 border border-black text-center">
+            <td className="ofv-data-cell ofv-text-center">
               {editable ? (
                 <select
                   value={formData.gender}
@@ -268,7 +268,7 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
                   <option value="여">여 (Female)</option>
                 </select>
               ) : (
-                <div className="font-serif font-bold text-[13px] leading-[1.25]">
+                <div className="ofv-val-gender">
                   {formData.gender ? `${formData.gender}자` : '남자'}
                 </div>
               )}
@@ -276,10 +276,10 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
           </tr>
 
           <tr>
-            <td className="bg-[#f2f2f2] font-bold text-center p-1 border border-black">
+            <td className="ofv-label-cell">
               국&nbsp;&nbsp;&nbsp;&nbsp;적
             </td>
-            <td className="p-1 border border-black text-center">
+            <td className="ofv-data-cell ofv-text-center">
               {editable ? (
                 <input
                   type="text"
@@ -289,15 +289,15 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
                   placeholder="Cambodia"
                 />
               ) : (
-                <div className="font-serif font-bold text-[13px] leading-[1.25]">
+                <div className="ofv-val-center">
                   {formData.nationality || 'Cambodia'}
                 </div>
               )}
             </td>
-            <td className="bg-[#f2f2f2] font-bold text-center p-1 border border-black">
+            <td className="ofv-label-cell">
               체류자격
             </td>
-            <td className="p-1 border border-black text-center">
+            <td className="ofv-data-cell ofv-text-center">
               {editable ? (
                 <select
                   value={formData.visaStatus || ''}
@@ -320,17 +320,17 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
                   ))}
                 </select>
               ) : (
-                <div className="font-num-kr font-bold text-[13px] leading-[1.25]">
+                <div className="ofv-val-center">
                   {formData.visaStatus || 'E-9-1'}
                 </div>
               )}
             </td>
           </tr>
           <tr>
-            <td className="bg-[#f2f2f2] font-bold text-center p-1 border border-black">
+            <td className="ofv-label-cell">
               여권번호
             </td>
-            <td className="p-1 border border-black text-center">
+            <td className="ofv-data-cell ofv-text-center">
               {editable ? (
                 <input
                   type="text"
@@ -340,15 +340,15 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
                   placeholder="N01847291"
                 />
               ) : (
-                <div className="font-num-kr font-bold text-[13px] leading-[1.25] tracking-wider">
+                <div className="ofv-val-passport">
                   {formData.passportNo || "N01847291"}
                 </div>
               )}
             </td>
-            <td className="bg-[#f2f2f2] font-bold text-center p-1 border border-black leading-tight text-[11.5px]">
+            <td className="ofv-label-cell ofv-label-passport-exp">
               여권 유효기간
             </td>
-            <td className="p-1 border border-black text-center">
+            <td className="ofv-data-cell ofv-text-center">
               {editable ? (
                 <input
                   type="text"
@@ -358,7 +358,7 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
                   placeholder="YYYY-MM-DD"
                 />
               ) : (
-                <div className="font-num-kr font-bold text-[13px] leading-[1.25]">
+                <div className="ofv-val-center">
                   {formData.passportExpiry || "2031-08-15"}
                 </div>
               )}
@@ -366,10 +366,10 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
           </tr>
 
           <tr>
-            <td className="bg-[#f2f2f2] font-bold text-center p-1 border border-black">
+            <td className="ofv-label-cell">
               체&nbsp;류&nbsp;지
             </td>
-            <td colSpan={3} className="p-1 border border-black text-left">
+            <td colSpan={3} className="ofv-data-cell ofv-text-left">
               {editable ? (
                 <input
                   type="text"
@@ -379,18 +379,18 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
                   placeholder="충청남도 서산시 수석동..."
                 />
               ) : (
-                <div className="font-serif font-bold text-[12.5px] px-2 text-left leading-[1.25] text-black">
+                <div className="ofv-val-addr">
                   {renderWithNotoSansNumbers(formData.address || '')}
                 </div>
               )}
             </td>
           </tr>
 
-          <tr className="border-b-2 border-black">
-            <td className="bg-[#f2f2f2] font-bold text-center p-1 border border-black">
+          <tr className="ofv-tr-bottom">
+            <td className="ofv-label-cell">
               전화번호
             </td>
-            <td className="p-1 border border-black text-center">
+            <td className="ofv-data-cell ofv-text-center">
               {editable ? (
                 <input
                   type="text"
@@ -400,15 +400,15 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
                   placeholder="041-000-0000"
                 />
               ) : (
-                <div className="font-num-kr font-bold text-[13px] leading-[1.25]">
+                <div className="ofv-val-center">
                   {formData.phone || formData.mobile || ''}
                 </div>
               )}
             </td>
-            <td className="bg-[#f2f2f2] font-bold text-center p-1 border border-black">
+            <td className="ofv-label-cell">
               휴대폰
             </td>
-            <td className="p-1 border border-black text-center">
+            <td className="ofv-data-cell ofv-text-center">
               {editable ? (
                 <input
                   type="text"
@@ -418,7 +418,7 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
                   placeholder="010-1234-5678"
                 />
               ) : (
-                <div className="font-num-kr font-bold text-[13px] leading-[1.25]">
+                <div className="ofv-val-center">
                   {formData.mobile || formData.phone || ''}
                 </div>
               )}
@@ -426,10 +426,10 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
           </tr>
 
           {/* Block 3: 한국어능력시험 성적증명서 (OFFICIAL TOPIK SCORE REPORT) */}
-          <tr className="border-t-2 border-black">
+          <tr className="ofv-tr-top">
             <td
               rowSpan={4}
-              className="bg-[#f2f2f2] font-bold text-center align-middle p-2 border border-black text-[12px] leading-tight"
+              className="ofv-label-cell ofv-label-topik-block"
             >
               한국어
               <br />
@@ -437,7 +437,7 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
               <br />
               성적증명서
               <br />
-              <span className="text-[9.5px] font-normal text-slate-700 font-sans block mt-1">
+              <span className="ofv-block3-note">
                 (OFFICIAL
                 <br />
                 TOPIK SCORE
@@ -445,10 +445,10 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
                 REPORT)
               </span>
             </td>
-            <td className="bg-[#f2f2f2] font-bold text-center p-1.5 border border-black text-[12.5px]">
+            <td className="ofv-label-cell ofv-label-docno">
               문서확인번호
             </td>
-            <td colSpan={3} className="p-2 border border-black text-center">
+            <td colSpan={3} className="ofv-data-cell ofv-text-center">
               {editable ? (
                 <div className="flex flex-col items-center justify-center gap-1 w-full">
                   <div className="flex items-center justify-center gap-1.5 w-full font-num-kr">
@@ -474,14 +474,12 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
                 </div>
               ) : (
                 <div>
-                  <div
-                    className="font-num-kr font-bold text-[16px] text-center tracking-widest leading-[1.25] text-black"
-                  >
+                  <div className="ofv-val-docno">
                     {docPart0 || docPart1 || docPart2 || docPart3
                       ? `${docPart0 || ''} - ${docPart1 || ''} - ${docPart2 || ''} - ${docPart3 || ''}`
                       : ''}
                   </div>
-                  <span className="text-[10px] text-slate-500 font-sans block mt-0.5 leading-[1.25]">
+                  <span className="ofv-docno-note">
                     ※ 온라인 출력 성적증명서 확인번호 (16자리)
                   </span>
                 </div>
@@ -492,16 +490,16 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
           <tr>
             <td
               colSpan={2}
-              className="bg-[#f2f2f2] font-bold text-center p-1.5 border border-black text-[12px]"
+              className="ofv-label-cell ofv-label-sm"
             >
-              <div className="flex flex-wrap items-center justify-center gap-x-1 leading-[1.25]">
+              <div className="ofv-exam-label-wrap">
                 <span>수&nbsp;험&nbsp;번&nbsp;호</span>
-                <span className="text-[10px] font-normal text-slate-600 font-sans">
+                <span className="ofv-sub-note">
                   (Registration No. / Application No.)
                 </span>
               </div>
             </td>
-            <td colSpan={2} className="p-1 border border-black text-center">
+            <td colSpan={2} className="ofv-data-cell ofv-text-center">
               {editable ? (
                 <div className="font-num-kr">
                   <input
@@ -513,9 +511,7 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
                   />
                 </div>
               ) : (
-                <div
-                  className="font-num-kr font-bold text-[14px] text-center leading-[1.25] tracking-wider text-black"
-                >
+                <div className="ofv-val-examno">
                   {formData.examNumber || ''}
                 </div>
               )}
@@ -523,14 +519,14 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
           </tr>
 
           <tr>
-            <td className="bg-[#f2f2f2] font-bold text-center p-1.5 border border-black text-[12px]">
+            <td className="ofv-label-cell ofv-label-sm">
               시&nbsp;험&nbsp;일
               <br />
-              <span className="text-[10px] font-normal text-slate-600 font-sans">
+              <span className="ofv-sub-note">
                 (Test Date)
               </span>
             </td>
-            <td className="p-1 border border-black text-center">
+            <td className="ofv-data-cell ofv-text-center">
               {editable ? (
                 <input
                   type="date"
@@ -539,19 +535,19 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
                   className="w-full h-8 bg-transparent border-0 font-num-kr font-bold text-[13px] text-center outline-none"
                 />
               ) : (
-                <div className="font-num-kr font-bold text-[13px] leading-[1.25] text-center">
+                <div className="ofv-val-center">
                   {formData.examDate || ''}
                 </div>
               )}
             </td>
-            <td className="bg-[#f2f2f2] font-bold text-center p-1.5 border border-black text-[12px]">
+            <td className="ofv-label-cell ofv-label-sm">
               회&nbsp;&nbsp;&nbsp;&nbsp;차
               <br />
-              <span className="text-[10px] font-normal text-slate-600 font-sans">
+              <span className="ofv-sub-note">
                 (Test Held)
               </span>
             </td>
-            <td className="p-1 border border-black text-center">
+            <td className="ofv-data-cell ofv-text-center">
               {editable ? (
                 <div className="flex items-center justify-center gap-1">
                   <input
@@ -566,7 +562,7 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
                   <span className="font-bold">회</span>
                 </div>
               ) : (
-                <div className="font-serif font-bold text-[13.5px] leading-[1.25] text-center">
+                <div className="ofv-val-round">
                   {formData.round ? (
                     <>
                       제 <span className="font-num-kr">{formData.round}</span> 회
@@ -579,15 +575,15 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
             </td>
           </tr>
 
-          <tr className="border-b-2 border-black">
-            <td className="bg-[#f2f2f2] font-bold text-center p-1.5 border border-black text-[12px]">
+          <tr className="ofv-tr-bottom">
+            <td className="ofv-label-cell ofv-label-sm">
               성적유효기간
               <br />
-              <span className="text-[10px] font-normal text-slate-600 font-sans">
+              <span className="ofv-sub-note">
                 (Valid Until)
               </span>
             </td>
-            <td className="p-1 border border-black text-center">
+            <td className="ofv-data-cell ofv-text-center">
               {editable ? (
                 <input
                   type="date"
@@ -596,19 +592,19 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
                   className="w-full h-8 bg-transparent border-0 font-num-kr font-bold text-[13px] text-center outline-none"
                 />
               ) : (
-                <div className="font-num-kr font-bold text-[13px] leading-[1.25] text-center text-rose-700">
+                <div className="ofv-val-valid">
                   {formData.validUntil || ''}
                 </div>
               )}
             </td>
-            <td className="bg-[#f2f2f2] font-bold text-center p-1.5 border border-black text-[12px]">
+            <td className="ofv-label-cell ofv-label-sm">
               등&nbsp;&nbsp;&nbsp;&nbsp;급
               <br />
-              <span className="text-[10px] font-normal text-slate-600 font-sans">
+              <span className="ofv-sub-note">
                 (Grade)
               </span>
             </td>
-            <td className="p-1 border border-black text-center">
+            <td className="ofv-data-cell ofv-text-center">
               {editable ? (
                 <select
                   value={formData.grade}
@@ -624,7 +620,7 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
                   <option value="6급">6급 (Level 6)</option>
                 </select>
               ) : (
-                <div className="font-serif font-bold text-[14px] leading-[1.25] text-center text-emerald-800">
+                <div className="ofv-val-grade">
                   {renderWithNotoSansNumbers(formData.grade || '0급')}
                 </div>
               )}
@@ -632,8 +628,8 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
           </tr>
 
           {/* Block 4: 해외 한국어 교육기관 이수증 사항 (결혼이민자 전용) */}
-          <tr className="border-t-2 border-b-2 border-black">
-            <td className="bg-[#f2f2f2] font-bold text-center align-middle p-2 border border-black text-[11.5px] leading-tight">
+          <tr className="ofv-tr-top ofv-tr-bottom">
+            <td className="ofv-label-cell ofv-label-inst-block">
               법무부 지정
               <br />
               해외 한국어
@@ -642,9 +638,9 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
               <br />
               이수증 사항
             </td>
-            <td colSpan={2} className="p-2 border border-black align-middle text-center">
+            <td colSpan={2} className="ofv-data-cell ofv-text-center">
               <div>
-                <div className="font-bold text-[11.5px] mb-1 leading-[1.25]">교육기관명</div>
+                <div className="ofv-inst-title">교육기관명</div>
                 {editable ? (
                   <input
                     type="text"
@@ -654,18 +650,18 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
                     placeholder="해당 시 기재"
                   />
                 ) : (
-                  <div className="font-serif text-[12px] min-h-[18px] leading-[1.25] text-center text-slate-800">
+                  <div className="ofv-inst-val">
                     {renderWithNotoSansNumbers(formData.instituteName || '-')}
                   </div>
                 )}
-                <div className="text-[10px] text-slate-500 mt-1 font-sans leading-[1.25]">
+                <div className="ofv-inst-note">
                   ※ 결혼이민사증 2단계 연계자만 작성
                 </div>
               </div>
             </td>
-            <td colSpan={2} className="p-2 border border-black align-middle text-center">
+            <td colSpan={2} className="ofv-data-cell ofv-text-center">
               <div>
-                <div className="font-bold text-[11.5px] mb-1 leading-[1.25]">이수일자</div>
+                <div className="ofv-inst-title">이수일자</div>
                 {editable ? (
                   <input
                     type="date"
@@ -674,7 +670,7 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
                     className="w-full h-7 text-center bg-transparent border-b border-slate-300 font-num-kr text-[12px] outline-none"
                   />
                 ) : (
-                  <div className="font-num-kr text-[12px] min-h-[18px] leading-[1.25] text-center text-slate-800">
+                  <div className="ofv-inst-val font-num-kr">
                     {formData.completionDate || '-'}
                   </div>
                 )}
@@ -687,10 +683,10 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
       {/* Official Socinet Linkage Verification Box (CSS Flexbox & Grid Input Boxes) */}
       <div className="official-socinet-box font-sans">
         <div className="official-socinet-header">
-          <span className="font-medium font-serif text-[9.5px] text-slate-700">
+          <span className="official-socinet-header-title">
             ※ 사회통합정보망(Socinet) 계정 정보 (연계 접수 확인용)
           </span>
-          <span className="text-[8.5px] text-slate-500 font-normal tracking-wide">
+          <span className="official-socinet-url">
             www.socinet.go.kr
           </span>
         </div>
@@ -743,22 +739,22 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
       </div>
 
       {/* Official Declaration Block */}
-      <div className="text-center my-4 text-[13.5px] leading-relaxed font-bold font-serif">
+      <div className="ofv-declaration">
         <p>나는 위에 기재한 사항이 사실과 틀림없음을 서약하고,</p>
         <p>사회통합프로그램 연계를 신청합니다.</p>
       </div>
 
       {/* Privacy Consent Box */}
-      <div className="bg-[#fbfbfb] border-t-[1.5px] border-b border-black p-2.5 text-[11px] leading-snug font-serif">
+      <div className="ofv-privacy">
         <div className="official-consent-row">
           <span className="official-consent-text">
             o 상기 본인은 사회통합프로그램 연계 신청을 위한 개인정보 이용에 동의합니다.
           </span>
           <div className="official-consent-options">
             <span className="official-consent-option">
-              <span className="official-checkbox-box inline-flex items-center justify-center w-3 h-3 border-[1.25px] border-black bg-white shrink-0">
+              <span className="ofv-checkbox-box ofv-checkbox-box-sm">
                 {formData.consent === 'agree' && (
-                  <svg viewBox="0 0 12 12" className="w-2.5 h-2.5 stroke-black" fill="none" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg viewBox="0 0 12 12" width="10" height="10" stroke="#000000" fill="none" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                     <polyline points="2.2,6.2 5,9 9.8,3" />
                   </svg>
                 )}
@@ -766,9 +762,9 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
               <span>동의함</span>
             </span>
             <span className="official-consent-option">
-              <span className="official-checkbox-box inline-flex items-center justify-center w-3 h-3 border-[1.25px] border-black bg-white shrink-0">
+              <span className="ofv-checkbox-box ofv-checkbox-box-sm">
                 {formData.consent === 'disagree' && (
-                  <svg viewBox="0 0 12 12" className="w-2.5 h-2.5 stroke-black" fill="none" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                  <svg viewBox="0 0 12 12" width="10" height="10" stroke="#000000" fill="none" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
                     <polyline points="2.2,6.2 5,9 9.8,3" />
                   </svg>
                 )}
@@ -777,26 +773,26 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
             </span>
           </div>
         </div>
-        <p className="text-[10.5px] text-slate-700 pl-2">
+        <p className="ofv-privacy-bullet">
           • 이용·보유기간 : 제공일로부터 <span className="font-num-kr">5</span>년(보유기간 경과 시 즉각 폐기) - 개인정보보호법 제<span className="font-num-kr">15</span>조 및 제<span className="font-num-kr">24</span>조 의거
         </p>
-        <p className="text-[10.5px] text-slate-700 pl-2">
+        <p className="ofv-privacy-bullet">
           • 거부시 불이익 조치 : 개인정보이용제공 부동의 시 본 연계 신청 불가
         </p>
       </div>
 
       {/* Warning Box */}
-      <div className="border-b-[1.5px] border-black p-2 bg-white text-[10.5px] text-slate-800 leading-normal font-serif">
+      <div className="ofv-warning">
         <p>
           ※ 신청서에 허위사실을 기재하거나 허위의 한국어능력시험 성적증명서 또는 이수증(수료증)을 제출하였을 경우 당해 연계 신청 및 승인된 후 수료한 모든 사회통합프로그램 과정이 무효가 되며 이와 관련하여 처벌받을 수 있음
         </p>
       </div>
 
       {/* Footer with Date, Applicant Name, Signature Stamp & Office Destination */}
-      <div className="mt-4 flex flex-col font-serif">
-        <div className="ml-auto mr-4 mb-5 text-right space-y-2">
+      <div className="ofv-footer">
+        <div className="ofv-footer-right">
           {/* Application Date: Auto-detected current date with manual editing */}
-          <div className="flex items-center justify-end gap-1.5 text-[12.5px] font-bold">
+          <div className="ofv-date-row">
             <span>신청일자&nbsp;:&nbsp;&nbsp;</span>
             {editable ? (
               <>
@@ -880,12 +876,12 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
           </div>
 
           {/* Applicant Name & Signature Stamp */}
-          <div className="relative flex items-center justify-end gap-2 text-[12.5px] pt-1">
-            <span className="font-bold">신&nbsp;청&nbsp;자&nbsp;:&nbsp;&nbsp;</span>
-            <span className="font-bold tracking-wider text-[13px] text-black">
+          <div className="ofv-applicant-row">
+            <span className="ofv-applicant-label">신&nbsp;청&nbsp;자&nbsp;:&nbsp;&nbsp;</span>
+            <span className="ofv-applicant-name">
               {formData.applicantName || formData.name || ''}
             </span>
-            <span className="text-[11px] text-slate-600 font-normal">
+            <span className="ofv-seal-hint">
               (서명 또는 인)
             </span>
 
@@ -898,13 +894,11 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
                 readOnly={!onSigSettingsChange}
               />
             )}
-
-
           </div>
         </div>
 
         {/* Dynamic Chief Designation */}
-        <p className="text-[14px] font-bold text-left mt-3 tracking-wide">
+        <p className="ofv-chief">
           {getOfficeChiefTitle()}
         </p>
       </div>

@@ -45,23 +45,17 @@ export const WatermarkOverlay: React.FC<WatermarkOverlayProps> = ({
   }
 
   return (
-    <div 
-      className="absolute inset-0 z-30 pointer-events-none overflow-hidden select-none"
+    <div
+      className="wm-form-root"
       style={{ userSelect: 'none' }}
     >
       {/* 1. Subtle Repeated Diagonal Watermark Background Grid */}
       {showRepeatedBackground && (
-        <div className="absolute inset-0 flex flex-col justify-between py-8 opacity-15 overflow-hidden">
+        <div className="wm-grid">
           {Array.from({ length: 8 }).map((_, rowIdx) => (
-            <div 
-              key={rowIdx} 
-              className="flex justify-around items-center whitespace-nowrap transform -rotate-30 scale-110"
-            >
+            <div key={rowIdx} className="wm-grid-row">
               {Array.from({ length: 4 }).map((_, colIdx) => (
-                <span 
-                  key={colIdx} 
-                  className="text-red-700 font-extrabold text-[15px] tracking-[4px] mx-6 uppercase font-mono"
-                >
+                <span key={colIdx} className="wm-grid-text">
                   {t.watermarkUnpaidGrid}
                 </span>
               ))}
@@ -71,47 +65,47 @@ export const WatermarkOverlay: React.FC<WatermarkOverlayProps> = ({
       )}
 
       {/* 2. Top-Right Official Seal / Watermark Badge */}
-      <div className="absolute top-6 right-6 transform rotate-6 border-3 border-dashed border-red-600/80 rounded-xl p-2.5 bg-red-50/75 backdrop-blur-2xs shadow-md max-w-[210px] text-center">
-        <div className="flex items-center justify-center gap-1 text-red-700 font-black text-[12px] tracking-wider">
-          <ShieldAlert className="w-4 h-4 text-red-600" />
+      <div className="wm-badge">
+        <div className="wm-badge-header">
+          <ShieldAlert style={{ width: '16px', height: '16px', color: '#dc2626', flexShrink: 0 }} />
           <span>REJECTION COPY</span>
         </div>
-        <p className="text-[9px] font-bold text-red-800 font-serif mt-0.5 leading-tight">
+        <p className="wm-badge-ko">
           출입국 제출불가 (심사용 미결제본)
         </p>
-        <p className="text-[8.5px] font-medium text-slate-700 mt-0.5">
+        <p className="wm-badge-sub">
           {t.watermarkBadgeSub}
         </p>
       </div>
 
       {/* 3. Center Huge Diagonal Official REJECTION Stamp */}
-      <div className="absolute inset-0 flex items-center justify-center">
-        <div className="transform -rotate-28 -translate-y-4 flex flex-col items-center justify-center">
-          <div className="border-[6px] border-red-600/85 rounded-3xl px-8 sm:px-14 py-4 sm:py-6 bg-red-500/10 backdrop-blur-[0.5px] shadow-2xl flex flex-col items-center text-center">
+      <div className="wm-center-wrap">
+        <div className="wm-center-tilt">
+          <div className="wm-center-box">
             {/* Header Stamp text */}
-            <div className="flex items-center gap-2 text-red-700 text-xs sm:text-sm font-extrabold tracking-[4px] uppercase mb-1">
-              <AlertTriangle className="w-4 h-4 sm:w-5 sm:h-5 text-red-600 animate-pulse" />
+            <div className="wm-center-kicker">
+              <AlertTriangle style={{ width: '18px', height: '18px', color: '#dc2626', flexShrink: 0 }} />
               <span>OFFICIAL SAMPLE DOCUMENT</span>
-              <AlertTriangle className="w-4 h-4 sm:w-5 sm:h-5 text-red-600 animate-pulse" />
+              <AlertTriangle style={{ width: '18px', height: '18px', color: '#dc2626', flexShrink: 0 }} />
             </div>
 
             {/* Giant Rejection Title */}
-            <h1 className="text-red-600 font-black text-5xl sm:text-7xl tracking-[8px] sm:tracking-[14px] uppercase leading-none drop-shadow-xs font-sans">
+            <h1 className="wm-center-title">
               {text}
             </h1>
 
             {/* Subtitle Description */}
-            <div className="mt-2 text-center">
-              <p className="text-red-800 font-extrabold text-xs sm:text-sm tracking-wide font-serif">
+            <div className="wm-center-sub">
+              <p className="wm-center-sub-main">
                 {displaySubText}
               </p>
-              <p className="text-[10px] sm:text-[11px] font-bold text-red-700 mt-1 uppercase tracking-wider font-mono">
+              <p className="wm-center-sub-en">
                 NOT VALID FOR SUBMISSION • UNLOCK CLEAN COPY VIA PAYMENT
               </p>
             </div>
 
             {/* Security Code Line */}
-            <div className="mt-2 pt-1.5 border-t border-red-500/40 w-full flex items-center justify-between text-[9px] text-red-700/90 font-mono">
+            <div className="wm-center-meta">
               <span>SECURITY ID: REJ-7492-UNPAID</span>
               <span>{t.watermarkCleanPriceText}</span>
             </div>
@@ -129,8 +123,8 @@ export const WatermarkOverlay: React.FC<WatermarkOverlayProps> = ({
               >
                 <Unlock className="w-4 h-4 text-amber-200" />
                 <span>
-                  {lang === "km" 
-                    ? "🔓 ចុចត្រង់នេះដើម្បីដោះសោត្រាផ្លូវការ (Seal Unlock Form)" 
+                  {lang === "km"
+                    ? "🔓 ចុចត្រង់នេះដើម្បីដោះសោត្រាផ្លូវការ (Seal Unlock Form)"
                     : lang === "ko"
                     ? "🔓 직인 날인 및 반려본 잠금 해제 (Seal Unlock)"
                     : "🔓 Click to Apply Official Seal Unlock"}
@@ -142,8 +136,8 @@ export const WatermarkOverlay: React.FC<WatermarkOverlayProps> = ({
       </div>
 
       {/* 4. Bottom Prominent Security Warning Strip */}
-      <div className="absolute bottom-4 left-4 right-4 bg-red-600/90 text-white px-4 py-2 rounded-lg text-center shadow-lg border border-red-700">
-        <p className="text-[11px] font-bold tracking-wide">
+      <div className="wm-bottom-strip">
+        <p className="wm-bottom-text">
           {t.watermarkBanner}
         </p>
       </div>

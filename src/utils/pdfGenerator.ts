@@ -1,4 +1,5 @@
 import jsPDF from 'jspdf';
+import html2canvas from 'html2canvas';
 import { PDFDocument } from 'pdf-lib';
 import {
   UploadedDocuments,
@@ -8,6 +9,7 @@ import {
 import { mergeArcFrontAndBack } from './imageUtils';
 import { findOfficeByAddress } from '../data/immigrationOffices';
 import { normalizeDocVerificationNo } from './sanitizers';
+import { OFFICIAL_FORM_PURE_CSS } from './officialFormCss';
 
 export interface GeneratePdfOptions {
   formElement?: HTMLElement | null;
@@ -124,23 +126,183 @@ async function loadImageElement(src: string): Promise<HTMLImageElement | null> {
   });
 }
 
-async function ensureFormFontsLoaded(): Promise<void> {
+async function ensureFormFontsLoaded(sampleText = ''): Promise<void> {
   if (typeof document === 'undefined' || !document.fonts) return;
+  const baseSample =
+    '사회통합프로그램연계신청서신청대상외국인등록번호체류지성명문서확인번호수험번호성적유효기간개인정보이용동의출입국외국인청사무소장귀하남자여자인' +
+    sampleText;
   try {
     await Promise.race([
       Promise.allSettled([
         document.fonts.ready,
-        document.fonts.load('400 13px "Noto Serif KR"'),
-        document.fonts.load('700 13px "Noto Serif KR"'),
-        document.fonts.load('700 23px "Noto Serif KR"'),
-        document.fonts.load('400 11px "Noto Sans KR"'),
-        document.fonts.load('600 11px "Noto Sans KR"'),
+        document.fonts.load('400 13px "Noto Serif KR"', baseSample),
+        document.fonts.load('700 13px "Noto Serif KR"', baseSample),
+        document.fonts.load('700 23px "Noto Serif KR"', baseSample),
+        document.fonts.load('400 11px "Noto Sans KR"', baseSample),
+        document.fonts.load('600 11px "Noto Sans KR"', baseSample),
       ]),
       new Promise((resolve) => setTimeout(resolve, 1500)),
     ]);
   } catch {
     // Gracefully fall back to system Korean fonts
   }
+}
+
+async function waitForImagesInElement(el: HTMLElement): Promise<void> {
+  const imgs = Array.from(el.querySelectorAll('img'));
+  if (imgs.length === 0) return;
+  await Promise.race([
+    Promise.allSettled(
+      imgs.map(async (img) => {
+        if (!img.complete) {
+          await new Promise<void>((res) => {
+            const onDone = () => res();
+            img.addEventListener('load', onDone, { once: true });
+            img.addEventListener('error', onDone, { once: true });
+          });
+        }
+        if (typeof img.decode === 'function') {
+          try {
+            await img.decode();
+          } catch {
+            // Ignore decode errors on non-standard data URLs
+          }
+        }
+      })
+    ),
+    new Promise((resolve) => setTimeout(resolve, 3000)),
+  ]);
+}
+
+/**
+ * Captures the actual OfficialFormView DOM element via html2canvas inside an isolated clone
+ * with all Tailwind v4 stylesheets stripped and pure classic sRGB CSS injected,
+ * guaranteeing 100% visual parity with the on-screen Form Preview across Desktop, iOS, and Android.
+ */
+async function captureFormDomToCanvas(
+  formElement: HTMLElement,
+  formData: ApplicationFormData
+): Promise<HTMLCanvasElement> {
+  const extraSample = `${formData.name || ''}${formData.address || ''}${formData.instituteName || ''}${formData.applicantName || ''}`;
+  await ensureFormFontsLoaded(extraSample);
+  await waitForImagesInElement(formElement);
+
+  const canvas = await html2canvas(formElement, {
+    scale: 2,
+    useCORS: true,
+    allowTaint: false,
+    backgroundColor: '#ffffff',
+    logging: false,
+    scrollX: 0,
+    scrollY: 0,
+    windowWidth: 900,
+    windowHeight: 1300,
+    imageTimeout: 15000,
+    onclone: (clonedDoc, clonedElement) => {
+      // 1. Strip ALL existing stylesheets except Google Fonts so zero Tailwind v4
+      //    oklch / color-mix / @property / backdrop-blur constructs enter html2canvas's parser.
+      const styleNodes = clonedDoc.querySelectorAll('style, link[rel="stylesheet"]');
+      styleNodes.forEach((node) => {
+        if (node.tagName === 'LINK') {
+          const href = (node as HTMLLinkElement).href || node.getAttribute('href') || '';
+          if (href.includes('fonts.googleapis.com')) {
+            return;
+          }
+        }
+        node.parentNode?.removeChild(node);
+      });
+
+      // 2. Inject 100% pure classic sRGB CSS for OfficialFormView, WatermarkOverlay & Signature
+      const pureStyle = clonedDoc.createElement('style');
+      pureStyle.id = 'pdf-pure-css';
+      pureStyle.textContent = OFFICIAL_FORM_PURE_CSS;
+      clonedDoc.head.appendChild(pureStyle);
+
+      // 3. Isolate capture element and reset document/body & ancestor layout geometry
+      clonedDoc.documentElement.style.cssText =
+        'margin: 0; padding: 0; width: 794px; min-height: 1123px; background-color: #ffffff; overflow: visible; transform: none;';
+      clonedDoc.body.style.cssText =
+        'margin: 0; padding: 0; width: 794px; min-height: 1123px; background-color: #ffffff; color: #000000; overflow: visible; transform: none;';
+
+      // Find the direct child of body containing clonedElement
+      let rootChild: HTMLElement | null = clonedElement;
+      while (rootChild && rootChild.parentElement && rootChild.parentElement !== clonedDoc.body) {
+        rootChild = rootChild.parentElement;
+      }
+
+      // Hide all sibling direct children of body
+      Array.from(clonedDoc.body.children).forEach((child) => {
+        const el = child as HTMLElement;
+        if (el !== rootChild && !['STYLE', 'LINK', 'SCRIPT'].includes(el.tagName)) {
+          el.style.setProperty('display', 'none', 'important');
+        }
+      });
+
+      // Reset styles along ancestor chain from clonedElement up to rootChild
+      let cursor: HTMLElement | null = clonedElement.parentElement;
+      while (cursor && cursor !== clonedDoc.body) {
+        cursor.style.cssText =
+          'position: relative; left: 0; top: 0; right: auto; bottom: auto; margin: 0; padding: 0; width: 794px; height: auto; min-height: 1123px; display: block; visibility: visible; opacity: 1; transform: none; z-index: 1; background-color: #ffffff; overflow: visible;';
+        cursor = cursor.parentElement;
+      }
+
+      // Force crisp A4 pixel dimensions on the sheet itself
+      clonedElement.style.display = 'block';
+      clonedElement.style.position = 'relative';
+      clonedElement.style.width = '794px';
+      clonedElement.style.minHeight = '1123px';
+      clonedElement.style.padding = '49px 53px 45px 53px';
+      clonedElement.style.margin = '0';
+      clonedElement.style.boxShadow = 'none';
+      clonedElement.style.transform = 'none';
+      clonedElement.style.backgroundColor = '#ffffff';
+      clonedElement.style.color = '#000000';
+    },
+  });
+
+  if (!canvas || canvas.width < 200 || canvas.height < 200) {
+    throw new Error('Captured form canvas has invalid dimensions');
+  }
+
+  return canvas;
+}
+
+async function resolvePage1Canvas({
+  formElement,
+  formData,
+  docs,
+  sigSettings,
+  showWatermark,
+}: GeneratePdfOptions): Promise<HTMLCanvasElement> {
+  if (formElement) {
+    try {
+      return await captureFormDomToCanvas(formElement, formData);
+    } catch (err) {
+      console.warn('DOM form capture fell back to Canvas 2D renderer:', err);
+    }
+  }
+  return await renderOfficialFormToCanvas({
+    formData,
+    docs,
+    sigSettings,
+    showWatermark,
+  });
+}
+
+function addFormCanvasToA4Pdf(pdf: jsPDF, canvas: HTMLCanvasElement): void {
+  const imgData = canvas.toDataURL('image/jpeg', 0.96);
+  const pageW = 210;
+  const pageH = 297;
+  const imgAspect = canvas.height / canvas.width;
+
+  let renderW = pageW;
+  let renderH = pageW * imgAspect;
+  if (renderH > pageH) {
+    renderH = pageH;
+    renderW = pageH / imgAspect;
+  }
+  const offsetX = (pageW - renderW) / 2;
+  pdf.addImage(imgData, 'JPEG', offsetX, 0, renderW, renderH, undefined, 'FAST');
 }
 
 function getOfficeChiefTitle(address?: string): string {
@@ -1385,6 +1547,7 @@ async function renderAttachmentImageToA4DataUrl(
  * Page 4+: 여권 (Passport pages, if uploaded)
  */
 export async function generateMergedPdf({
+  formElement,
   docs,
   formData,
   sigSettings,
@@ -1393,15 +1556,15 @@ export async function generateMergedPdf({
   const mergedPdfDoc = await PDFDocument.create();
 
   // ==========================================
-  // PAGE 1: 사회통합프로그램 연계 신청서 Template (Direct High-DPI Canvas 2D)
+  // PAGE 1: 사회통합프로그램 연계 신청서 Template (DOM Preview Capture w/ Canvas 2D Fallback)
   // ==========================================
-  const formCanvas = await renderOfficialFormToCanvas({
+  const formCanvas = await resolvePage1Canvas({
+    formElement,
     formData,
     docs,
     sigSettings,
     showWatermark,
   });
-  const formImgData = formCanvas.toDataURL('image/jpeg', 0.96);
 
   const formJsPdf = new jsPDF({
     orientation: 'portrait',
@@ -1409,7 +1572,7 @@ export async function generateMergedPdf({
     format: 'a4',
     compress: true,
   });
-  formJsPdf.addImage(formImgData, 'JPEG', 0, 0, 210, 297, undefined, 'FAST');
+  addFormCanvasToA4Pdf(formJsPdf, formCanvas);
 
   const formPdfBytes = formJsPdf.output('arraybuffer');
   const formPdfDoc = await PDFDocument.load(formPdfBytes);
@@ -1592,11 +1755,13 @@ export async function generateMergedPdf({
  * Generates a single-page high-resolution PDF of only the official application form template
  */
 export async function generateSingleFormPdf({
+  formElement,
   formData,
   docs,
   sigSettings,
   showWatermark = false,
 }: {
+  formElement?: HTMLElement | null;
   formData: ApplicationFormData;
   docs: UploadedDocuments;
   sigSettings?: SignatureSettings;
@@ -1609,14 +1774,14 @@ export async function generateSingleFormPdf({
     compress: true,
   });
 
-  const formCanvas = await renderOfficialFormToCanvas({
+  const formCanvas = await resolvePage1Canvas({
+    formElement,
     formData,
     docs,
     sigSettings,
     showWatermark,
   });
-  const formImgData = formCanvas.toDataURL('image/jpeg', 0.96);
-  pdf.addImage(formImgData, 'JPEG', 0, 0, 210, 297, undefined, 'FAST');
+  addFormCanvasToA4Pdf(pdf, formCanvas);
   return pdf;
 }
 

@@ -127,8 +127,8 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
 
   // Local fallback ref in case external ref was not attached
   const localFormRef = useRef<HTMLDivElement | null>(null);
-
-
+  // Dedicated pristine unscaled A4 capture ref mounted only during PDF export
+  const dedicatedCaptureRef = useRef<HTMLDivElement | null>(null);
 
   // Pre-generate merged ARC front & back preview on mount
   useEffect(() => {
@@ -151,7 +151,16 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
     setStatusNotice(null);
 
     try {
+      // Allow React to mount & paint #pdf-capture-container and decode signature image
+      await new Promise<void>((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 180)))
+      );
+
+      const targetElement =
+        dedicatedCaptureRef.current || formRef.current || localFormRef.current;
+
       const pdf = await generateMergedPdf({
+        formElement: targetElement,
         docs,
         formData,
         sigSettings,
@@ -489,7 +498,37 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
         </span>
       </div>
 
-      {/* PDF Page 1 is rendered deterministically via high-DPI Canvas 2D */}
+      {/* Dedicated Unscaled A4 Form Capture Container (Rendered cleanly behind overlay only while exporting) */}
+      {isGeneratingMerged && (
+        <div
+          id="pdf-capture-container"
+          aria-hidden="true"
+          className="no-print"
+          style={{
+            position: 'fixed',
+            left: '0px',
+            top: '0px',
+            width: '794px',
+            minHeight: '1123px',
+            backgroundColor: '#ffffff',
+            color: '#000000',
+            zIndex: -50,
+            pointerEvents: 'none',
+            opacity: 1,
+            visibility: 'visible',
+          }}
+        >
+          <OfficialFormView
+            containerRef={dedicatedCaptureRef}
+            formData={formData}
+            signatureUrl={docs.signature}
+            sigSettings={sigSettings}
+            editable={false}
+            lang={lang}
+            showWatermark={!isPaid}
+          />
+        </div>
+      )}
 
       {/* Full-screen Loading Overlay during PDF Generation */}
       {isGeneratingMerged && (

@@ -197,7 +197,7 @@ export const InteractiveSignatureOverlay: React.FC<InteractiveSignatureOverlayPr
   return (
     <div
       ref={containerRef}
-      className="absolute select-none group touch-none"
+      className={readOnly ? 'sig-overlay-wrapper' : 'absolute select-none group touch-none'}
       style={{
         right: '12px',
         top: '-16px',
@@ -326,17 +326,19 @@ export const InteractiveSignatureOverlay: React.FC<InteractiveSignatureOverlayPr
 
       {/* Main Interactive Signature Frame */}
       <div
-        className={`relative transition-all rounded-lg p-1.5 touch-none ${
+        className={
           readOnly
-            ? 'pointer-events-none'
-            : isDragging
-            ? 'cursor-grabbing border-2 border-dashed border-blue-500 bg-blue-500/10 shadow-lg ring-4 ring-blue-500/20'
-            : isResizing
-            ? 'cursor-nwse-resize border-2 border-dashed border-indigo-500 bg-indigo-500/10 shadow-lg ring-4 ring-indigo-500/20'
-            : isHovered || isSelected
-            ? 'cursor-grab border-2 border-dashed border-blue-500/80 bg-blue-50/20 shadow-md ring-2 ring-blue-400/20'
-            : 'border border-blue-400/40 hover:border-blue-500 cursor-grab bg-blue-50/5'
-        }`}
+            ? 'sig-overlay-frame-readonly'
+            : `relative transition-all rounded-lg p-1.5 touch-none ${
+                isDragging
+                  ? 'cursor-grabbing border-2 border-dashed border-blue-500 bg-blue-500/10 shadow-lg ring-4 ring-blue-500/20'
+                  : isResizing
+                  ? 'cursor-nwse-resize border-2 border-dashed border-indigo-500 bg-indigo-500/10 shadow-lg ring-4 ring-indigo-500/20'
+                  : isHovered || isSelected
+                  ? 'cursor-grab border-2 border-dashed border-blue-500/80 bg-blue-50/20 shadow-md ring-2 ring-blue-400/20'
+                  : 'border border-blue-400/40 hover:border-blue-500 cursor-grab bg-blue-50/5'
+              }`
+        }
         onMouseDown={handleDragStart}
         onTouchStart={handleDragStart}
         title={readOnly ? undefined : t.sigDragTooltip}
@@ -346,7 +348,11 @@ export const InteractiveSignatureOverlay: React.FC<InteractiveSignatureOverlayPr
           src={signatureUrl}
           alt="Signature Stamp"
           draggable={false}
-          className={`h-14 max-w-[165px] object-contain select-none pointer-events-none ${readOnly ? '' : 'drop-shadow-xs'}`}
+          className={
+            readOnly
+              ? 'sig-overlay-img'
+              : 'h-14 max-w-[165px] object-contain select-none pointer-events-none drop-shadow-xs'
+          }
         />
 
         {/* Real-time Tooltip Indicator */}
