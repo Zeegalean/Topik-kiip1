@@ -1,5 +1,6 @@
 import dns from 'dns';
 import fs from 'fs';
+import crypto from 'crypto';
 import { execSync } from 'child_process';
 import express from 'express';
 import dotenv from 'dotenv';
@@ -804,6 +805,232 @@ Return ONLY structured JSON according to the schema.
       notice: 'Using client-side OCR engine.',
     });
   }
+});
+
+// --- Payment Session & Strict Redeem Code Endpoints (15-Minute ABA QR Expiry) ---
+const ABA_QR_TTL_MS = 15 * 60 * 1000; // 15 minutes
+const DEFAULT_ABA_PAYWAY_LINK = 'https://link.payway.com.kh/ABAPAYzz552103m';
+
+interface AbaPaymentSession {
+  txId: string;
+  createdAt: number;
+  expiresAt: number;
+  amountUsd: number;
+  amountKrw: number;
+  paywayUrl: string;
+  status: 'pending' | 'paid' | 'expired';
+  referenceNote?: string;
+  paidAt?: number;
+}
+
+const abaSessions = new Map<string, AbaPaymentSession>();
+const usedDynamicRedeemCodes = new Set<string>();
+const MASTER_PROMO_CODES = new Set(['199621147', 'KIIP-199621147', 'PROMO-199621147']);
+
+function pruneOldAbaSessions() {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  for (const [key, sess] of abaSessions.entries()) {
+    if (sess.createdAt < cutoff) {
+      abaSessions.delete(key);
+    }
+  }
+}
+
+function getEffectiveSessionStatus(sess: AbaPaymentSession): AbaPaymentSession {
+  if (sess.status === 'pending' && Date.now() >= sess.expiresAt) {
+    sess.status = 'expired';
+  }
+  return sess;
+}
+
+app.post('/api/payments/aba-session', (req, res) => {
+  pruneOldAbaSessions();
+  const now = Date.now();
+  const randomHex = crypto.randomBytes(3).toString('hex').toUpperCase();
+  const timeSeq = String(now).slice(-5);
+  const txId = `KIIP-${timeSeq}-${randomHex}`;
+  const expiresAt = now + ABA_QR_TTL_MS;
+  const paywayUrl = process.env.ABA_PAYWAY_LINK_URL || DEFAULT_ABA_PAYWAY_LINK;
+  const hasMerchantApi = Boolean(process.env.ABA_PAYWAY_MERCHANT_ID && process.env.ABA_PAYWAY_API_KEY);
+
+  const session: AbaPaymentSession = {
+    txId,
+    createdAt: now,
+    expiresAt,
+    amountUsd: 11.2,
+    amountKrw: 15000,
+    paywayUrl,
+    status: 'pending',
+  };
+  abaSessions.set(txId, session);
+
+  return res.json({
+    success: true,
+    txId,
+    createdAt: now,
+    expiresAt,
+    ttlSeconds: Math.floor(ABA_QR_TTL_MS / 1000),
+    amountUsd: session.amountUsd,
+    amountKrw: session.amountKrw,
+    paywayUrl,
+    hasMerchantApi,
+  });
+});
+
+app.get('/api/payments/aba-status/:txId', (req, res) => {
+  const { txId } = req.params;
+  const session = abaSessions.get(txId);
+  if (!session) {
+    return res.status(404).json({
+      success: false,
+      status: 'expired',
+      secondsLeft: 0,
+      error: 'Payment session not found or expired.',
+    });
+  }
+
+  const effective = getEffectiveSessionStatus(session);
+  const secondsLeft = Math.max(0, Math.ceil((effective.expiresAt - Date.now()) / 1000));
+
+  return res.json({
+    success: true,
+    txId: effective.txId,
+    status: effective.status,
+    secondsLeft,
+    expiresAt: effective.expiresAt,
+    paidAt: effective.paidAt || null,
+  });
+});
+
+// Official ABA PayWay Callback / Webhook receiver
+app.post('/api/payments/aba-callback', (req, res) => {
+  try {
+    const body = req.body || {};
+    const tranId = String(body.tran_id || body.txId || '').trim();
+    const rawStatus = body.status;
+
+    if (!tranId) {
+      return res.status(400).json({ success: false, error: 'Missing tran_id' });
+    }
+
+    // Optional HMAC verification if merchant API key is configured
+    const apiKey = process.env.ABA_PAYWAY_API_KEY;
+    if (apiKey && body.hash && body.req_time && process.env.ABA_PAYWAY_MERCHANT_ID) {
+      const payload = `${body.req_time}${process.env.ABA_PAYWAY_MERCHANT_ID}${tranId}${body.amount || ''}`;
+      const expected = crypto.createHmac('sha512', apiKey).update(payload).digest('base64');
+      if (expected !== body.hash) {
+        return res.status(403).json({ success: false, error: 'Invalid ABA PayWay signature' });
+      }
+    }
+
+    const session = abaSessions.get(tranId);
+    if (!session) {
+      return res.status(404).json({ success: false, error: 'Unknown transaction session' });
+    }
+
+    // ABA PayWay status 0 / "0" indicates Approved
+    if (rawStatus === 0 || rawStatus === '0' || String(rawStatus).toLowerCase() === 'approved') {
+      session.status = 'paid';
+      session.paidAt = Date.now();
+      return res.json({ success: true, status: 'paid', txId: tranId });
+    }
+
+    return res.json({ success: true, status: session.status, txId: tranId });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Callback error' });
+  }
+});
+
+app.post('/api/payments/aba-confirm', (req, res) => {
+  const txId = String(req.body?.txId || '').trim();
+  const referenceNote = String(req.body?.referenceNote || '').trim();
+  const hasMerchantApi = Boolean(process.env.ABA_PAYWAY_MERCHANT_ID && process.env.ABA_PAYWAY_API_KEY);
+
+  const session = abaSessions.get(txId);
+  if (!session) {
+    return res.status(410).json({
+      success: false,
+      code: 'QR_EXPIRED',
+      error: 'QR Code ផុតសុពលភាព ឬមិនត្រឹមត្រូវ។ សូមចុចបង្កើត QR ថ្មី (១៥ នាទី)។',
+    });
+  }
+
+  const effective = getEffectiveSessionStatus(session);
+  if (effective.status === 'paid') {
+    return res.json({ success: true, status: 'paid', txId: effective.txId });
+  }
+
+  if (effective.status === 'expired' || Date.now() >= effective.expiresAt) {
+    effective.status = 'expired';
+    return res.status(410).json({
+      success: false,
+      code: 'QR_EXPIRED',
+      error: 'QR Code នេះផុតសុពលភាព ១៥ នាទីហើយ! សូមចុច "បង្កើត QR ថ្មី" មុនពេលបង់ប្រាក់។',
+    });
+  }
+
+  if (hasMerchantApi) {
+    // When full Merchant API + Webhook is enabled, do not unlock until ABA callback marks it paid
+    return res.status(402).json({
+      success: false,
+      code: 'AWAITING_BANK_CALLBACK',
+      error: 'ប្រព័ន្ធកំពុងរង់ចាំការបញ្ជាក់ការផ្ទេរប្រាក់ពីធនាគារ ABA PayWay។ សូមរង់ចាំបន្តិច...',
+    });
+  }
+
+  // In PayWay Payment Link mode, require a receipt reference note / sender name within the 15-minute window
+  if (referenceNote.length < 3) {
+    return res.status(400).json({
+      success: false,
+      code: 'MISSING_REFERENCE',
+      error: 'សូមបញ្ចូលឈ្មោះគណនីដែលបានបាញ់ប្រាក់ ឬលេខយោងវិក្កយបត្រ ABA (យ៉ាងតិច ៣ តួអក្សរ)។',
+    });
+  }
+
+  effective.status = 'paid';
+  effective.referenceNote = referenceNote;
+  effective.paidAt = Date.now();
+  return res.json({
+    success: true,
+    status: 'paid',
+    txId: effective.txId,
+    referenceNote,
+  });
+});
+
+app.post('/api/payments/verify-redeem', (req, res) => {
+  const rawCode = String(req.body?.code || '').trim().toUpperCase();
+  if (!rawCode) {
+    return res.status(400).json({
+      success: false,
+      error: 'សូមបញ្ចូលលេខកូដ Promo / Redeem Code!',
+    });
+  }
+
+  if (MASTER_PROMO_CODES.has(rawCode)) {
+    return res.json({ success: true, type: 'promo' });
+  }
+
+  const envCodes = (process.env.REDEEM_CODES || '')
+    .split(',')
+    .map((c) => c.trim().toUpperCase())
+    .filter(Boolean);
+
+  if (envCodes.includes(rawCode)) {
+    if (usedDynamicRedeemCodes.has(rawCode)) {
+      return res.status(409).json({
+        success: false,
+        error: 'លេខកូដនេះត្រូវបានប្រើប្រាស់រួចហើយ!',
+      });
+    }
+    usedDynamicRedeemCodes.add(rawCode);
+    return res.json({ success: true, type: 'redeem' });
+  }
+
+  return res.status(400).json({
+    success: false,
+    error: 'លេខកូដមិនត្រឹមត្រូវ ឬផុតកំណត់! សូមពិនិត្យម្តងទៀត ឬបង់ប្រាក់តាម ABA PayWay។',
+  });
 });
 
 // Setup Vite middleware in dev or static files in production

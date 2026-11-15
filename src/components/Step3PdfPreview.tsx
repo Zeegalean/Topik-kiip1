@@ -104,9 +104,35 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
   const [promoCodeInput, setPromoCodeInput] = useState('');
   const [promoCodeMsg, setPromoCodeMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
-  const handlePromoUnlock = (overrideCode?: string) => {
+  const handlePromoUnlock = async (overrideCode?: string) => {
     const raw = (overrideCode || promoCodeInput).trim().toUpperCase();
-    if (raw === '199621147' || raw === 'KIIP-199621147' || raw === 'PROMO-199621147') {
+    if (!raw) {
+      setPromoCodeMsg({
+        type: 'error',
+        text: 'សូមបញ្ចូលលេខកូដ Promo Code!',
+      });
+      return;
+    }
+
+    let isValid = raw === '199621147' || raw === 'KIIP-199621147' || raw === 'PROMO-199621147';
+
+    if (!isValid) {
+      try {
+        const resp = await fetch('/api/payments/verify-redeem', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ code: raw }),
+        });
+        if (resp.ok) {
+          const data = await resp.json();
+          if (data?.success) isValid = true;
+        }
+      } catch {
+        // Fallback when running static/offline
+      }
+    }
+
+    if (isValid) {
       try {
         localStorage.setItem('kiip_doc_paid_v3', 'true');
         localStorage.setItem('kiip_promo_199621147', 'true');
