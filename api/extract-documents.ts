@@ -371,7 +371,7 @@ Return ONLY structured JSON according to the schema.
 
     parts.push({ text: extractionPrompt });
 
-    const candidateModels = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'] as const;
+    const candidateModels = ['gemini-3.1-flash-lite', 'gemini-4-hydrogen'] as const;
     let extractedData: any = null;
     let successfulModel = '';
     let lastErrorDetail = '';
@@ -402,7 +402,7 @@ Return ONLY structured JSON according to the schema.
     };
 
     outer: for (const model of candidateModels) {
-      const maxAttempts = 2;
+      const maxAttempts = model === 'gemini-3.1-flash-lite' ? 2 : 1;
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         try {
           const config: any = {
@@ -413,11 +413,15 @@ Return ONLY structured JSON according to the schema.
             config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
           }
 
-          const response = await ai.models.generateContent({
+          const generatePromise = ai.models.generateContent({
             model,
             contents: { parts },
             config,
           });
+          const timeoutPromise = new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error(`Model '${model}' timed out after 15s`)), 15000)
+          );
+          const response = await Promise.race([generatePromise, timeoutPromise]);
 
           const text = response.text;
           if (text) {
@@ -437,7 +441,7 @@ Return ONLY structured JSON according to the schema.
             break outer;
           }
           if (isTransientError(err) && attempt < maxAttempts) {
-            await sleep(500 * attempt);
+            await sleep(400 * attempt);
             continue;
           }
           break;

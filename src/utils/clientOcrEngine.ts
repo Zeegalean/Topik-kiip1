@@ -457,9 +457,11 @@ export function extractKoreanAddressFromText(rawCorpus: string): string | null {
 }
 
 /**
- * Helper to clean and validate candidate name words
+ * Helper to clean and validate candidate name words.
+ * When requireLongWord is true (used for unlabeled fallback lines), requires at least one word >= 4 letters
+ * so short 2-3 letter OCR noise pairs like "MIM FIN" are rejected.
  */
-function filterValidNameWords(rawPhrase: string): string | null {
+function filterValidNameWords(rawPhrase: string, requireLongWord: boolean = false): string | null {
   const cleaned = rawPhrase
     .toUpperCase()
     .replace(/[^A-Z\s]/g, ' ')
@@ -473,8 +475,8 @@ function filterValidNameWords(rawPhrase: string): string | null {
     .filter((w) => w.length >= 2 && !NON_NAME_WORDS.has(w));
 
   if (words.length >= 2 && words.length <= 4) {
-    // Ensure at least one word has >= 3 letters (avoids 2-letter OCR noise like "OI GU")
-    if (words.some((w) => w.length >= 3)) {
+    const minNeeded = requireLongWord ? 4 : 3;
+    if (words.some((w) => w.length >= minNeeded)) {
       return words.join(' ');
     }
   }
@@ -526,20 +528,16 @@ function findArcRegNumberInText(text: string): { reg1: string; reg2: string; mat
 }
 
 /**
- * Extract applicant's English uppercase name from OCR text (ARC / Passport MRZ / TOPIK)
+ * Tier 1: Extract name from Passport MRZ line 1 (P<KHMSURNAME<<GIVENNAME)
  */
-export function extractApplicantNameFromText(textCorpus: string): string | null {
+function extractMrzNameFromText(textCorpus: string): string | null {
   if (!textCorpus) return null;
-
-  // 1. Check Passport MRZ line 1: P<KHMSURNAME<<GIVENNAME<<<<<< or PNKHMSURNAME<<GIVENNAME<<<<<<
-  // Handles Cambodian biometric passports ('PNKHM') as well as standard 'P<KHM', and Tesseract '<' misreads
   const upperCorpus = textCorpus.toUpperCase();
   const mrzLineMatch = upperCorpus.match(
     /P[A-Z0-9<«(\s]{0,2}(?:KHM|VNM|NPL|UZB|MMR|THA|IDN|PHL|CHN|MNG|LKA|BGD|PAK|IND|KAZ|KGZ|TLS|LAO)([A-Z0-9<«\s]{5,42})/
   );
   if (mrzLineMatch) {
     const rawMrzTail = mrzLineMatch[1].replace(/«/g, '<').trim();
-    // Split on double-chevron filler (<<) or Tesseract misreads of << (>=2 of <, C, K, L only when separated clearly)
     const parts = rawMrzTail
       .split(/<{2,}/)
       .map((s) => s.replace(/</g, ' ').replace(/\b[CKL]{3,}\b/g, ' ').replace(/[CKL]{4,}$/g, '').trim())
@@ -556,7 +554,6 @@ export function extractApplicantNameFromText(textCorpus: string): string | null 
     }
   }
 
-  // Fallback MRZ match if country code was intact and '<<' was partially misread
   const mrzCountryDirect = upperCorpus.match(
     /(?:KHM|VNM|NPL|UZB|MMR|THA|IDN|PHL|CHN|MNG|LKA|BGD|PAK)\s*([A-Z]{2,18})[<«\s]{2,}([A-Z]{2,18})/
   );
@@ -566,32 +563,14 @@ export function extractApplicantNameFromText(textCorpus: string): string | null 
     const combinedMrz = filterValidNameWords(`${surname} ${given}`);
     if (combinedMrz) return combinedMrz;
   }
+  return null;
+}
 
-  // 2. Look right after the 13-digit Alien Registration Number on ARC Front (e.g. 950910-5760023)
-  // On every Korean ARC card, the English Name is printed on the line immediately below the Reg Number!
-  const regFound = findArcRegNumberInText(textCorpus);
-  if (regFound) {
-    const afterReg = textCorpus.slice(
-      regFound.matchIndex + regFound.matchLength,
-      regFound.matchIndex + regFound.matchLength + 260
-    );
-    const afterLines = afterReg
-      .split(/[\r\n<>]+/)
-      .map((l) => l.trim())
-      .filter((l) => l.length >= 3);
-
-    for (let i = 0; i < Math.min(4, afterLines.length); i++) {
-      const lineWithoutKor = afterLines[i]
-        .replace(/[가-힣]+/g, ' ')
-        .replace(/\b(?:Name|Sex|Country|Region|Nationality|Cambodia|Vietnam|Nepal|Uzbekistan|Myanmar|Thailand|Indonesia|Philippines|China|Mongolia)\b/gi, ' ');
-      const candidate = filterValidNameWords(lineWithoutKor);
-      if (candidate) {
-        return candidate;
-      }
-    }
-  }
-
-  // 3. Check explicit label: 성명 / Name / Name in English (same line OR next 1-2 lines for TOPIK tables)
+/**
+ * Tier 2: Extract name from explicit labels (성명 / 영문성명 / Name in English / Surname)
+ */
+function extractLabeledNameFromText(textCorpus: string): string | null {
+  if (!textCorpus) return null;
   const lines = textCorpus
     .split(/[\r\n<>]+/)
     .map((l) => l.trim())
@@ -608,33 +587,87 @@ export function extractApplicantNameFromText(textCorpus: string): string | null 
 
       for (let offset = 1; offset <= 2; offset++) {
         if (i + offset < lines.length) {
-          const nextStripped = lines[i + offset]
-            .replace(/[가-힣()/:：,0-9.\-]+/g, ' ')
-            .replace(/\b(?:Name|in|English|Date|of|Birth|Sex|Gender|Male|Female|Registration|No|Country|Region|Nationality|Cambodia)\b/gi, ' ');
-          const nextCandidate = filterValidNameWords(nextStripped);
-          if (nextCandidate) return nextCandidate;
+          const nextRaw = lines[i + offset];
+          // Require uppercase-only tokens on following lines to avoid Hangul OCR garbage
+          const upperMatches = nextRaw.match(/\b([A-Z]{2,18}(?:[,\s]+[A-Z]{2,18}){1,3})\b/g);
+          if (upperMatches) {
+            for (const um of upperMatches) {
+              const nextCandidate = filterValidNameWords(um);
+              if (nextCandidate) return nextCandidate;
+            }
+          }
         }
       }
     }
   }
+  return null;
+}
 
-  // 4. Scan all lines for 2-4 English words (allowing optional comma like "EANG, VEASNA" on TOPIK)
+/**
+ * Tier 3: Extract strict ALL-CAPS English name printed right after the 13-digit ARC Reg Number
+ */
+function extractArcRegAdjacentName(textCorpus: string): string | null {
+  if (!textCorpus) return null;
+  const regFound = findArcRegNumberInText(textCorpus);
+  if (!regFound) return null;
+
+  const afterReg = textCorpus.slice(
+    regFound.matchIndex + regFound.matchLength,
+    regFound.matchIndex + regFound.matchLength + 260
+  );
+  const afterLines = afterReg
+    .split(/[\r\n<>]+/)
+    .map((l) => l.trim())
+    .filter((l) => l.length >= 3);
+
+  for (let i = 0; i < Math.min(4, afterLines.length); i++) {
+    // Only consider strictly ALL-UPPERCASE sequences so Hangul-misread mixed-case noise (e.g. "Mim fin") is ignored
+    const upperMatches = afterLines[i].match(/\b([A-Z]{2,18}(?:[,\s]+[A-Z]{2,18}){1,3})\b/g);
+    if (!upperMatches) continue;
+    for (const um of upperMatches) {
+      const candidate = filterValidNameWords(um, true);
+      if (candidate) return candidate;
+    }
+  }
+  return null;
+}
+
+/**
+ * Tier 4: Lowest-priority scan for strictly ALL-UPPERCASE 2-4 word name lines
+ */
+function extractStrictUppercaseFallbackName(textCorpus: string): string | null {
+  if (!textCorpus) return null;
+  const lines = textCorpus
+    .split(/[\r\n<>]+/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (/RESIDENCE\s+CARD|REGISTRATION\s+CARD|REPUBLIC\s+OF\s+KOREA|PROFICIENCY\s+IN\s+KOREAN/i.test(line)) {
       continue;
     }
-    const upperMatches = line.match(/\b([A-Za-z]{2,18}(?:[,\s]+[A-Za-z]{2,18}){1,3})\b/g);
+    const upperMatches = line.match(/\b([A-Z]{2,18}(?:[,\s]+[A-Z]{2,18}){1,3})\b/g);
     if (!upperMatches) continue;
     for (const raw of upperMatches) {
-      const candidate = filterValidNameWords(raw);
-      if (candidate) {
-        return candidate;
-      }
+      const candidate = filterValidNameWords(raw, true);
+      if (candidate) return candidate;
     }
   }
-
   return null;
+}
+
+/**
+ * Extract applicant's English uppercase name from OCR text (ARC / Passport MRZ / TOPIK)
+ */
+export function extractApplicantNameFromText(textCorpus: string): string | null {
+  if (!textCorpus) return null;
+  return (
+    extractMrzNameFromText(textCorpus) ||
+    extractLabeledNameFromText(textCorpus) ||
+    extractArcRegAdjacentName(textCorpus) ||
+    extractStrictUppercaseFallbackName(textCorpus)
+  );
 }
 
 /**
@@ -649,12 +682,17 @@ export function parseOcrCorpusToData(
   const combined = `${arcFrontText}\n${arcBackText}\n${topikText}\n${passportText}`;
   const result: ExtractedDocumentData = {};
 
-  // 1. Name (Prefer ARC Front -> Passport -> TOPIK -> Combined)
+  // 1. Name (Confidence-tiered across ALL docs so clean Passport MRZ & TOPIK always beat noisy ARC lines)
   const detectedName =
-    extractApplicantNameFromText(arcFrontText) ||
-    extractApplicantNameFromText(passportText) ||
-    extractApplicantNameFromText(topikText) ||
-    extractApplicantNameFromText(combined);
+    extractMrzNameFromText(passportText) ||
+    extractMrzNameFromText(combined) ||
+    extractLabeledNameFromText(topikText) ||
+    extractLabeledNameFromText(passportText) ||
+    extractLabeledNameFromText(arcFrontText) ||
+    extractArcRegAdjacentName(arcFrontText) ||
+    extractStrictUppercaseFallbackName(topikText) ||
+    extractStrictUppercaseFallbackName(passportText) ||
+    extractStrictUppercaseFallbackName(arcFrontText);
   if (detectedName) {
     result.name = detectedName;
   }
@@ -946,16 +984,17 @@ export async function extractDocumentsClientSide(params: {
   }
 
   // 2. Fallback to local Tesseract.js OCR if server is unreachable or GEMINI_API_KEY is missing
-  let arcFrontText = params.arcFront ? await runBrowserOcrOnImage(params.arcFront, 'kor+eng', false) : '';
+  // Run clean 'eng' pass on ARC Front + Passport first so Hangul character confusion never garbles English names/digits
+  let arcFrontText = params.arcFront ? await runBrowserOcrOnImage(params.arcFront, 'eng', false) : '';
   let passportText = params.passport ? await runBrowserOcrOnImage(params.passport, 'eng', false) : '';
   let arcBackText = params.arcBack ? await runBrowserOcrOnImage(params.arcBack, 'kor', false) : '';
   let topikText = params.topikCert ? await runBrowserOcrOnImage(params.topikCert, 'kor+eng', false) : '';
 
   let parsed = parseOcrCorpusToData(arcFrontText, arcBackText, topikText, passportText);
 
-  // 3. Targeted high-contrast / MRZ second-pass if primary pass missed key fields
-  if (params.arcFront && (!parsed.regNumber1 || !parsed.name)) {
-    const hcFront = await runBrowserOcrOnImage(params.arcFront, 'kor+eng', true);
+  // 3. Targeted high-contrast / MRZ / kor+eng second-pass if primary pass missed key fields
+  if (params.arcFront && (!parsed.regNumber1 || !parsed.name || !parsed.visaStatus)) {
+    const hcFront = await runBrowserOcrOnImage(params.arcFront, 'eng', true);
     if (hcFront) arcFrontText = `${arcFrontText}\n${hcFront}`;
   }
   if (params.arcBack && !parsed.address) {
