@@ -166,12 +166,12 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       return;
     }
 
-    // Verify Promo Code: 199621147
+    // Verify Promo Code
     if (raw === '199621147' || raw === 'KIIP-199621147' || raw === 'PROMO-199621147') {
       setPromoCodeError(null);
       setPromoCodeSuccess(true);
       setIsProcessing(true);
-      setProcessingStep(lang === 'km' ? '✓ កូដ Promo Code 199621147 ត្រឹមត្រូវ! កំពុងដោះសោ VIP ឥតគិតថ្លៃ 100%...' : '✓ Promo Code 199621147 verified! Unlocking 100% Free VIP...');
+      setProcessingStep(lang === 'km' ? '✓ កូដ Promo Code ត្រឹមត្រូវ! កំពុងដោះសោ VIP ឥតគិតថ្លៃ 100%...' : '✓ Promo Code verified! Unlocking 100% Free VIP...');
 
       try {
         localStorage.setItem('kiip_doc_paid_v3', 'true');
@@ -195,10 +195,10 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     } else {
       setPromoCodeError(
         lang === 'km'
-          ? 'កូដមិនត្រឹមត្រូវ! សូមបញ្ចូលលេខកូដ Promo Code ត្រឹមត្រូវ (កូដឥតគិតថ្លៃ៖ 199621147)'
+          ? 'កូដមិនត្រឹមត្រូវ! សូមពិនិត្យលេខកូដ Promo Code របស់អ្នកម្តងទៀត។'
           : lang === 'ko'
-          ? '유효하지 않은 프로모션 코드입니다. (VIP 무료 코드: 199621147)'
-          : 'Invalid Promo Code! (VIP Free Code: 199621147)'
+          ? '유효하지 않은 프로모션 코드입니다. 다시 확인해 주세요.'
+          : 'Invalid Promo Code! Please check your code and try again.'
       );
     }
   };
@@ -468,25 +468,14 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                     </span>
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setPromoCodeInput('199621147');
-                    handleApplyPromoCode('199621147');
-                  }}
-                  className="hidden sm:inline-flex items-center gap-1 px-2.5 py-1 text-[10.5px] font-black text-purple-700 bg-purple-100 hover:bg-purple-200 border border-purple-300 rounded-lg transition-colors cursor-pointer"
-                  title="ចុចដើម្បីដាក់កូដ 199621147 ដោយស្វ័យប្រវត្តិ"
-                >
-                  <Sparkles className="w-3 h-3 text-amber-500" />
-                  <span>កូដ: 199621147</span>
-                </button>
               </div>
 
               <div className="flex items-center gap-2 pt-1">
                 <div className="relative flex-1">
                   <Ticket className="w-4 h-4 text-purple-500 absolute left-3 top-3" />
                   <input
-                    type="text"
+                    type="password"
+                    autoComplete="off"
                     value={promoCodeInput}
                     onChange={(e) => {
                       setPromoCodeInput(e.target.value);
@@ -498,7 +487,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                         handleApplyPromoCode();
                       }
                     }}
-                    placeholder={lang === 'km' ? 'បញ្ចូល Promo code: 199621147' : 'Enter Promo Code: 199621147'}
+                    placeholder={lang === 'km' ? 'បញ្ចូលលេខកូដ Promo Code...' : 'Enter Promo Code...'}
                     className="w-full pl-9 pr-3 py-2.5 bg-white border border-purple-300 rounded-xl text-xs sm:text-sm font-mono font-bold tracking-wider text-purple-950 focus:outline-none focus:ring-2 focus:ring-purple-400 placeholder:font-sans placeholder:font-normal placeholder:text-slate-400"
                   />
                 </div>
@@ -523,7 +512,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               {promoCodeSuccess && (
                 <div className="p-2 rounded-xl bg-emerald-50 border border-emerald-300 text-emerald-800 text-xs flex items-center gap-2 animate-in fade-in font-bold">
                   <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                  <span>✓ កូដ Promo Code 199621147 ត្រឹមត្រូវ! (ដោះសោជោគជ័យ 100% មិនបាច់បាញ់លុយ)</span>
+                  <span>✓ កូដ Promo Code ត្រឹមត្រូវ! (ដោះសោជោគជ័យ 100% មិនបាច់បាញ់លុយ)</span>
                 </div>
               )}
             </div>
@@ -1132,7 +1121,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                   <div className="relative">
                     <Ticket className="w-4 h-4 text-purple-500 absolute left-3 top-3.5" />
                     <input
-                      type="text"
+                      type={redeemPlatform === 'promo' ? 'password' : 'text'}
+                      autoComplete="off"
                       value={redeemCode}
                       onChange={(e) => {
                         setRedeemCode(e.target.value.toUpperCase());
@@ -1143,7 +1133,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                           ? 'PLAY-XXXX-XXXX-XXXX' 
                           : redeemPlatform === 'appstore' 
                           ? 'X8K4-992J-M1N7-88PL' 
-                          : '199621147'
+                          : '••••••••'
                       }
                       className="w-full pl-9 pr-24 py-3 rounded-xl border border-slate-300 text-sm font-mono tracking-wider font-bold uppercase focus:border-purple-600 focus:ring-2 focus:ring-purple-100 outline-none"
                     />
@@ -1158,22 +1148,6 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                     ) : null}
                   </div>
 
-                  {/* 1-Click Quick Fill Button for 199621147 */}
-                  <div className="mt-2 flex items-center justify-between">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setRedeemPlatform('promo');
-                        setRedeemCode('199621147');
-                        handleApplyPromoCode('199621147');
-                      }}
-                      className="text-[11px] font-bold text-purple-700 hover:text-purple-900 bg-purple-50 hover:bg-purple-100 border border-purple-200 px-2.5 py-1 rounded-lg flex items-center gap-1.5 transition-colors cursor-pointer"
-                    >
-                      <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-                      <span>{lang === 'km' ? 'ប្រើប្រាស់ Promo Code: 199621147 (ដោះសោឥតគិតថ្លៃ)' : 'Apply Promo Code: 199621147 (100% Free)'}</span>
-                    </button>
-                  </div>
-
                   {redeemError && (
                     <div className="mt-2 p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center gap-2">
                       <AlertCircle className="w-4 h-4 shrink-0" />
@@ -1182,8 +1156,6 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                   )}
                 </div>
 
-
-
                 {/* Redeem Valuation Info Card */}
                 {redeemCode.trim() && (
                   <div className="p-3 bg-emerald-50 rounded-xl border border-emerald-300 flex items-center justify-between text-xs text-emerald-900 animate-in fade-in">
@@ -1191,7 +1163,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                       <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
                       <div>
                         <span className="font-bold">{lang === 'km' ? 'កូដមានសុពលភាព: ' : lang === 'ko' ? '유효한 코드 확인됨: ' : 'Valid Code Verified: '}</span>
-                        <span>{redeemCode}</span>
+                        <span>{redeemPlatform === 'promo' ? '••••••••' : redeemCode}</span>
                       </div>
                     </div>
                     <div className="text-right">

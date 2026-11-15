@@ -115,12 +115,12 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
       confetti({ particleCount: 160, spread: 90, origin: { y: 0.5 } });
       setPromoCodeMsg({
         type: 'success',
-        text: '✓ កូដ Promo Code 199621147 ត្រឹមត្រូវ! បានដោះសោទាញយក Clean PDF ឥតគិតថ្លៃ 100% មិនបាច់បាញ់លុយ!',
+        text: '✓ កូដ Promo Code ត្រឹមត្រូវ! បានដោះសោទាញយក Clean PDF ឥតគិតថ្លៃ 100% មិនបាច់បាញ់លុយ!',
       });
     } else {
       setPromoCodeMsg({
         type: 'error',
-        text: 'កូដមិនត្រឹមត្រូវ! (លេខកូដ Promo Code ឥតគិតថ្លៃគឺ៖ 199621147)',
+        text: 'កូដមិនត្រឹមត្រូវ! សូមពិនិត្យលេខកូដ Promo Code របស់អ្នកម្តងទៀត។',
       });
     }
   };
@@ -330,23 +330,16 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
                   )}
                 </button>
 
-                {/* Quick Promo Code 199621147 input */}
+                {/* Quick Promo Code input (masked) */}
                 <div className="flex flex-col items-end gap-1">
                   <div className="flex items-center gap-1.5 p-1 bg-purple-50 border border-purple-300 rounded-2xl shadow-2xs">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setPromoCodeInput('199621147');
-                        handlePromoUnlock('199621147');
-                      }}
-                      className="flex items-center gap-1 pl-2 pr-1.5 py-1 text-purple-700 hover:text-purple-900 font-bold text-[11px] cursor-pointer hover:bg-purple-100 rounded-lg transition-colors"
-                      title="ចុចដើម្បីដាក់កូដ 199621147 ភ្លាមៗ"
-                    >
-                      <Gift className="w-4 h-4 text-purple-600 animate-bounce" />
-                      <span>កូដ: 199621147</span>
-                    </button>
+                    <span className="flex items-center gap-1 pl-2 pr-1 text-purple-700 font-bold text-[11px] select-none">
+                      <Gift className="w-4 h-4 text-purple-600" />
+                      <span>Promo</span>
+                    </span>
                     <input
-                      type="text"
+                      type="password"
+                      autoComplete="off"
                       value={promoCodeInput}
                       onChange={(e) => {
                         setPromoCodeInput(e.target.value);
@@ -355,8 +348,8 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
                       onKeyDown={(e) => {
                         if (e.key === 'Enter') handlePromoUnlock();
                       }}
-                      placeholder="199621147"
-                      className="w-24 sm:w-28 px-2 py-1.5 bg-white border border-purple-200 rounded-xl text-xs font-mono font-bold text-purple-950 outline-none uppercase placeholder:text-slate-400 text-center"
+                      placeholder="••••••"
+                      className="w-24 sm:w-28 px-2 py-1.5 bg-white border border-purple-200 rounded-xl text-xs font-mono font-bold text-purple-950 outline-none placeholder:text-slate-400 text-center"
                     />
                     <button
                       type="button"

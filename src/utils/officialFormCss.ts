@@ -579,11 +579,22 @@ export const OFFICIAL_FORM_PURE_CSS = `
     display: flex;
     align-items: center;
     justify-content: flex-end;
-    gap: 6px;
+    gap: 10px;
     font-size: 12.5px;
     font-weight: 700;
     margin-bottom: 8px;
     color: #000000;
+  }
+
+  .ofv-date-part {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 3px;
+  }
+
+  .ofv-date-num {
+    letter-spacing: 0.08em;
+    padding: 0 2px;
   }
 
   .ofv-applicant-row {

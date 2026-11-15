@@ -292,7 +292,9 @@ body[data-lang="km"],
 
 .ofv-footer { margin-top: 16px; display: flex; flex-direction: column; font-family: 'Noto Serif KR', 'Batang', 'Nanum Myeongjo', serif; color: #000000; }
 .ofv-footer-right { margin-left: auto; margin-right: 16px; margin-bottom: 20px; text-align: right; }
-.ofv-date-row { display: flex; align-items: center; justify-content: flex-end; gap: 6px; font-size: 12.5px; font-weight: 700; margin-bottom: 8px; color: #000000; }
+.ofv-date-row { display: flex; align-items: center; justify-content: flex-end; gap: 10px; font-size: 12.5px; font-weight: 700; margin-bottom: 8px; color: #000000; }
+.ofv-date-part { display: inline-flex; align-items: baseline; gap: 3px; }
+.ofv-date-num { letter-spacing: 0.08em; padding: 0 2px; }
 .ofv-applicant-row { position: relative; display: flex; align-items: center; justify-content: flex-end; gap: 8px; font-size: 12.5px; padding-top: 4px; color: #000000; }
 .ofv-applicant-label { font-weight: 700; }
 .ofv-applicant-name { font-weight: 700; letter-spacing: 0.05em; font-size: 13px; color: #000000; }

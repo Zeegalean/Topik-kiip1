@@ -796,33 +796,39 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
             <span>신청일자&nbsp;:&nbsp;&nbsp;</span>
             {editable ? (
               <>
-                <input
-                  type="text"
-                  maxLength={4}
-                  value={formData.applyYear || ""}
-                  onChange={(e) => handleTextChange("applyYear", e.target.value)}
-                  className="w-14 text-center bg-transparent border-b border-black font-num-kr font-bold text-[12.5px] outline-none"
-                  placeholder={new Date().getFullYear().toString()}
-                />
-                <span>년</span>
-                <input
-                  type="text"
-                  maxLength={2}
-                  value={formData.applyMonth || ""}
-                  onChange={(e) => handleTextChange("applyMonth", e.target.value)}
-                  className="w-8 text-center bg-transparent border-b border-black font-num-kr font-bold text-[12.5px] outline-none"
-                  placeholder={String(new Date().getMonth() + 1).padStart(2, "0")}
-                />
-                <span>월</span>
-                <input
-                  type="text"
-                  maxLength={2}
-                  value={formData.applyDay || ""}
-                  onChange={(e) => handleTextChange("applyDay", e.target.value)}
-                  className="w-8 text-center bg-transparent border-b border-black font-num-kr font-bold text-[12.5px] outline-none"
-                  placeholder={String(new Date().getDate()).padStart(2, "0")}
-                />
-                <span>일</span>
+                <span className="ofv-date-part">
+                  <input
+                    type="text"
+                    maxLength={4}
+                    value={formData.applyYear || ""}
+                    onChange={(e) => handleTextChange("applyYear", e.target.value)}
+                    className="w-15 text-center bg-transparent border-b border-black font-num-kr font-bold text-[12.5px] tracking-wider px-1 outline-none"
+                    placeholder={new Date().getFullYear().toString()}
+                  />
+                  <span>년</span>
+                </span>
+                <span className="ofv-date-part">
+                  <input
+                    type="text"
+                    maxLength={2}
+                    value={formData.applyMonth || ""}
+                    onChange={(e) => handleTextChange("applyMonth", e.target.value)}
+                    className="w-9 text-center bg-transparent border-b border-black font-num-kr font-bold text-[12.5px] tracking-wider px-1 outline-none"
+                    placeholder={String(new Date().getMonth() + 1).padStart(2, "0")}
+                  />
+                  <span>월</span>
+                </span>
+                <span className="ofv-date-part">
+                  <input
+                    type="text"
+                    maxLength={2}
+                    value={formData.applyDay || ""}
+                    onChange={(e) => handleTextChange("applyDay", e.target.value)}
+                    className="w-9 text-center bg-transparent border-b border-black font-num-kr font-bold text-[12.5px] tracking-wider px-1 outline-none"
+                    placeholder={String(new Date().getDate()).padStart(2, "0")}
+                  />
+                  <span>일</span>
+                </span>
                 <input
                   type="date"
                   aria-label="신청일자 달력 선택"
@@ -853,23 +859,23 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
               </>
             ) : (
               <>
-                <span>
-                  <span className="font-num-kr">
+                <span className="ofv-date-part">
+                  <span className="font-num-kr ofv-date-num">
                     {formData.applyYear && formData.applyYear !== "0000" ? formData.applyYear : new Date().getFullYear()}
                   </span>
-                  년
+                  <span>년</span>
                 </span>
-                <span>
-                  <span className="font-num-kr">
+                <span className="ofv-date-part">
+                  <span className="font-num-kr ofv-date-num">
                     {formData.applyMonth && formData.applyMonth !== "00" ? formData.applyMonth : String(new Date().getMonth() + 1).padStart(2, "0")}
                   </span>
-                  월
+                  <span>월</span>
                 </span>
-                <span>
-                  <span className="font-num-kr">
+                <span className="ofv-date-part">
+                  <span className="font-num-kr ofv-date-num">
                     {formData.applyDay && formData.applyDay !== "00" ? formData.applyDay : String(new Date().getDate()).padStart(2, "0")}
                   </span>
-                  일
+                  <span>일</span>
                 </span>
               </>
             )}

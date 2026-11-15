@@ -149,18 +149,6 @@ export const Navbar: React.FC<NavbarProps> = ({
             {/* PC Desktop App Install Button */}
             <PWAInstallButton lang={lang} isAdmin={isAdmin} />
 
-            {/* Direct 1-Click Source Code ZIP Download Button */}
-            <a
-              href="/api/download-source-zip"
-              download="kiip-portal-source-code.zip"
-              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-bold text-slate-700 bg-slate-100 hover:bg-blue-50 hover:text-blue-700 hover:border-blue-300 border border-slate-300 transition-colors shadow-2xs cursor-pointer"
-              title="ទាញយក ZIP កូដគម្រោងទាំងមូល (Download full source code ZIP for GitHub/Offline)"
-            >
-              <Download className="w-3.5 h-3.5 text-blue-600" />
-              <span className="hidden sm:inline">Download ZIP</span>
-              <span className="sm:hidden">ZIP</span>
-            </a>
-
             {/* 50 Languages Selector & Modal Button */}
             <div className="flex items-center gap-1">
               <div className="relative flex items-center bg-slate-100 hover:bg-slate-200/70 rounded-xl p-0.5 border border-slate-200 shadow-2xs transition-colors">

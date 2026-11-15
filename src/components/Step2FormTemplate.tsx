@@ -1808,41 +1808,47 @@ export const Step2FormTemplate: React.FC<Step2FormTemplateProps> = ({
           <div className="mt-5 flex flex-col font-serif">
             <div className="ml-auto mr-6 mb-4 text-right space-y-2">
               {/* Date row: Auto-detected real time with calendar selector & manual editing */}
-              <div className="flex flex-wrap items-center justify-end gap-1.5 text-[11.5px]">
+              <div className="flex flex-wrap items-center justify-end gap-2.5 text-[11.5px]">
                 <span className="font-bold">신청일자&nbsp;:&nbsp;&nbsp;</span>
-                <input
-                  type="text"
-                  maxLength={4}
-                  value={formData.applyYear || new Date().getFullYear().toString()}
-                  onChange={(e) =>
-                    setFormData((p) => ({ ...p, applyYear: e.target.value.replace(/[^0-9]/g, '') }))
-                  }
-                  className="w-13 text-center bg-transparent border-b border-black font-num-kr font-bold text-[12px] outline-none hover:bg-amber-50 focus:bg-white transition-colors"
-                  title="ឆ្នាំដាក់ពាក្យ (កែសម្រួលបាន)"
-                />
-                <span>년</span>
-                <input
-                  type="text"
-                  maxLength={2}
-                  value={formData.applyMonth || String(new Date().getMonth() + 1).padStart(2, "0")}
-                  onChange={(e) =>
-                    setFormData((p) => ({ ...p, applyMonth: e.target.value.replace(/[^0-9]/g, '') }))
-                  }
-                  className="w-7 text-center bg-transparent border-b border-black font-num-kr font-bold text-[12px] outline-none hover:bg-amber-50 focus:bg-white transition-colors"
-                  title="ខែដាក់ពាក្យ (កែសម្រួលបាន)"
-                />
-                <span>월</span>
-                <input
-                  type="text"
-                  maxLength={2}
-                  value={formData.applyDay || String(new Date().getDate()).padStart(2, "0")}
-                  onChange={(e) =>
-                    setFormData((p) => ({ ...p, applyDay: e.target.value.replace(/[^0-9]/g, '') }))
-                  }
-                  className="w-7 text-center bg-transparent border-b border-black font-num-kr font-bold text-[12px] outline-none hover:bg-amber-50 focus:bg-white transition-colors"
-                  title="ថ្ងៃដាក់ពាក្យ (កែសម្រួលបាន)"
-                />
-                <span>일</span>
+                <span className="inline-flex items-baseline gap-1">
+                  <input
+                    type="text"
+                    maxLength={4}
+                    value={formData.applyYear || new Date().getFullYear().toString()}
+                    onChange={(e) =>
+                      setFormData((p) => ({ ...p, applyYear: e.target.value.replace(/[^0-9]/g, '') }))
+                    }
+                    className="w-15 text-center bg-transparent border-b border-black font-num-kr font-bold text-[12px] tracking-wider px-1 outline-none hover:bg-amber-50 focus:bg-white transition-colors"
+                    title="ឆ្នាំដាក់ពាក្យ (កែសម្រួលបាន)"
+                  />
+                  <span>년</span>
+                </span>
+                <span className="inline-flex items-baseline gap-1">
+                  <input
+                    type="text"
+                    maxLength={2}
+                    value={formData.applyMonth || String(new Date().getMonth() + 1).padStart(2, "0")}
+                    onChange={(e) =>
+                      setFormData((p) => ({ ...p, applyMonth: e.target.value.replace(/[^0-9]/g, '') }))
+                    }
+                    className="w-9 text-center bg-transparent border-b border-black font-num-kr font-bold text-[12px] tracking-wider px-1 outline-none hover:bg-amber-50 focus:bg-white transition-colors"
+                    title="ខែដាក់ពាក្យ (កែសម្រួលបាន)"
+                  />
+                  <span>월</span>
+                </span>
+                <span className="inline-flex items-baseline gap-1">
+                  <input
+                    type="text"
+                    maxLength={2}
+                    value={formData.applyDay || String(new Date().getDate()).padStart(2, "0")}
+                    onChange={(e) =>
+                      setFormData((p) => ({ ...p, applyDay: e.target.value.replace(/[^0-9]/g, '') }))
+                    }
+                    className="w-9 text-center bg-transparent border-b border-black font-num-kr font-bold text-[12px] tracking-wider px-1 outline-none hover:bg-amber-50 focus:bg-white transition-colors"
+                    title="ថ្ងៃដាក់ពាក្យ (កែសម្រួលបាន)"
+                  />
+                  <span>일</span>
+                </span>
 
                 {/* Calendar Date Selector Box (Select Month / Day / Year) */}
                 <input
