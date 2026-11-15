@@ -90,5 +90,5 @@ export interface UserAccount {
   name: string;
   email: string;
   avatar: string;
-  provider: 'google' | 'apple' | 'gmail' | 'guest';
+  provider: 'google' | 'apple' | 'gmail' | 'guest' | 'otp';
 }

@@ -62,6 +62,8 @@ interface Step1UploadProps {
   lang: Language;
   onNext: () => void;
   onOpenSocinetNotice?: () => void;
+  isLoggedIn?: boolean;
+  onOpenAuth?: () => void;
 }
 
 export const Step1Upload: React.FC<Step1UploadProps> = ({
@@ -72,8 +74,20 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
   lang,
   onNext,
   onOpenSocinetNotice,
+  isLoggedIn = true,
+  onOpenAuth,
 }) => {
   const t = getTranslation(lang);
+
+  const checkAuth = (e: React.MouseEvent | React.SyntheticEvent) => {
+    if (!isLoggedIn && onOpenAuth) {
+      e.preventDefault();
+      e.stopPropagation();
+      onOpenAuth();
+      return true;
+    }
+    return false;
+  };
   const [signatureMode, setSignatureMode] = useState<'upload' | 'draw'>('draw');
   const [isDrawing, setIsDrawing] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -969,6 +983,27 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Unauthenticated Login / Signup / OTP Prompt Banner */}
+      {!isLoggedIn && (
+        <div className="p-4 rounded-2xl bg-indigo-50 border border-indigo-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs shadow-xs">
+          <div className="flex items-center gap-2.5 text-indigo-950 font-bold">
+            <Lock className="w-5 h-5 text-indigo-600 shrink-0" />
+            <span>
+              {lang === 'km' 
+                ? 'តម្រូវឱ្យ Sign Up / Login ឬផ្ទៀងផ្ទាត់ OTP ជាមុនសិន ដើម្បីចាប់ផ្តើម Upload ឯកសារ' 
+                : 'Please Sign Up, Log In, or verify via OTP before uploading documents.'}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={onOpenAuth}
+            className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-black text-xs shadow-md transition-all cursor-pointer whitespace-nowrap"
+          >
+            {lang === 'km' ? '🔐 ចូលគណនី / ផ្ទៀងផ្ទាត់ OTP' : 'Sign Up / Login / OTP'}
+          </button>
+        </div>
+      )}
 
       {/* Upload Grid */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
