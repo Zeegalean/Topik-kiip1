@@ -83,12 +83,12 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
         e.preventDefault();
         if (onRightClickBlock) onRightClickBlock();
       }}
-      className="official-form-sheet bg-white text-black shadow-2xl relative select-text mx-auto overflow-hidden"
+      className="official-form-sheet bg-white text-black shadow-2xl relative select-text mx-auto"
       style={{
         width: '210mm',
         minHeight: '297mm',
         padding: '13mm 14mm 12mm 14mm',
-        fontFamily: '"Noto Serif KR", "Batang", "Nanum Myeongjo", serif',
+        fontFamily: '"Noto Serif KR", "Batang", "Nanum Myeongjo", "Malgun Gothic", "Apple SD Gothic Neo", serif',
         boxSizing: 'border-box',
         backgroundColor: '#ffffff',
         color: '#000000',
@@ -701,7 +701,7 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
               아이디 (ID)
             </label>
             <div className="official-socinet-input-box">
-              {onFieldChange ? (
+              {editable && onFieldChange ? (
                 <input
                   id="official-socinet-id"
                   type="text"
@@ -723,7 +723,7 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
               비밀번호 (PW)
             </label>
             <div className="official-socinet-input-box">
-              {onFieldChange ? (
+              {editable && onFieldChange ? (
                 <input
                   id="official-socinet-pw"
                   type="text"
@@ -756,10 +756,24 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
           </span>
           <div className="official-consent-options">
             <span className="official-consent-option">
-              <span>{formData.consent === 'agree' ? '☑' : '☐'}</span> 동의함
+              <span className="official-checkbox-box inline-flex items-center justify-center w-3 h-3 border-[1.25px] border-black bg-white shrink-0">
+                {formData.consent === 'agree' && (
+                  <svg viewBox="0 0 12 12" className="w-2.5 h-2.5 stroke-black" fill="none" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="2.2,6.2 5,9 9.8,3" />
+                  </svg>
+                )}
+              </span>
+              <span>동의함</span>
             </span>
             <span className="official-consent-option">
-              <span>{formData.consent === 'disagree' ? '☑' : '☐'}</span> 동의하지 않음
+              <span className="official-checkbox-box inline-flex items-center justify-center w-3 h-3 border-[1.25px] border-black bg-white shrink-0">
+                {formData.consent === 'disagree' && (
+                  <svg viewBox="0 0 12 12" className="w-2.5 h-2.5 stroke-black" fill="none" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <polyline points="2.2,6.2 5,9 9.8,3" />
+                  </svg>
+                )}
+              </span>
+              <span>동의하지 않음</span>
             </span>
           </div>
         </div>

@@ -63,7 +63,8 @@ body[data-lang="km"],
   box-sizing: border-box;
   background-color: #ffffff;
   color: #000000;
-  font-family: 'Noto Serif KR', 'Batang', 'Nanum Myeongjo', serif;
+  font-family: 'Noto Serif KR', 'Batang', 'Nanum Myeongjo', 'Malgun Gothic', 'Apple SD Gothic Neo', serif;
+  letter-spacing: normal;
 }
 
 .official-form-sheet .font-sans,
@@ -75,7 +76,7 @@ body[data-lang="km"],
 }
 
 .font-num-kr {
-  font-family: 'Noto Serif KR', 'Batang', 'Nanum Myeongjo', serif !important;
+  font-family: 'Noto Serif KR', 'Batang', 'Nanum Myeongjo', 'Malgun Gothic', serif !important;
   font-variant-numeric: tabular-nums;
 }
 
@@ -83,6 +84,8 @@ body[data-lang="km"],
   width: 100%;
   border-collapse: collapse;
   table-layout: fixed;
+  border-style: solid;
+  border-color: #000000;
 }
 
 .official-form-table th,
@@ -91,6 +94,8 @@ body[data-lang="km"],
   box-sizing: border-box;
   padding: 6px 8px;
   line-height: 1.25;
+  border-style: solid;
+  border-color: #000000;
 }
 
 .official-form-table td > div,

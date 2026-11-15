@@ -346,7 +346,7 @@ export const InteractiveSignatureOverlay: React.FC<InteractiveSignatureOverlayPr
           src={signatureUrl}
           alt="Signature Stamp"
           draggable={false}
-          className="h-14 max-w-[165px] object-contain select-none pointer-events-none drop-shadow-xs"
+          className={`h-14 max-w-[165px] object-contain select-none pointer-events-none ${readOnly ? '' : 'drop-shadow-xs'}`}
         />
 
         {/* Real-time Tooltip Indicator */}

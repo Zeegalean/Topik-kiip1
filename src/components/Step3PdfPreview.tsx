@@ -503,13 +503,13 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
         aria-hidden="true"
         style={{
           position: 'fixed',
-          left: isGeneratingMerged ? '0px' : '-9999px',
+          left: '-10000px',
           top: '0px',
           width: '210mm',
           minHeight: '297mm',
           backgroundColor: '#ffffff',
           color: '#000000',
-          zIndex: isGeneratingMerged ? 99999 : -1,
+          zIndex: -1,
           pointerEvents: 'none',
           visibility: isGeneratingMerged ? 'visible' : 'hidden',
           opacity: 1,
