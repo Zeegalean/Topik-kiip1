@@ -345,6 +345,8 @@ export default function App() {
                 lang={lang}
                 onNext={() => setCurrentStep(2)}
                 onOpenSocinetNotice={() => setIsSocinetNoticeOpen(true)}
+                isLoggedIn={user.isLoggedIn}
+                onOpenAuth={() => setIsAuthModalOpen(true)}
               />
             )}
 

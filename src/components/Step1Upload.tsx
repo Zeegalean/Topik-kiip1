@@ -1044,7 +1044,7 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
               </div>
             </div>
           ) : (
-            <label className="border-2 border-dashed border-slate-300 hover:border-blue-500 hover:bg-blue-50/30 rounded-xl p-6 flex flex-col items-center justify-center cursor-pointer transition-colors group">
+            <label onClick={(e) => { if (checkAuth(e)) return; }} className="border-2 border-dashed border-slate-300 hover:border-blue-500 hover:bg-blue-50/30 rounded-xl p-6 flex flex-col items-center justify-center cursor-pointer transition-colors group">
               <Upload className="w-8 h-8 text-slate-400 group-hover:text-blue-600 mb-2 transition-colors" />
               <span className="text-xs font-bold text-slate-700">{t.clickUploadArcFront}</span>
               <span className="text-[10px] text-slate-400 mt-1">{t.uploadArcHint}</span>
@@ -1095,7 +1095,7 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
               </div>
             </div>
           ) : (
-            <label className="border-2 border-dashed border-slate-300 hover:border-blue-500 hover:bg-blue-50/30 rounded-xl p-6 flex flex-col items-center justify-center cursor-pointer transition-colors group">
+            <label onClick={(e) => { if (checkAuth(e)) return; }} className="border-2 border-dashed border-slate-300 hover:border-blue-500 hover:bg-blue-50/30 rounded-xl p-6 flex flex-col items-center justify-center cursor-pointer transition-colors group">
               <Upload className="w-8 h-8 text-slate-400 group-hover:text-blue-600 mb-2 transition-colors" />
               <span className="text-xs font-bold text-slate-700">{t.clickUploadArcBack}</span>
               <span className="text-[10px] text-slate-400 mt-1">{t.uploadArcBackHint}</span>
@@ -1308,7 +1308,7 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
               </div>
             ))}
 
-            <label className="border-2 border-dashed border-slate-300 hover:border-indigo-500 hover:bg-indigo-50/30 rounded-xl p-4 flex items-center justify-center gap-2 cursor-pointer transition-colors group">
+            <label onClick={(e) => { if (checkAuth(e)) return; }} className="border-2 border-dashed border-slate-300 hover:border-indigo-500 hover:bg-indigo-50/30 rounded-xl p-4 flex items-center justify-center gap-2 cursor-pointer transition-colors group">
               <Upload className="w-5 h-5 text-slate-400 group-hover:text-indigo-600" />
               <span className="text-xs font-bold text-slate-700">{t.addMoreTopik}</span>
               <input
@@ -1448,7 +1448,7 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
               </div>
             ))}
 
-            <label className={`border-2 border-dashed rounded-xl p-4 flex items-center justify-center gap-2 cursor-pointer transition-colors group ${
+            <label onClick={(e) => { if (checkAuth(e)) return; }} className={`border-2 border-dashed rounded-xl p-4 flex items-center justify-center gap-2 cursor-pointer transition-colors group ${
               hasPassport ? 'border-slate-300 hover:border-slate-500 hover:bg-slate-50' : 'border-rose-300 bg-rose-50/20 hover:border-rose-500'
             }`}>
               <Upload className={`w-5 h-5 ${hasPassport ? 'text-slate-400 group-hover:text-slate-700' : 'text-rose-500'}`} />
@@ -1677,7 +1677,7 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
                   </div>
                 </div>
               ) : (
-                <label className="border-2 border-dashed border-slate-300 hover:border-indigo-500 rounded-xl p-6 flex flex-col items-center justify-center cursor-pointer transition-colors group">
+                <label onClick={(e) => { if (checkAuth(e)) return; }} className="border-2 border-dashed border-slate-300 hover:border-indigo-500 rounded-xl p-6 flex flex-col items-center justify-center cursor-pointer transition-colors group">
                   <Upload className="w-6 h-6 text-slate-400 group-hover:text-indigo-600 mb-1" />
                   <span className="text-xs font-bold text-slate-700">{t.uploadSigPhoto}</span>
                   <span className="text-[10px] text-slate-400">{t.uploadSigPhotoHint}</span>
