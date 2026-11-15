@@ -17,7 +17,8 @@ import {
 } from '../utils/sanitizers';
 import {
   extractDocumentsClientSide,
-  mergeExtractedIntoFormData
+  mergeExtractedIntoFormData,
+  compressImageForApi
 } from '../utils/clientOcrEngine';
 import { 
   Upload, 
@@ -465,6 +466,12 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
 
       if (!isStaticGitHubPages) {
         try {
+          const [cFront, cBack, cTopik, cPassport] = await Promise.all([
+            compressImageForApi(frontUrl),
+            compressImageForApi(backUrl),
+            compressImageForApi(topikUrl),
+            compressImageForApi(passportUrl),
+          ]);
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), 35000);
           const response = await fetch('/api/extract-documents', {
@@ -472,11 +479,10 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
             headers: { 'Content-Type': 'application/json' },
             signal: controller.signal,
             body: JSON.stringify({
-              arcFront: frontUrl,
-              arcBack: backUrl,
-              topikCert: topikUrl,
-              topikCertList: curDocs.topikCertList,
-              passport: passportUrl,
+              arcFront: cFront,
+              arcBack: cBack,
+              topikCert: cTopik,
+              passport: cPassport,
             }),
           });
           clearTimeout(timer);

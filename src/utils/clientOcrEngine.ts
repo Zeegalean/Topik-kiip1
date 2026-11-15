@@ -58,11 +58,65 @@ const NON_NAME_WORDS = new Set([
 ]);
 
 /**
- * Cleanly normalizes image dimensions and orientation on an HTML5 canvas without
- * destructive global thresholding so Tesseract's internal Leptonica local adaptive
- * thresholding preserves text on colored ARC security backgrounds.
+ * Compresses raster DataURLs cleanly before sending to /api/extract-documents
+ * so multiple smartphone photos stay well under Vercel's 4.5 MB serverless payload limit.
  */
-async function preprocessImageForOcr(dataUrl: string): Promise<string> {
+export async function compressImageForApi(
+  dataUrl: string | null | undefined,
+  maxDim: number = 1400,
+  quality: number = 0.82
+): Promise<string | null | undefined> {
+  if (!dataUrl || typeof dataUrl !== 'string') return dataUrl;
+  if (dataUrl.startsWith('data:image/svg+xml') || dataUrl.startsWith('data:application/pdf')) {
+    return dataUrl;
+  }
+
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      try {
+        let width = img.naturalWidth || img.width;
+        let height = img.naturalHeight || img.height;
+        if (!width || !height) {
+          resolve(dataUrl);
+          return;
+        }
+        if (width > maxDim || height > maxDim) {
+          if (width > height) {
+            height = Math.round((height * maxDim) / width);
+            width = maxDim;
+          } else {
+            width = Math.round((width * maxDim) / height);
+            height = maxDim;
+          }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(dataUrl);
+          return;
+        }
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      } catch {
+        resolve(dataUrl);
+      }
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
+
+/**
+ * Normalizes image dimensions (including upscaling small images) and optionally applies
+ * grayscale contrast stretching so Tesseract reads small Hangul/digits cleanly on colored cards.
+ */
+async function preprocessImageForOcr(dataUrl: string, enhanceContrast: boolean = false): Promise<string> {
   if (!dataUrl || dataUrl.startsWith('data:image/svg+xml') || dataUrl.startsWith('data:application/pdf')) {
     return dataUrl;
   }
@@ -73,6 +127,7 @@ async function preprocessImageForOcr(dataUrl: string): Promise<string> {
     img.onload = () => {
       try {
         const maxDim = 1800;
+        const minTargetDim = 1350;
         let width = img.naturalWidth || img.width;
         let height = img.naturalHeight || img.height;
 
@@ -81,14 +136,15 @@ async function preprocessImageForOcr(dataUrl: string): Promise<string> {
           return;
         }
 
-        if (width > maxDim || height > maxDim) {
-          if (width > height) {
-            height = Math.round((height * maxDim) / width);
-            width = maxDim;
-          } else {
-            width = Math.round((width * maxDim) / height);
-            height = maxDim;
-          }
+        const longest = Math.max(width, height);
+        if (longest > maxDim) {
+          const scale = maxDim / longest;
+          width = Math.round(width * scale);
+          height = Math.round(height * scale);
+        } else if (longest < minTargetDim) {
+          const scale = Math.min(2.2, minTargetDim / longest);
+          width = Math.round(width * scale);
+          height = Math.round(height * scale);
         }
 
         const canvas = document.createElement('canvas');
@@ -102,7 +158,83 @@ async function preprocessImageForOcr(dataUrl: string): Promise<string> {
 
         ctx.fillStyle = '#FFFFFF';
         ctx.fillRect(0, 0, width, height);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
         ctx.drawImage(img, 0, 0, width, height);
+
+        if (enhanceContrast) {
+          const imgData = ctx.getImageData(0, 0, width, height);
+          const pixels = imgData.data;
+          const contrastFactor = 1.45;
+          for (let i = 0; i < pixels.length; i += 4) {
+            const lum = 0.299 * pixels[i] + 0.587 * pixels[i + 1] + 0.114 * pixels[i + 2];
+            const boosted = Math.max(0, Math.min(255, (lum - 128) * contrastFactor + 132));
+            pixels[i] = boosted;
+            pixels[i + 1] = boosted;
+            pixels[i + 2] = boosted;
+          }
+          ctx.putImageData(imgData, 0, 0);
+        }
+
+        resolve(canvas.toDataURL('image/jpeg', 0.95));
+      } catch {
+        resolve(dataUrl);
+      }
+    };
+    img.onerror = () => resolve(dataUrl);
+    img.src = dataUrl;
+  });
+}
+
+/**
+ * Crops the bottom band of a passport image (where the 2 ICAO MRZ lines sit)
+ * and upscales with high-contrast grayscale for accurate MRZ OCR.
+ */
+async function cropPassportMrzForOcr(dataUrl: string): Promise<string> {
+  if (!dataUrl || dataUrl.startsWith('data:image/svg+xml') || dataUrl.startsWith('data:application/pdf')) {
+    return dataUrl;
+  }
+
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => {
+      try {
+        const w = img.naturalWidth || img.width;
+        const h = img.naturalHeight || img.height;
+        if (!w || !h) {
+          resolve(dataUrl);
+          return;
+        }
+        const cropY = Math.floor(h * 0.58);
+        const cropH = h - cropY;
+        const targetW = Math.max(1400, Math.min(2000, w));
+        const targetH = Math.round((cropH * targetW) / w);
+
+        const canvas = document.createElement('canvas');
+        canvas.width = targetW;
+        canvas.height = targetH;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(dataUrl);
+          return;
+        }
+        ctx.fillStyle = '#FFFFFF';
+        ctx.fillRect(0, 0, targetW, targetH);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, cropY, w, cropH, 0, 0, targetW, targetH);
+
+        const imgData = ctx.getImageData(0, 0, targetW, targetH);
+        const pixels = imgData.data;
+        for (let i = 0; i < pixels.length; i += 4) {
+          const lum = 0.299 * pixels[i] + 0.587 * pixels[i + 1] + 0.114 * pixels[i + 2];
+          const boosted = Math.max(0, Math.min(255, (lum - 125) * 1.55 + 128));
+          pixels[i] = boosted;
+          pixels[i + 1] = boosted;
+          pixels[i + 2] = boosted;
+        }
+        ctx.putImageData(imgData, 0, 0);
 
         resolve(canvas.toDataURL('image/jpeg', 0.95));
       } catch {
@@ -119,11 +251,12 @@ async function preprocessImageForOcr(dataUrl: string): Promise<string> {
  */
 async function runBrowserOcrOnImage(
   dataUrl: string | null | undefined,
-  langSpec: string = 'kor+eng'
+  langSpec: string = 'kor+eng',
+  enhanceContrast: boolean = false
 ): Promise<string> {
   if (!dataUrl) return '';
 
-  const cacheKey = `${langSpec}:${dataUrl.length}:${dataUrl.slice(-120)}`;
+  const cacheKey = `${langSpec}:${enhanceContrast ? 'hc' : 'std'}:${dataUrl.length}:${dataUrl.slice(-120)}`;
   const cached = ocrTextCache.get(cacheKey);
   if (cached !== undefined) {
     return cached;
@@ -162,11 +295,11 @@ async function runBrowserOcrOnImage(
   }
 
   try {
-    const processedUrl = await preprocessImageForOcr(dataUrl);
-    // Wrap Tesseract in a 12-second timeout so it never hangs if network is slow
+    const processedUrl = await preprocessImageForOcr(dataUrl, enhanceContrast);
+    // Allow 45 seconds so initial kor+eng traineddata CDN download never gets aborted mid-flight
     const ocrPromise = Tesseract.recognize(processedUrl, langSpec);
     const timeoutPromise = new Promise<{ data?: { text?: string } }>((resolve) =>
-      setTimeout(() => resolve({ data: { text: '' } }), 12000)
+      setTimeout(() => resolve({ data: { text: '' } }), 45000)
     );
     const result = await Promise.race([ocrPromise, timeoutPromise]);
     const text = result?.data?.text || '';
@@ -778,14 +911,20 @@ export async function extractDocumentsClientSide(params: {
   // 1. Try server-side Gemini OCR endpoint first unless caller already attempted it
   if (!params.skipServer) {
     try {
+      const [cFront, cBack, cTopik, cPassport] = await Promise.all([
+        compressImageForApi(params.arcFront),
+        compressImageForApi(params.arcBack),
+        compressImageForApi(params.topikCert),
+        compressImageForApi(params.passport),
+      ]);
       const res = await fetch('/api/extract-documents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          arcFront: params.arcFront,
-          arcBack: params.arcBack,
-          topikCert: params.topikCert,
-          passport: params.passport,
+          arcFront: cFront,
+          arcBack: cBack,
+          topikCert: cTopik,
+          passport: cPassport,
         }),
       });
       if (res.ok) {
@@ -806,13 +945,35 @@ export async function extractDocumentsClientSide(params: {
     }
   }
 
-  // 2. Fallback to local Tesseract.js OCR if server is unreachable
-  const arcFrontText = params.arcFront ? await runBrowserOcrOnImage(params.arcFront, 'kor+eng') : '';
-  const passportText = params.passport ? await runBrowserOcrOnImage(params.passport, 'eng') : '';
-  const arcBackText = params.arcBack ? await runBrowserOcrOnImage(params.arcBack, 'kor') : '';
-  const topikText = params.topikCert ? await runBrowserOcrOnImage(params.topikCert, 'kor+eng') : '';
+  // 2. Fallback to local Tesseract.js OCR if server is unreachable or GEMINI_API_KEY is missing
+  let arcFrontText = params.arcFront ? await runBrowserOcrOnImage(params.arcFront, 'kor+eng', false) : '';
+  let passportText = params.passport ? await runBrowserOcrOnImage(params.passport, 'eng', false) : '';
+  let arcBackText = params.arcBack ? await runBrowserOcrOnImage(params.arcBack, 'kor', false) : '';
+  let topikText = params.topikCert ? await runBrowserOcrOnImage(params.topikCert, 'kor+eng', false) : '';
 
-  return parseOcrCorpusToData(arcFrontText, arcBackText, topikText, passportText);
+  let parsed = parseOcrCorpusToData(arcFrontText, arcBackText, topikText, passportText);
+
+  // 3. Targeted high-contrast / MRZ second-pass if primary pass missed key fields
+  if (params.arcFront && (!parsed.regNumber1 || !parsed.name)) {
+    const hcFront = await runBrowserOcrOnImage(params.arcFront, 'kor+eng', true);
+    if (hcFront) arcFrontText = `${arcFrontText}\n${hcFront}`;
+  }
+  if (params.arcBack && !parsed.address) {
+    const hcBack = await runBrowserOcrOnImage(params.arcBack, 'kor', true);
+    if (hcBack) arcBackText = `${arcBackText}\n${hcBack}`;
+  }
+  if (params.passport && (!parsed.passportNo || !parsed.name)) {
+    const mrzCropUrl = await cropPassportMrzForOcr(params.passport);
+    const mrzText = await runBrowserOcrOnImage(mrzCropUrl, 'eng', false);
+    if (mrzText) passportText = `${passportText}\n${mrzText}`;
+  }
+  if (params.topikCert && (!parsed.examNumber || !parsed.docVerificationNo)) {
+    const hcTopik = await runBrowserOcrOnImage(params.topikCert, 'kor+eng', true);
+    if (hcTopik) topikText = `${topikText}\n${hcTopik}`;
+  }
+
+  parsed = parseOcrCorpusToData(arcFrontText, arcBackText, topikText, passportText);
+  return parsed;
 }
 
 /**

@@ -21,7 +21,7 @@ import {
   cleanName,
   parsePassportTextOrSvg
 } from '../utils/sanitizers';
-import { extractDocumentsClientSide, mergeExtractedIntoFormData } from '../utils/clientOcrEngine';
+import { extractDocumentsClientSide, mergeExtractedIntoFormData, compressImageForApi } from '../utils/clientOcrEngine';
 import { saveFormDraft } from '../utils/draftStorage';
 import { 
   Sparkles, 
@@ -399,6 +399,12 @@ export const Step2FormTemplate: React.FC<Step2FormTemplateProps> = ({
 
       if (!isStaticGitHubPages) {
         try {
+          const [cFront, cBack, cTopik, cPassport] = await Promise.all([
+            compressImageForApi(frontToUse),
+            compressImageForApi(backToUse),
+            compressImageForApi(firstTopik),
+            compressImageForApi(docs.passportList[0]?.dataUrl || null),
+          ]);
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), 35000);
           const response = await fetch('/api/extract-documents', {
@@ -406,11 +412,10 @@ export const Step2FormTemplate: React.FC<Step2FormTemplateProps> = ({
             headers: { 'Content-Type': 'application/json' },
             signal: controller.signal,
             body: JSON.stringify({
-              arcFront: frontToUse,
-              arcBack: backToUse,
-              topikCert: firstTopik,
-              topikCertList: firstTopik && docs.topikCertList.length === 0 ? [{ id: 'quick', dataUrl: firstTopik, name: 'TOPIK Score Report' }] : docs.topikCertList,
-              passport: docs.passportList[0]?.dataUrl || null,
+              arcFront: cFront,
+              arcBack: cBack,
+              topikCert: cTopik,
+              passport: cPassport,
             }),
           });
           clearTimeout(timer);
