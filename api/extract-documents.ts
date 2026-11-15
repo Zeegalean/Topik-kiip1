@@ -402,50 +402,45 @@ Return ONLY structured JSON according to the schema.
     };
 
     outer: for (const model of candidateModels) {
-      const maxAttempts = model === 'gemini-3.1-flash-lite' ? 2 : 1;
-      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-        try {
-          const config: any = {
-            responseMimeType: 'application/json',
-            responseSchema,
-          };
-          if (model === 'gemini-4-hydrogen') {
-            config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
-          }
-
-          const generatePromise = ai.models.generateContent({
-            model,
-            contents: { parts },
-            config,
-          });
-          const timeoutPromise = new Promise<never>((_, reject) =>
-            setTimeout(() => reject(new Error(`Model '${model}' timed out after 15s`)), 15000)
-          );
-          const response = await Promise.race([generatePromise, timeoutPromise]);
-
-          const text = response.text;
-          if (text) {
-            try {
-              extractedData = JSON.parse(text);
-            } catch {
-              const cleaned = text.replace(/```json/gi, '').replace(/```/g, '').trim();
-              extractedData = JSON.parse(cleaned);
-            }
-            successfulModel = model;
-            break outer;
-          }
-        } catch (err: any) {
-          lastErrorDetail = formatGeminiError(err);
-          if (isAuthOrKeyError(err)) {
-            authErrorDetected = true;
-            break outer;
-          }
-          if (isTransientError(err) && attempt < maxAttempts) {
-            await sleep(400 * attempt);
-            continue;
-          }
-          break;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 9000);
+      try {
+        const config: any = {
+          responseMimeType: 'application/json',
+          responseSchema,
+          abortSignal: controller.signal,
+        };
+        if (model === 'gemini-4-hydrogen') {
+          config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
         }
+
+        const response = await ai.models.generateContent({
+          model,
+          contents: { parts },
+          config,
+        });
+
+        const text = response.text;
+        if (text) {
+          try {
+            extractedData = JSON.parse(text);
+          } catch {
+            const cleaned = text.replace(/```json/gi, '').replace(/```/g, '').trim();
+            extractedData = JSON.parse(cleaned);
+          }
+          successfulModel = model;
+          break outer;
+        }
+      } catch (err: any) {
+        lastErrorDetail = controller.signal.aborted
+          ? `Model '${model}' timed out after 9s`
+          : formatGeminiError(err);
+        if (isAuthOrKeyError(err)) {
+          authErrorDetected = true;
+          break outer;
+        }
+      } finally {
+        clearTimeout(timeoutId);
       }
     }
 

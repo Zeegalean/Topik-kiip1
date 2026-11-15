@@ -63,8 +63,8 @@ const NON_NAME_WORDS = new Set([
  */
 export async function compressImageForApi(
   dataUrl: string | null | undefined,
-  maxDim: number = 1400,
-  quality: number = 0.82
+  maxDim: number = 1200,
+  quality: number = 0.78
 ): Promise<string | null | undefined> {
   if (!dataUrl || typeof dataUrl !== 'string') return dataUrl;
   if (dataUrl.startsWith('data:image/svg+xml') || dataUrl.startsWith('data:application/pdf')) {

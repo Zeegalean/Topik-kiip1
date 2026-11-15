@@ -406,7 +406,7 @@ export const Step2FormTemplate: React.FC<Step2FormTemplateProps> = ({
             compressImageForApi(docs.passportList[0]?.dataUrl || null),
           ]);
           const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), 35000);
+          const timer = setTimeout(() => controller.abort(), 45000);
           const response = await fetch('/api/extract-documents', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },

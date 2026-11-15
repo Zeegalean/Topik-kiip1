@@ -473,7 +473,7 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
             compressImageForApi(passportUrl),
           ]);
           const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), 35000);
+          const timer = setTimeout(() => controller.abort(), 45000);
           const response = await fetch('/api/extract-documents', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
