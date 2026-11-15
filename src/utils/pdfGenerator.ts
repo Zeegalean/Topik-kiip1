@@ -255,19 +255,13 @@ async function captureFormDomToCanvas(
 }
 
 async function resolvePage1Canvas({
-  formElement,
   formData,
   docs,
   sigSettings,
   showWatermark,
 }: GeneratePdfOptions): Promise<HTMLCanvasElement> {
-  if (formElement) {
-    try {
-      return await captureFormDomToCanvas(formElement, formData);
-    } catch (err) {
-      console.warn('DOM form capture fell back to Canvas 2D renderer:', err);
-    }
-  }
+  // Always use the robust, deterministic Canvas 2D official form renderer
+  // to guarantee pristine A4 formatting, perfect table alignment, and zero text wrapping/falling bugs.
   return await renderOfficialFormToCanvas({
     formData,
     docs,
