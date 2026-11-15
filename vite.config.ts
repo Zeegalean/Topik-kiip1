@@ -6,7 +6,7 @@ import { VitePWA } from 'vite-plugin-pwa';
 
 export default defineConfig(() => {
   return {
-    base:'/Topik-kiip1/',
+    base: process.env.VERCEL ? '/' : './',
     plugins: [
       react(),
       tailwindcss(),

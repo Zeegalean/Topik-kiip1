@@ -1,14 +1,29 @@
 // server.ts
+import dns from "dns";
 import fs from "fs";
+import { execSync } from "child_process";
 import express from "express";
 import dotenv from "dotenv";
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, ThinkingLevel, Type } from "@google/genai";
 import path from "path";
 import { fileURLToPath } from "url";
 dotenv.config();
+dns.setDefaultResultOrder("ipv4first");
+function getCliArg(flag) {
+  const idx = process.argv.indexOf(flag);
+  if (idx !== -1 && idx + 1 < process.argv.length && !process.argv[idx + 1].startsWith("-")) {
+    return process.argv[idx + 1];
+  }
+  const prefix = `${flag}=`;
+  const eqArg = process.argv.find((arg) => arg.startsWith(prefix));
+  return eqArg ? eqArg.slice(prefix.length) : void 0;
+}
 var __dirname = path.dirname(fileURLToPath(import.meta.url));
 var app = express();
-var port = 3e3;
+var cliPort = getCliArg("--port") || getCliArg("-p");
+var cliHost = getCliArg("--host");
+var port = parseInt(cliPort || process.env.PORT || "3000", 10);
+var host = cliHost || process.env.HOST || "0.0.0.0";
 app.use((req, res, next) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
@@ -18,32 +33,76 @@ app.use((req, res, next) => {
   }
   next();
 });
-app.get(["/api/download-pc-package", "/download-pc-package", "/kiip-topik-pc-package.zip"], (req, res) => {
-  const filePath = path.resolve("public/kiip-topik-pc-package.zip");
-  if (fs.existsSync(filePath)) {
-    const stats = fs.statSync(filePath);
-    res.setHeader("Content-Type", "application/zip");
-    res.setHeader("Content-Disposition", 'attachment; filename="kiip-topik-pc-package.zip"');
-    res.setHeader("Content-Length", stats.size.toString());
-    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
-    res.setHeader("Pragma", "no-cache");
-    res.setHeader("Expires", "0");
-    const stream = fs.createReadStream(filePath);
-    return stream.pipe(res);
+app.get(["/api/download-source-zip", "/download-source-zip", "/kiip-source-code.zip", "/api/download-pc-package", "/download-pc-package", "/kiip-topik-pc-package.zip"], (req, res) => {
+  try {
+    const zipPath = "/tmp/kiip-portal-source-code.zip";
+    const pythonScript = `
+import zipfile, os
+base_dir = os.path.abspath('.')
+zip_path = '/tmp/kiip-portal-source-code.zip'
+excluded_dirs = {'node_modules', 'dist', '.git', '__pycache__', '.aistudio'}
+excluded_files = {'kiip-portal-source-code.zip', 'kiip-topik-pc-package.zip'}
+with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as z:
+    for root, dirs, files in os.walk(base_dir):
+        dirs[:] = [d for d in dirs if d not in excluded_dirs and not d.startswith('.git')]
+        for file in files:
+            if file in excluded_files or file.endswith('.pyc') or file.endswith('.traineddata'):
+                continue
+            full_path = os.path.join(root, file)
+            rel_path = os.path.relpath(full_path, base_dir)
+            z.write(full_path, rel_path)
+`;
+    execSync(`python3 -c "${pythonScript.replace(/"/g, '\\"')}"`);
+    if (fs.existsSync(zipPath)) {
+      const stats = fs.statSync(zipPath);
+      res.setHeader("Content-Type", "application/zip");
+      res.setHeader("Content-Disposition", 'attachment; filename="kiip-portal-source-code.zip"');
+      res.setHeader("Content-Length", stats.size.toString());
+      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+      const stream = fs.createReadStream(zipPath);
+      return stream.pipe(res);
+    }
+    return res.status(500).send("ZIP file creation failed");
+  } catch (err) {
+    return res.status(500).send("Error generating ZIP: " + err.message);
   }
-  return res.status(404).send("File not found");
 });
 app.use(express.static(path.resolve("public")));
 app.use(express.json({ limit: "50mb" }));
 app.use(express.urlencoded({ extended: true, limit: "50mb" }));
-var ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      "User-Agent": "aistudio-build"
-    }
+var aiClient = null;
+function getAiClient() {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) return null;
+  if (!aiClient) {
+    aiClient = new GoogleGenAI({
+      apiKey,
+      httpOptions: {
+        headers: {
+          "User-Agent": "aistudio-build"
+        }
+      }
+    });
   }
-});
+  return aiClient;
+}
+function formatGeminiError(err) {
+  const msg = typeof err?.message === "string" ? err.message : JSON.stringify(err || "");
+  const causeCode = err?.cause?.code ? ` (${err.cause.code})` : "";
+  const causeMsg = typeof err?.cause?.message === "string" && !msg.includes(err.cause.message) ? `: ${err.cause.message}` : "";
+  return `${msg}${causeCode}${causeMsg}`;
+}
+function isTransientError(err) {
+  const msg = formatGeminiError(err).toLowerCase();
+  return msg.includes("503") || msg.includes("unavailable") || msg.includes("high demand") || msg.includes("429") || msg.includes("resource_exhausted") || msg.includes("quota") || msg.includes("overloaded") || msg.includes("try again later") || msg.includes("temporarily") || msg.includes("fetch failed") || msg.includes("econnreset") || msg.includes("etimedout") || msg.includes("eai_again") || msg.includes("und_err_") || msg.includes("socket") || msg.includes("network");
+}
+function isAuthOrKeyError(err) {
+  const msg = formatGeminiError(err).toUpperCase();
+  return msg.includes("PERMISSION_DENIED") || msg.includes("API_KEY_INVALID") || msg.includes("API KEY NOT VALID") || msg.includes("UNAUTHENTICATED");
+}
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 function sanitizeExtractedData(raw) {
   const result = {};
   if (raw?.docVerificationNo) {
@@ -118,7 +177,66 @@ function sanitizeExtractedData(raw) {
     }
   }
   if (raw?.name) {
-    const cleanedName = String(raw.name).replace(/(?:성명|Name|NAME)\s*[:：]?\s*/gi, "").replace(/[^a-zA-Z\s가-힣]/g, " ").replace(/\s+/g, " ").trim().toUpperCase();
+    const nameNoise = /* @__PURE__ */ new Set([
+      "IA",
+      "DIA",
+      "ODIA",
+      "BODIA",
+      "MBODIA",
+      "AMBODIA",
+      "CAMBOD",
+      "CAMBODIA",
+      "CAMBODIAN",
+      "KHM",
+      "VNM",
+      "NPL",
+      "UZB",
+      "MMR",
+      "THA",
+      "IDN",
+      "PHL",
+      "CHN",
+      "MNG",
+      "LKA",
+      "BGD",
+      "PAK",
+      "VIETNAM",
+      "NEPAL",
+      "UZBEKISTAN",
+      "MYANMAR",
+      "THAILAND",
+      "INDONESIA",
+      "PHILIPPINES",
+      "CHINA",
+      "MONGOLIA",
+      "BANGLADESH",
+      "PAKISTAN",
+      "KOREA",
+      "REPUBLIC",
+      "KINGDOM",
+      "NAME",
+      "ENGLISH",
+      "IN",
+      "SEX",
+      "MALE",
+      "FEMALE",
+      "COUNTRY",
+      "REGION",
+      "NATIONALITY",
+      "SURNAME",
+      "GIVEN",
+      "NAMES",
+      "CARD",
+      "RESIDENCE",
+      "ALIEN",
+      "REGISTRATION",
+      "PASSPORT",
+      "STATUS",
+      "OF",
+      "THE"
+    ]);
+    const cleanedTokens = String(raw.name).replace(/(?:성명|영문성명|Name\s*in\s*English|Name|NAME|Surname|Given\s*Names?)\s*[:：]?\s*/gi, " ").replace(/[^a-zA-Z\s가-힣]/g, " ").replace(/\s+/g, " ").trim().toUpperCase().split(" ").filter((t) => t.length > 0 && !nameNoise.has(t));
+    const cleanedName = cleanedTokens.join(" ").trim();
     if (cleanedName.length >= 2 && cleanedName !== "0000 0000") {
       result.name = cleanedName;
       result.applicantName = cleanedName;
@@ -219,7 +337,7 @@ function extractFromSvgOrText(textCorpus) {
     result.regNumber1 = regMatch[1];
     result.regNumber2 = regMatch[2];
   }
-  const nameMatch = textCorpus.match(/(?:성명|Name|NAME)[^\w\n<]*([A-Z\s]{3,30})(?=[<\n"&]|$)/i) || textCorpus.match(/>([A-Z]{2,15}\s+[A-Z]{2,15})</);
+  const nameMatch = textCorpus.match(/(?:성명|Name|NAME)[^\w\n<]*([A-Z\s]{3,30})(?=[<\n"&]|$)/) || textCorpus.match(/>([A-Z]{2,15}\s+[A-Z]{2,15})</);
   if (nameMatch) {
     result.name = nameMatch[1].trim().toUpperCase();
   }
@@ -409,7 +527,7 @@ Analyze the provided images of Alien Registration Card (\uC678\uAD6D\uC778\uB4F1
 IMPORTANT RULE: ONLY extract values that are ACTUALLY VISIBLE in the provided images. If a specific document or field is not present in the uploaded images, return an empty string "" (or empty array [] for docVerificationNo). NEVER invent, guess, or output placeholder values.
 
 CRITICAL INSTRUCTIONS FOR ALIEN REGISTRATION CARD (\uC678\uAD6D\uC778\uB4F1\uB85D\uC99D) & PASSPORT (\uC5EC\uAD8C):
-1. name: Full English name in uppercase exactly as printed on the Alien Registration Card ("\uC131\uBA85" / "Name"), Passport ("Surname" + "Given Names" or MRZ line), or TOPIK certificate ("\uC131\uBA85 / Name in English").
+1. name: ONLY the applicant's personal English full name in uppercase (Surname + Given Names, e.g. "EANG VEASNA" or "SOK SRORNG") as printed on the Alien Registration Card ("\uC131\uBA85" / "Name"), Passport ("Surname" + "Given Names" or MRZ line without filler "<"), or TOPIK certificate ("\uC131\uBA85 / Name in English"). NEVER append or include adjacent country/nationality words or clipped suffixes (such as "CAMBODIA", "CAMBODIAN", "KHM", "IA" clipped from CAMBODIA, "SEX", "M", "F", "COUNTRY", "NAME"). Cross-check across ARC, Passport, and TOPIK if multiple are provided so the name spelling is 100% clean.
 2. regNumber1: \uC678\uAD6D\uC778\uB4F1\uB85D\uBC88\uD638 front 6 digits (birth date YYMMDD).
 3. regNumber2: \uC678\uAD6D\uC778\uB4F1\uB85D\uBC88\uD638 back 7 digits.
 4. gender: "\uB0A8" (Male) or "\uC5EC" (Female).
@@ -430,63 +548,88 @@ CRITICAL INSTRUCTIONS FOR TOPIK SCORE CERTIFICATE (\uD55C\uAD6D\uC5B4\uB2A5\uB82
 Return ONLY structured JSON according to the schema.
 `;
     parts.push({ text: extractionPrompt });
-    const candidateModels = ["gemini-3.1-flash-lite", "gemini-3.8-flash", "gemini-flash-latest"];
+    const candidateModels = ["gemini-4-hydrogen", "gemini-3.1-flash-lite"];
     let extractedData = null;
     let successfulModel = "";
-    for (const model of candidateModels) {
-      try {
-        console.log(`[OCR] Invoking Gemini model '${model}'...`);
-        const response = await ai.models.generateContent({
-          model,
-          contents: { parts },
-          config: {
-            responseMimeType: "application/json",
-            responseSchema: {
-              type: Type.OBJECT,
-              properties: {
-                name: { type: Type.STRING, description: "Applicant full English name in uppercase if visible in the image, otherwise empty string" },
-                regNumber1: { type: Type.STRING, description: "6-digit birth date part of ARC number if visible, otherwise empty string" },
-                regNumber2: { type: Type.STRING, description: "7-digit back part of ARC number if visible, otherwise empty string" },
-                gender: { type: Type.STRING },
-                nationality: { type: Type.STRING },
-                visaStatus: { type: Type.STRING },
-                address: {
-                  type: Type.STRING,
-                  description: "LATEST residence address (\uCCB4\uB958\uC9C0 \uC8FC\uC18C) from the back of the card, determined by the most recent report date (\uC2E0\uACE0\uC77C / \uC2E0\uACE0\uC77C\uC790) or the bottom-most entered row in the \uCCB4\uB958\uC9C0 \uBCC0\uACBD\uC0AC\uD56D table."
-                },
-                docVerificationNo: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING },
-                  description: "\uBB38\uC11C\uD655\uC778\uBC88\uD638: 4 groups of 4 digits if visible on TOPIK certificate"
-                },
-                examNumber: { type: Type.STRING, description: "\uC218\uD5D8\uBC88\uD638 digits if visible on TOPIK certificate" },
-                examDate: { type: Type.STRING, description: "YYYY-MM-DD" },
-                round: { type: Type.STRING, description: "\uD68C\uCC28 numeric only" },
-                validUntil: { type: Type.STRING, description: "YYYY-MM-DD" },
-                grade: { type: Type.STRING, description: "\uB4F1\uAE09 (1\uAE09~6\uAE09)" },
-                passportNo: { type: Type.STRING, description: "Passport Number if visible" },
-                passportExpiry: { type: Type.STRING, description: "Passport Expiry Date YYYY-MM-DD if visible" }
-              }
-            }
-          }
-        });
-        const text = response.text;
-        if (text) {
-          try {
-            extractedData = JSON.parse(text);
-          } catch {
-            const cleaned = text.replace(/```json/gi, "").replace(/```/g, "").trim();
-            extractedData = JSON.parse(cleaned);
-          }
-          successfulModel = model;
-          console.log(`[OCR] Successfully extracted details using model '${model}'!`);
-          break;
-        }
-      } catch (err) {
-        const errMsg = typeof err?.message === "string" ? err.message : JSON.stringify(err || "");
-        console.warn(`[OCR] Model '${model}' failed: ${errMsg}`);
-        continue;
+    let lastErrorDetail = "";
+    let authErrorDetected = false;
+    const responseSchema = {
+      type: Type.OBJECT,
+      properties: {
+        name: { type: Type.STRING, description: "Applicant full English name in uppercase if visible in the image, otherwise empty string" },
+        regNumber1: { type: Type.STRING, description: "6-digit birth date part of ARC number if visible, otherwise empty string" },
+        regNumber2: { type: Type.STRING, description: "7-digit back part of ARC number if visible, otherwise empty string" },
+        gender: { type: Type.STRING },
+        nationality: { type: Type.STRING },
+        visaStatus: { type: Type.STRING },
+        address: {
+          type: Type.STRING,
+          description: "LATEST residence address (\uCCB4\uB958\uC9C0 \uC8FC\uC18C) from the back of the card, determined by the most recent report date (\uC2E0\uACE0\uC77C / \uC2E0\uACE0\uC77C\uC790) or the bottom-most entered row in the \uCCB4\uB958\uC9C0 \uBCC0\uACBD\uC0AC\uD56D table."
+        },
+        docVerificationNo: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: "\uBB38\uC11C\uD655\uC778\uBC88\uD638: 4 groups of 4 digits if visible on TOPIK certificate"
+        },
+        examNumber: { type: Type.STRING, description: "\uC218\uD5D8\uBC88\uD638 digits if visible on TOPIK certificate" },
+        examDate: { type: Type.STRING, description: "YYYY-MM-DD" },
+        round: { type: Type.STRING, description: "\uD68C\uCC28 numeric only" },
+        validUntil: { type: Type.STRING, description: "YYYY-MM-DD" },
+        grade: { type: Type.STRING, description: "\uB4F1\uAE09 (1\uAE09~6\uAE09)" },
+        passportNo: { type: Type.STRING, description: "Passport Number if visible" },
+        passportExpiry: { type: Type.STRING, description: "Passport Expiry Date YYYY-MM-DD if visible" }
       }
+    };
+    const ai = getAiClient();
+    if (ai) {
+      outer: for (const model of candidateModels) {
+        const maxAttempts = 2;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          try {
+            console.log(`[OCR] Invoking Gemini model '${model}' (attempt ${attempt}/${maxAttempts})...`);
+            const config = {
+              responseMimeType: "application/json",
+              responseSchema
+            };
+            if (model === "gemini-4-hydrogen") {
+              config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+            }
+            const response = await ai.models.generateContent({
+              model,
+              contents: { parts },
+              config
+            });
+            const text = response.text;
+            if (text) {
+              try {
+                extractedData = JSON.parse(text);
+              } catch {
+                const cleaned = text.replace(/```json/gi, "").replace(/```/g, "").trim();
+                extractedData = JSON.parse(cleaned);
+              }
+              successfulModel = model;
+              console.log(`[OCR] Successfully extracted details using model '${model}'!`);
+              break outer;
+            }
+          } catch (err) {
+            lastErrorDetail = formatGeminiError(err);
+            if (isAuthOrKeyError(err)) {
+              authErrorDetected = true;
+              console.log(`[OCR] Gemini API key issue (${lastErrorDetail}); falling back to structural/client OCR.`);
+              break outer;
+            }
+            if (isTransientError(err) && attempt < maxAttempts) {
+              console.log(`[OCR] Transient error on '${model}' (${lastErrorDetail}), retrying...`);
+              await sleep(600 * attempt);
+              continue;
+            }
+            console.log(`[OCR] Model '${model}' unavailable (${lastErrorDetail}), trying next fallback...`);
+            break;
+          }
+        }
+      }
+    } else {
+      console.log("[OCR] GEMINI_API_KEY not configured, falling back to structural/client OCR.");
     }
     if (extractedData) {
       const sanitized = sanitizeExtractedData(extractedData);
@@ -515,7 +658,8 @@ Return ONLY structured JSON according to the schema.
     return res.json({
       success: false,
       fallbackMode: true,
-      notice: "Using client-side OCR engine for direct image scanning."
+      notice: authErrorDetected ? "Please verify GEMINI_API_KEY in Settings > Secrets. Using client-side OCR engine." : "Using client-side OCR engine for direct image scanning.",
+      ...lastErrorDetail ? { detail: lastErrorDetail } : {}
     });
   } catch (error) {
     console.error("Unexpected error during document extraction:", error);
@@ -529,24 +673,59 @@ Return ONLY structured JSON according to the schema.
 async function startServer() {
   const http = await import("http");
   const server = http.createServer(app);
+  let viteInstance = null;
   if (process.env.NODE_ENV === "production") {
     app.use(express.static(path.resolve(__dirname, "dist")));
     app.get("*", (req, res) => {
       res.sendFile(path.resolve(__dirname, "dist", "index.html"));
     });
   } else {
-    const { createServer: createViteServer } = await import("vite");
-    const vite = await createViteServer({
-      server: {
-        middlewareMode: true,
-        hmr: false
-      },
-      appType: "spa"
+    const viteReady = import("vite").then(
+      ({ createServer: createViteServer }) => createViteServer({
+        server: {
+          middlewareMode: true,
+          hmr: false,
+          ws: false
+        },
+        appType: "spa"
+      })
+    );
+    viteReady.then((vite) => {
+      viteInstance = vite;
+    }).catch((err) => {
+      console.error("[Server] Vite initialization failed:", err);
+      process.exit(1);
     });
-    app.use(vite.middlewares);
+    app.use(async (req, res, next) => {
+      try {
+        const vite = viteInstance || await viteReady;
+        vite.middlewares(req, res, next);
+      } catch (err) {
+        next(err);
+      }
+    });
   }
-  server.listen(port, "0.0.0.0", () => {
-    console.log(`Server running on http://0.0.0.0:${port}`);
+  server.on("error", (err) => {
+    if (err.code === "EADDRINUSE") {
+      console.warn(`[Server] Port ${port} is in use. Exiting to allow dev server process manager to restart clean.`);
+      process.exit(1);
+    } else {
+      console.error("[Server] Server error:", err);
+    }
+  });
+  const shutdown = async () => {
+    try {
+      if (viteInstance) await viteInstance.close();
+    } catch {
+    }
+    server.close(() => {
+      process.exit(0);
+    });
+  };
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
+  server.listen(port, host, () => {
+    console.log(`Server running on http://${host}:${port}`);
   });
 }
 startServer();
