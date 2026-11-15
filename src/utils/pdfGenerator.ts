@@ -218,43 +218,30 @@ async function captureFormDomToCanvas(
       pureStyle.textContent = OFFICIAL_FORM_PURE_CSS;
       clonedDoc.head.appendChild(pureStyle);
 
-      // 3. Isolate capture element and reset document/body & ancestor layout geometry
+      // 3. Isolate capture element directly at body (0, 0) so app headers/banners/wrappers cannot shift layout
       clonedDoc.documentElement.style.cssText =
         'margin: 0; padding: 0; width: 794px; min-height: 1123px; background-color: #ffffff; overflow: visible; transform: none;';
       clonedDoc.body.style.cssText =
         'margin: 0; padding: 0; width: 794px; min-height: 1123px; background-color: #ffffff; color: #000000; overflow: visible; transform: none;';
 
-      // Find the direct child of body containing clonedElement
-      let rootChild: HTMLElement | null = clonedElement;
-      while (rootChild && rootChild.parentElement && rootChild.parentElement !== clonedDoc.body) {
-        rootChild = rootChild.parentElement;
+      while (clonedDoc.body.firstChild) {
+        clonedDoc.body.removeChild(clonedDoc.body.firstChild);
       }
-
-      // Hide all sibling direct children of body
-      Array.from(clonedDoc.body.children).forEach((child) => {
-        const el = child as HTMLElement;
-        if (el !== rootChild && !['STYLE', 'LINK', 'SCRIPT'].includes(el.tagName)) {
-          el.style.setProperty('display', 'none', 'important');
-        }
-      });
-
-      // Reset styles along ancestor chain from clonedElement up to rootChild
-      let cursor: HTMLElement | null = clonedElement.parentElement;
-      while (cursor && cursor !== clonedDoc.body) {
-        cursor.style.cssText =
-          'position: relative; left: 0; top: 0; right: auto; bottom: auto; margin: 0; padding: 0; width: 794px; height: auto; min-height: 1123px; display: block; visibility: visible; opacity: 1; transform: none; z-index: 1; background-color: #ffffff; overflow: visible;';
-        cursor = cursor.parentElement;
-      }
+      clonedDoc.body.appendChild(clonedElement);
 
       // Force crisp A4 pixel dimensions on the sheet itself
       clonedElement.style.display = 'block';
       clonedElement.style.position = 'relative';
+      clonedElement.style.left = '0px';
+      clonedElement.style.top = '0px';
       clonedElement.style.width = '794px';
       clonedElement.style.minHeight = '1123px';
       clonedElement.style.padding = '49px 53px 45px 53px';
       clonedElement.style.margin = '0';
       clonedElement.style.boxShadow = 'none';
       clonedElement.style.transform = 'none';
+      clonedElement.style.visibility = 'visible';
+      clonedElement.style.opacity = '1';
       clonedElement.style.backgroundColor = '#ffffff';
       clonedElement.style.color = '#000000';
     },

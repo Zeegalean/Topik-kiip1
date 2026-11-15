@@ -34,6 +34,11 @@
   }
 }
 
+/* Fix html2canvas FontMetrics baseline measurement (Tailwind preflight sets img { display: block }) */
+body > div[style*="visibility: hidden"] img {
+  display: inline !important;
+}
+
 /* Khmer OS Bokor Font Utility Classes */
 .font-bokor,
 .font-khmer-bokor,

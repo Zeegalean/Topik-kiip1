@@ -15,6 +15,7 @@ export const OFFICIAL_FORM_PURE_CSS = `
     padding: 0;
     background-color: #ffffff;
     color: #000000;
+    line-height: 1.5;
     font-family: "Noto Serif KR", "Batang", "Nanum Myeongjo", "Malgun Gothic", "Apple SD Gothic Neo", serif;
     -webkit-font-smoothing: antialiased;
   }
