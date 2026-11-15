@@ -1,0 +1,421 @@
+@import "tailwindcss";
+
+/* Define @font-face for Khmer OS Bokor so that it aliases to Bokor / local Khmer OS Bokor */
+@font-face {
+  font-family: 'Khmer OS Bokor';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: local('Khmer OS Bokor'),
+       local('Bokor'),
+       url('https://fonts.gstatic.com/s/bokor/v32/m8JcjfpeeaqTiR2W.ttf') format('truetype');
+}
+
+@font-face {
+  font-family: 'Khmer OS Bokor';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: local('Khmer OS Bokor Bold'),
+       local('Khmer OS Bokor'),
+       local('Bokor'),
+       url('https://fonts.gstatic.com/s/bokor/v32/m8JcjfpeeaqTiR2W.ttf') format('truetype');
+}
+
+@theme {
+  --font-sans: 'Khmer OS Bokor', 'Bokor', 'Kantumruy Pro', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-bokor: 'Khmer OS Bokor', 'Bokor', cursive, sans-serif;
+}
+
+@layer base {
+  html, body, button, input, select, textarea {
+    font-family: 'Khmer OS Bokor', 'Bokor', 'Kantumruy Pro', -apple-system, BlinkMacSystemFont, sans-serif;
+    letter-spacing: 0.015em;
+  }
+}
+
+/* Khmer OS Bokor Font Utility Classes */
+.font-bokor,
+.font-khmer-bokor,
+.font-khmer,
+body[data-lang="km"],
+.lang-khmer {
+  font-family: 'Khmer OS Bokor', 'Bokor', cursive, sans-serif;
+}
+
+/* Specific styling for Khmer text readability with Bokor */
+.lang-khmer {
+  line-height: 1.6;
+}
+
+.font-serif {
+  font-family: 'Noto Serif KR', 'Batang', 'Nanum Myeongjo', serif;
+}
+
+/* ==========================================================================
+   Official KIIP Form Sheet & PDF Table Cell Alignment Rules
+   Ensures identical vertical centering (td, th) on screen, print, and PDF
+   ========================================================================== */
+.official-form-sheet {
+  width: 210mm;
+  min-height: 297mm;
+  padding: 13mm 14mm 12mm 14mm;
+  box-sizing: border-box;
+  background-color: #ffffff;
+  color: #000000;
+  font-family: 'Noto Serif KR', 'Batang', 'Nanum Myeongjo', serif;
+}
+
+.official-form-sheet .font-sans,
+.official-socinet-box,
+.official-socinet-label,
+.official-socinet-input,
+.official-socinet-value {
+  font-family: 'Noto Sans KR', 'Inter', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif !important;
+}
+
+.font-num-kr {
+  font-family: 'Noto Serif KR', 'Batang', 'Nanum Myeongjo', serif !important;
+  font-variant-numeric: tabular-nums;
+}
+
+.official-form-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+
+.official-form-table th,
+.official-form-table td {
+  vertical-align: middle !important;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  line-height: 1.25;
+}
+
+.official-form-table td > div,
+.official-form-table th > div {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
+/* Socinet Account Section (Compact Flexbox + Grid, subtle small light typography) */
+.official-socinet-box {
+  margin: 5px 0;
+  padding: 5px 8px;
+  background-color: #f8fafc;
+  border: 1px solid #475569;
+  box-sizing: border-box;
+  color: #334155;
+}
+
+.official-socinet-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding-bottom: 3px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid #cbd5e1;
+}
+
+.official-socinet-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  align-items: center;
+}
+
+.official-socinet-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.official-socinet-label {
+  flex-shrink: 0;
+  min-width: 62px;
+  font-size: 9.5px;
+  font-weight: 500;
+  color: #475569;
+  line-height: 1.2;
+}
+
+.official-socinet-input-box {
+  flex: 1 1 0%;
+  min-width: 0;
+  min-height: 22px;
+  padding: 2px 7px;
+  background-color: #ffffff;
+  border: 1px solid #94a3b8;
+  border-radius: 3px;
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+}
+
+.official-socinet-input {
+  width: 100%;
+  height: 16px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  font-size: 9.5px;
+  font-weight: 400;
+  color: #334155;
+  line-height: 1.25;
+}
+
+.official-socinet-value {
+  display: block;
+  width: 100%;
+  font-size: 9.5px;
+  font-weight: 400;
+  color: #334155;
+  line-height: 1.25;
+  white-space: normal;
+  word-break: break-all;
+  overflow: visible;
+}
+
+/* Privacy Consent Row (Flexbox single horizontal line, never wraps) */
+.official-consent-row {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.official-consent-text {
+  font-weight: 700;
+  font-size: 11px;
+  white-space: nowrap;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.official-consent-options {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+.official-consent-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 0mm;
+  }
+
+  html,
+  body,
+  #root {
+    width: 210mm !important;
+    min-height: 297mm !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: visible !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  .print-root-container,
+  .print-main-container {
+    width: 100% !important;
+    max-width: none !important;
+    min-height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: transparent !important;
+    display: block !important;
+  }
+
+  .print-form-section {
+    display: block !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  .print-sheet-wrapper {
+    display: block !important;
+    overflow: visible !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    background: transparent !important;
+    border: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+  }
+
+  .print-sheet-scale-reset {
+    transform: none !important;
+    width: 210mm !important;
+    margin: 0 auto !important;
+  }
+
+  .official-form-sheet {
+    width: 210mm !important;
+    min-height: 297mm !important;
+    height: 297mm !important;
+    margin: 0 auto !important;
+    padding: 13mm 14mm 12mm 14mm !important;
+    box-sizing: border-box !important;
+    box-shadow: none !important;
+    border: none !important;
+    background: #ffffff !important;
+    color: #000000 !important;
+    transform: none !important;
+    overflow: hidden !important;
+    font-family: 'Noto Serif KR', 'Batang', 'Nanum Myeongjo', serif !important;
+    page-break-after: auto;
+    break-after: auto;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  .official-form-sheet .font-sans,
+  .official-socinet-box,
+  .official-socinet-label,
+  .official-socinet-input,
+  .official-socinet-value {
+    font-family: 'Noto Sans KR', 'Inter', 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif !important;
+  }
+
+  .font-num-kr {
+    font-family: 'Noto Serif KR', 'Batang', 'Nanum Myeongjo', serif !important;
+    font-variant-numeric: tabular-nums !important;
+  }
+
+  .official-form-table {
+    width: 100% !important;
+    border-collapse: collapse !important;
+    table-layout: fixed !important;
+  }
+
+  .official-form-table tr {
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+  }
+
+  .official-form-table th,
+  .official-form-table td {
+    vertical-align: middle !important;
+    box-sizing: border-box !important;
+    padding: 6px 8px !important;
+    line-height: 1.25 !important;
+    border-color: #000000 !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  .official-socinet-box {
+    margin: 5px 0 !important;
+    padding: 5px 8px !important;
+    background-color: #f8fafc !important;
+    border: 1px solid #475569 !important;
+    break-inside: avoid !important;
+    page-break-inside: avoid !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  .official-socinet-header {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    padding-bottom: 3px !important;
+    margin-bottom: 4px !important;
+    border-bottom: 1px solid #cbd5e1 !important;
+  }
+
+  .official-socinet-grid {
+    display: grid !important;
+    grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+    gap: 10px !important;
+    align-items: center !important;
+  }
+
+  .official-socinet-field {
+    display: flex !important;
+    align-items: center !important;
+    gap: 6px !important;
+    min-width: 0 !important;
+  }
+
+  .official-socinet-label {
+    min-width: 62px !important;
+    font-size: 9.5px !important;
+    font-weight: 500 !important;
+    color: #475569 !important;
+  }
+
+  .official-socinet-input-box {
+    min-height: 22px !important;
+    padding: 2px 7px !important;
+    background-color: #ffffff !important;
+    border: 1px solid #94a3b8 !important;
+    border-radius: 3px !important;
+    display: flex !important;
+    align-items: center !important;
+    overflow: visible !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  .official-socinet-input,
+  .official-socinet-value {
+    border: 0 !important;
+    background: transparent !important;
+    color: #334155 !important;
+    font-size: 9.5px !important;
+    font-weight: 400 !important;
+    line-height: 1.25 !important;
+    overflow: visible !important;
+  }
+
+  .official-consent-row {
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    gap: 8px !important;
+  }
+
+  .official-consent-options {
+    display: flex !important;
+    flex-wrap: nowrap !important;
+    align-items: center !important;
+    gap: 12px !important;
+    flex-shrink: 0 !important;
+    white-space: nowrap !important;
+  }
+
+  .official-consent-option {
+    display: inline-flex !important;
+    align-items: center !important;
+    gap: 4px !important;
+    white-space: nowrap !important;
+  }
+}
+
