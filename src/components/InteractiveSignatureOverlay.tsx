@@ -218,7 +218,7 @@ export const InteractiveSignatureOverlay: React.FC<InteractiveSignatureOverlayPr
       {showControls && (
         <div
           data-html2canvas-ignore="true"
-          className="absolute -top-11 left-1/2 -translate-x-1/2 bg-slate-900/95 backdrop-blur-md text-white px-2.5 py-1 rounded-full text-[10px] font-sans font-bold flex items-center gap-1.5 shadow-xl shadow-black/25 pointer-events-auto border border-blue-400/40 whitespace-nowrap z-50 animate-in fade-in zoom-in-95 duration-150"
+          className="no-print absolute -top-11 left-1/2 -translate-x-1/2 bg-slate-900/95 backdrop-blur-md text-white px-2.5 py-1 rounded-full text-[10px] font-sans font-bold flex items-center gap-1.5 shadow-xl shadow-black/25 pointer-events-auto border border-blue-400/40 whitespace-nowrap z-50 animate-in fade-in zoom-in-95 duration-150"
         >
           {/* Live Scale Badge */}
           <span className="text-amber-300 font-mono text-[10px] px-1 bg-amber-400/10 rounded border border-amber-400/30">
@@ -329,7 +329,7 @@ export const InteractiveSignatureOverlay: React.FC<InteractiveSignatureOverlayPr
         className={
           readOnly
             ? 'sig-overlay-frame-readonly'
-            : `relative transition-all rounded-lg p-1.5 touch-none ${
+            : `relative transition-all rounded-lg p-1.5 touch-none print:border-0 print:bg-transparent print:shadow-none print:ring-0 ${
                 isDragging
                   ? 'cursor-grabbing border-2 border-dashed border-blue-500 bg-blue-500/10 shadow-lg ring-4 ring-blue-500/20'
                   : isResizing
@@ -359,7 +359,7 @@ export const InteractiveSignatureOverlay: React.FC<InteractiveSignatureOverlayPr
         {!readOnly && activeTooltip && (
           <div
             data-html2canvas-ignore="true"
-            className="absolute -bottom-7 left-1/2 -translate-x-1/2 bg-blue-600 text-white text-[9.5px] font-sans font-bold px-2 py-0.5 rounded-full shadow-md whitespace-nowrap pointer-events-none z-50 animate-in fade-in flex items-center gap-1"
+            className="no-print absolute -bottom-7 left-1/2 -translate-x-1/2 bg-blue-600 text-white text-[9.5px] font-sans font-bold px-2 py-0.5 rounded-full shadow-md whitespace-nowrap pointer-events-none z-50 animate-in fade-in flex items-center gap-1"
           >
             <span>{activeTooltip}</span>
           </div>
@@ -369,7 +369,7 @@ export const InteractiveSignatureOverlay: React.FC<InteractiveSignatureOverlayPr
         {!readOnly && !isDragging && !isResizing && (isHovered || isSelected) && (
           <div
             data-html2canvas-ignore="true"
-            className="absolute -bottom-6 left-1/2 -translate-x-1/2 bg-slate-900/90 text-white text-[9px] font-sans font-medium px-2 py-0.5 rounded-full flex items-center gap-1 shadow-md whitespace-nowrap pointer-events-none opacity-95 border border-white/10"
+            className="no-print absolute -bottom-6 left-1/2 -translate-x-1/2 bg-slate-900/90 text-white text-[9px] font-sans font-medium px-2 py-0.5 rounded-full flex items-center gap-1 shadow-md whitespace-nowrap pointer-events-none opacity-95 border border-white/10"
           >
             <Move className="w-2.5 h-2.5 text-blue-300" />
             <span>{t.sigDragTooltip}</span>
@@ -380,7 +380,7 @@ export const InteractiveSignatureOverlay: React.FC<InteractiveSignatureOverlayPr
         {!readOnly && !isHovered && !isSelected && !isDragging && !isResizing && (
           <div
             data-html2canvas-ignore="true"
-            className="absolute -bottom-5 right-0 bg-blue-600/80 text-white text-[8px] font-sans font-bold px-1.5 py-0.2 rounded-full pointer-events-none shadow-xs flex items-center gap-0.5 opacity-80"
+            className="no-print absolute -bottom-5 right-0 bg-blue-600/80 text-white text-[8px] font-sans font-bold px-1.5 py-0.2 rounded-full pointer-events-none shadow-xs flex items-center gap-0.5 opacity-80"
           >
             <span>{t.sigResizeTooltip}</span>
           </div>
@@ -393,7 +393,7 @@ export const InteractiveSignatureOverlay: React.FC<InteractiveSignatureOverlayPr
             <div
               data-html2canvas-ignore="true"
               title={t.sigResizeTooltip}
-              className="absolute -bottom-2.5 -right-2.5 w-6 h-6 rounded-full bg-blue-600 hover:bg-blue-700 text-white flex items-center justify-center cursor-nwse-resize shadow-md shadow-blue-500/50 border-2 border-white hover:scale-125 transition-transform z-40 pointer-events-auto active:scale-110"
+              className="no-print absolute -bottom-2.5 -right-2.5 w-6 h-6 rounded-full bg-blue-600 hover:bg-blue-700 text-white flex items-center justify-center cursor-nwse-resize shadow-md shadow-blue-500/50 border-2 border-white hover:scale-125 transition-transform z-40 pointer-events-auto active:scale-110"
               onMouseDown={(e) => handleResizeStart(e, 'se')}
               onTouchStart={(e) => handleResizeStart(e, 'se')}
             >
@@ -404,7 +404,7 @@ export const InteractiveSignatureOverlay: React.FC<InteractiveSignatureOverlayPr
             <div
               data-html2canvas-ignore="true"
               title={t.sigResizeTooltip}
-              className="absolute -bottom-2.5 -left-2.5 w-5 h-5 rounded-full bg-indigo-600 hover:bg-indigo-700 text-white flex items-center justify-center cursor-nesw-resize shadow-md shadow-indigo-500/40 border-2 border-white hover:scale-125 transition-transform z-40 pointer-events-auto"
+              className="no-print absolute -bottom-2.5 -left-2.5 w-5 h-5 rounded-full bg-indigo-600 hover:bg-indigo-700 text-white flex items-center justify-center cursor-nesw-resize shadow-md shadow-indigo-500/40 border-2 border-white hover:scale-125 transition-transform z-40 pointer-events-auto"
               onMouseDown={(e) => handleResizeStart(e, 'sw')}
               onTouchStart={(e) => handleResizeStart(e, 'sw')}
             >
@@ -415,7 +415,7 @@ export const InteractiveSignatureOverlay: React.FC<InteractiveSignatureOverlayPr
             <div
               data-html2canvas-ignore="true"
               title={t.sigResizeTooltip}
-              className="absolute -top-2.5 -right-2.5 w-5 h-5 rounded-full bg-indigo-600 hover:bg-indigo-700 text-white flex items-center justify-center cursor-nesw-resize shadow-md shadow-indigo-500/40 border-2 border-white hover:scale-125 transition-transform z-40 pointer-events-auto"
+              className="no-print absolute -top-2.5 -right-2.5 w-5 h-5 rounded-full bg-indigo-600 hover:bg-indigo-700 text-white flex items-center justify-center cursor-nesw-resize shadow-md shadow-indigo-500/40 border-2 border-white hover:scale-125 transition-transform z-40 pointer-events-auto"
               onMouseDown={(e) => handleResizeStart(e, 'ne')}
               onTouchStart={(e) => handleResizeStart(e, 'ne')}
             >
@@ -426,7 +426,7 @@ export const InteractiveSignatureOverlay: React.FC<InteractiveSignatureOverlayPr
             <div
               data-html2canvas-ignore="true"
               title={t.sigResizeTooltip}
-              className="absolute -top-2.5 -left-2.5 w-5 h-5 rounded-full bg-blue-600 hover:bg-blue-700 text-white flex items-center justify-center cursor-nwse-resize shadow-md shadow-blue-500/40 border-2 border-white hover:scale-125 transition-transform z-40 pointer-events-auto"
+              className="no-print absolute -top-2.5 -left-2.5 w-5 h-5 rounded-full bg-blue-600 hover:bg-blue-700 text-white flex items-center justify-center cursor-nwse-resize shadow-md shadow-blue-500/40 border-2 border-white hover:scale-125 transition-transform z-40 pointer-events-auto"
               onMouseDown={(e) => handleResizeStart(e, 'nw')}
               onTouchStart={(e) => handleResizeStart(e, 'nw')}
             >
