@@ -1777,6 +1777,7 @@ export interface DownloadResult {
   blobUrl: string;
   filename: string;
   sharedViaWebShare: boolean;
+  autoTriggered: boolean;
 }
 
 /**
@@ -1802,9 +1803,8 @@ export function isIOSDevice(): boolean {
 }
 
 /**
- * Downloads or shares the generated PDF.
- * Fully compatible with Mobile (iOS Safari, Android Chrome) using direct link triggers
- * and leaving blob URLs active for modal save/share interactions.
+ * Downloads the generated PDF once cleanly (no duplicate tabs or second copies).
+ * Desktop/Android triggers a single direct download; iOS opens the single-tap save helper modal.
  */
 export async function downloadPdfFile(
   pdf: jsPDF | MergedPdfResult | any,
@@ -1823,39 +1823,30 @@ export async function downloadPdfFile(
   const blobUrl = URL.createObjectURL(blob);
   const sharedViaWebShare = false;
   const isIOS = isIOSDevice();
+  let autoTriggered = false;
 
-  try {
-    const a = document.createElement('a');
-    a.href = blobUrl;
-    a.download = filename;
-    a.rel = 'noopener noreferrer';
-
-    if (isIOS) {
-      try {
-        window.open(blobUrl, '_blank');
-      } catch (err) {
-        console.warn('iOS window.open error:', err);
-      }
-    } else {
-      a.target = '_blank';
+  if (!isIOS) {
+    try {
+      const a = document.createElement('a');
+      a.href = blobUrl;
+      a.download = filename;
+      a.rel = 'noopener noreferrer';
+      a.style.display = 'none';
       document.body.appendChild(a);
       a.click();
+      autoTriggered = true;
       setTimeout(() => {
         try {
           document.body.removeChild(a);
         } catch {}
       }, 3000);
-    }
-  } catch (err) {
-    console.warn('Auto download error, user can still use manual button:', err);
-    if (typeof pdf?.save === 'function') {
-      try {
-        pdf.save(filename);
-      } catch {}
+    } catch (err) {
+      console.warn('Auto download error, falling back to manual modal:', err);
+      autoTriggered = false;
     }
   }
 
-  return { blob, blobUrl, filename, sharedViaWebShare };
+  return { blob, blobUrl, filename, sharedViaWebShare, autoTriggered };
 }
 
 /**
@@ -1877,6 +1868,7 @@ export async function downloadSingleFormPdf(
 
   const blobUrl = URL.createObjectURL(blob);
   let sharedViaWebShare = false;
+  let autoTriggered = false;
 
   if (typeof navigator !== 'undefined' && navigator.share && navigator.canShare) {
     try {
@@ -1901,10 +1893,11 @@ export async function downloadSingleFormPdf(
       const a = document.createElement('a');
       a.href = blobUrl;
       a.download = filename;
-      a.target = '_blank';
       a.rel = 'noopener noreferrer';
+      a.style.display = 'none';
       document.body.appendChild(a);
       a.click();
+      autoTriggered = true;
       setTimeout(() => {
         try {
           document.body.removeChild(a);
@@ -1913,9 +1906,10 @@ export async function downloadSingleFormPdf(
     } catch {
       if (typeof pdf?.save === 'function') {
         pdf.save(filename);
+        autoTriggered = true;
       }
     }
   }
 
-  return { blob, blobUrl, filename, sharedViaWebShare };
+  return { blob, blobUrl, filename, sharedViaWebShare, autoTriggered };
 }

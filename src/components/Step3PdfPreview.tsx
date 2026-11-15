@@ -178,13 +178,22 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
       const sizeInMb = (res.blob.size / (1024 * 1024)).toFixed(2);
       const sizeStr = res.blob.size > 1024 * 1024 ? `${sizeInMb} MB` : `${Math.round(res.blob.size / 1024)} KB`;
 
-      setDownloadedFileModal({
-        blob: res.blob,
-        blobUrl: res.blobUrl,
-        filename: res.filename,
-        totalPages: actualPages,
-        sizeStr,
-      });
+      if (!res.autoTriggered) {
+        setDownloadedFileModal({
+          blob: res.blob,
+          blobUrl: res.blobUrl,
+          filename: res.filename,
+          totalPages: actualPages,
+          sizeStr,
+        });
+      } else {
+        setDownloadedFileModal(null);
+        setTimeout(() => {
+          try {
+            URL.revokeObjectURL(res.blobUrl);
+          } catch {}
+        }, 10000);
+      }
 
       confetti({
         particleCount: 90,
@@ -194,7 +203,9 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
 
       setStatusNotice({
         type: 'success',
-        text: `✓ បង្កើតកញ្ចប់ PDF ពេញលេញ (${actualPages} ទំព័រ, ${sizeStr}) រួចរាល់! ផ្ទាំងទាញយក & រក្សាទុកបានបើកឡើង។`,
+        text: res.autoTriggered
+          ? `✓ បានទាញយកកញ្ចប់ PDF ពេញលេញ (${actualPages} ទំព័រ, ${sizeStr}) រួចរាល់!`
+          : `✓ បង្កើតកញ្ចប់ PDF ពេញលេញ (${actualPages} ទំព័រ, ${sizeStr}) រួចរាល់! សូមចុច Save ខាងក្រោម។`,
       });
     } catch (err) {
       console.error('PDF Generation failed:', err);
