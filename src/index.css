@@ -84,8 +84,6 @@ body[data-lang="km"],
   width: 100%;
   border-collapse: collapse;
   table-layout: fixed;
-  border-style: solid;
-  border-color: #000000;
 }
 
 .official-form-table th,
@@ -94,8 +92,6 @@ body[data-lang="km"],
   box-sizing: border-box;
   padding: 6px 8px;
   line-height: 1.25;
-  border-style: solid;
-  border-color: #000000;
 }
 
 .official-form-table td > div,

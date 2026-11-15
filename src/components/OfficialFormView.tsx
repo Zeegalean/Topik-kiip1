@@ -83,7 +83,7 @@ export const OfficialFormView: React.FC<OfficialFormViewProps> = ({
         e.preventDefault();
         if (onRightClickBlock) onRightClickBlock();
       }}
-      className="official-form-sheet bg-white text-black shadow-2xl relative select-text mx-auto"
+      className="official-form-sheet bg-white text-black shadow-2xl relative select-text overflow-hidden mx-auto"
       style={{
         width: '210mm',
         minHeight: '297mm',

@@ -127,8 +127,6 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
 
   // Local fallback ref in case external ref was not attached
   const localFormRef = useRef<HTMLDivElement | null>(null);
-  const dedicatedCaptureRef = useRef<HTMLDivElement | null>(null);
-  const activeFormRef = formRef.current ? formRef : localFormRef;
 
 
 
@@ -151,27 +149,22 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
   const handleDownloadMerged = async () => {
     setIsGeneratingMerged(true);
     setStatusNotice(null);
-    // Allow state update & repaint of the capture container
-    await new Promise((r) => setTimeout(r, 200));
-
-    const el = dedicatedCaptureRef.current || formRef.current || localFormRef.current;
-    if (!el) {
-      setStatusNotice({
-        type: 'error',
-        text: t.pdfFormNotReady,
-      });
-      setIsGeneratingMerged(false);
-      return;
-    }
 
     try {
       const pdf = await generateMergedPdf({
-        formElement: el,
         docs,
         formData,
+        sigSettings,
+        showWatermark: !isPaid,
       });
 
       const res = await downloadPdfFile(pdf, formData.name);
+
+      const actualPages =
+        1 +
+        (docs.topikCertList?.length || 0) +
+        (docs.arcFront ? 1 : 0) +
+        (docs.passportList?.length || 0);
 
       const sizeInMb = (res.blob.size / (1024 * 1024)).toFixed(2);
       const sizeStr = res.blob.size > 1024 * 1024 ? `${sizeInMb} MB` : `${Math.round(res.blob.size / 1024)} KB`;
@@ -180,7 +173,7 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
         blob: res.blob,
         blobUrl: res.blobUrl,
         filename: res.filename,
-        totalPages,
+        totalPages: actualPages,
         sizeStr,
       });
 
@@ -192,7 +185,7 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
 
       setStatusNotice({
         type: 'success',
-        text: `✓ បង្កើតកញ្ចប់ PDF ពេញលេញ (${totalPages} ទំព័រ, ${sizeStr}) រួចរាល់! ផ្ទាំងទាញយក & រក្សាទុកបានបើកឡើង។`,
+        text: `✓ បង្កើតកញ្ចប់ PDF ពេញលេញ (${actualPages} ទំព័រ, ${sizeStr}) រួចរាល់! ផ្ទាំងទាញយក & រក្សាទុកបានបើកឡើង។`,
       });
     } catch (err) {
       console.error('PDF Generation failed:', err);
@@ -496,35 +489,7 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
         </span>
       </div>
 
-      {/* Dedicated clean DOM container for pixel-perfect html2canvas PDF capture */}
-      <div
-        id="pdf-capture-container"
-        className="no-print"
-        aria-hidden="true"
-        style={{
-          position: 'fixed',
-          left: '-10000px',
-          top: '0px',
-          width: '210mm',
-          minHeight: '297mm',
-          backgroundColor: '#ffffff',
-          color: '#000000',
-          zIndex: -1,
-          pointerEvents: 'none',
-          visibility: isGeneratingMerged ? 'visible' : 'hidden',
-          opacity: 1,
-        }}
-      >
-        <OfficialFormView
-          containerRef={dedicatedCaptureRef}
-          formData={formData}
-          signatureUrl={docs.signature}
-          sigSettings={sigSettings}
-          editable={false}
-          lang={lang}
-          showWatermark={!isPaid}
-        />
-      </div>
+      {/* PDF Page 1 is rendered deterministically via high-DPI Canvas 2D */}
 
       {/* Full-screen Loading Overlay during PDF Generation */}
       {isGeneratingMerged && (
