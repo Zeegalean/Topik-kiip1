@@ -266,7 +266,7 @@ export default function App() {
   );
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col font-sans relative print-root-container">
+    <div className="min-h-dvh bg-slate-50 flex flex-col font-sans relative print-root-container">
       {/* Background Wallpaper Container */}
       {bgImage && (
         <div 
@@ -325,7 +325,7 @@ export default function App() {
       </div>
 
       {/* Main Container */}
-      <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 relative z-10 print-main-container">
+      <main className="flex-1 max-w-4xl w-full mx-auto px-3 sm:px-6 py-4 sm:py-6 relative z-10 print-main-container">
         {activeTab === 'guide' ? (
           <TopikKiipGuide
             lang={lang}

@@ -494,38 +494,38 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
       </div>
 
       {/* View Switcher Tabs */}
-      <div className="no-print flex items-center justify-between border-b border-slate-200 pb-3">
-        <div className="flex items-center gap-2">
+      <div className="no-print border-b border-slate-200 pb-3 space-y-2">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 w-full">
           <button
             type="button"
             onClick={() => setPreviewTab('form')}
-            className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold flex items-center gap-2 transition-all cursor-pointer ${
+            className={`w-full px-4 py-3 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center sm:justify-start gap-2 transition-all cursor-pointer ${
               previewTab === 'form'
                 ? 'bg-blue-600 text-white shadow-xs'
                 : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
             }`}
           >
-            <FileCheck2 className="w-4 h-4" />
-            <span>មើលពាក្យសុំទម្រង់ផ្លូវការពេញលេញ (Full Form Template)</span>
+            <FileCheck2 className="w-4 h-4 shrink-0" />
+            <span className="truncate">Full Form Template</span>
           </button>
 
           <button
             type="button"
             onClick={() => setPreviewTab('pages')}
-            className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold flex items-center gap-2 transition-all cursor-pointer ${
+            className={`w-full px-4 py-3 rounded-xl text-xs sm:text-sm font-bold flex items-center justify-center sm:justify-start gap-2 transition-all cursor-pointer ${
               previewTab === 'pages'
                 ? 'bg-blue-600 text-white shadow-xs'
                 : 'bg-white text-slate-600 hover:bg-slate-100 border border-slate-200'
             }`}
           >
-            <Layers className="w-4 h-4" />
-            <span>ទិដ្ឋភាពទំព័រឯកសារទាំងអស់ ({totalPages} ទំព័រ)</span>
+            <Layers className="w-4 h-4 shrink-0" />
+            <span className="truncate">Preview all {totalPages} pages</span>
           </button>
         </div>
 
-        <span className="text-xs text-slate-500 hidden sm:inline">
+        <p className="text-[11px] text-slate-500 text-center sm:text-left">
           🔎 ផ្ទៀងផ្ទាត់ពត៌មានទាំងអស់មុននឹងទាញយក ឬផ្ញើ Email
-        </span>
+        </p>
       </div>
 
       {/* Dedicated Unscaled A4 Form Capture Container (Rendered cleanly behind overlay only while exporting) */}
