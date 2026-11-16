@@ -487,7 +487,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                 <div className="relative flex-1">
                   <Ticket className="w-4 h-4 text-purple-500 absolute left-3 top-3" />
                   <input
-                    type="text"
+                    type="password"
                     autoComplete="off"
                     value={promoCodeInput}
                     onChange={(e) => {
@@ -500,7 +500,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                         verifyCodeAndUnlock(promoCodeInput, 'promo');
                       }
                     }}
-                    placeholder={isKm ? 'បញ្ចូល Promo Code (ឧ. 199621147)...' : 'Enter Promo Code...'}
+                    placeholder="••••••••"
                     className="w-full pl-9 pr-3 py-2.5 bg-white border border-purple-300 rounded-xl text-xs sm:text-sm font-mono font-bold tracking-wider text-purple-950 focus:outline-none focus:ring-2 focus:ring-purple-400 placeholder:font-sans placeholder:font-normal placeholder:text-slate-400"
                   />
                 </div>
@@ -999,14 +999,14 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                   <div className="relative">
                     <Ticket className="w-4 h-4 text-purple-500 absolute left-3 top-3.5" />
                     <input
-                      type="text"
+                      type="password"
                       autoComplete="off"
                       value={redeemCode}
                       onChange={(e) => {
                         setRedeemCode(e.target.value.toUpperCase());
                         setRedeemError(null);
                       }}
-                      placeholder="199621147..."
+                      placeholder="••••••••"
                       className="w-full pl-9 pr-20 py-3 rounded-xl border border-slate-300 text-sm font-mono tracking-wider font-bold uppercase focus:border-purple-600 focus:ring-2 focus:ring-purple-100 outline-none"
                     />
                     {redeemCode && (

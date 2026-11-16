@@ -18,6 +18,10 @@ export const AuthModal: React.FC<AuthModalProps> = ({
 }) => {
   const t = getTranslation(lang);
   const [emailInput, setEmailInput] = useState('');
+  const [passwordInput, setPasswordInput] = useState('');
+  const [showForgotPassword, setShowForgotPassword] = useState(false);
+  const [forgotEmail, setForgotEmail] = useState('');
+  const [forgotSent, setForgotSent] = useState(false);
   const [nameInput, setNameInput] = useState('');
   const [phoneInput, setPhoneInput] = useState('');
   const [otpInput, setOtpInput] = useState('');
@@ -187,47 +191,135 @@ export const AuthModal: React.FC<AuthModalProps> = ({
               </button>
             </div>
           ) : activeTab === 'email' ? (
-            <div className="space-y-4">
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  Gmail / Email Address
-                </label>
-                <div className="relative">
-                  <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
-                  <input
-                    type="email"
-                    placeholder="example@gmail.com"
-                    value={emailInput}
-                    onChange={(e) => setEmailInput(e.target.value)}
-                    className="w-full pl-9 pr-3 py-2.5 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  />
+            showForgotPassword ? (
+              <div className="space-y-4">
+                <div className="p-3 bg-amber-50 rounded-2xl border border-amber-200 text-xs text-amber-900 space-y-1">
+                  <p className="font-bold">🔑 {lang === 'km' ? 'ភ្លេចពាក្យសម្ងាត់ (Forgot Password)' : 'Reset Password'}</p>
+                  <p className="text-[11px] text-amber-700">
+                    {lang === 'km'
+                      ? 'សូមបញ្ចូល Email របស់អ្នក ដើម្បីទទួលបានតំណរភ្ជាប់កំណត់ពាក្យសម្ងាត់ថ្មី (Password Reset Link)។'
+                      : 'Enter your email to receive a password reset link.'}
+                  </p>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Email Address</label>
+                  <div className="relative">
+                    <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                    <input
+                      type="email"
+                      placeholder="example@gmail.com"
+                      value={forgotEmail}
+                      onChange={(e) => setForgotEmail(e.target.value)}
+                      className="w-full pl-9 pr-3 py-2.5 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+                </div>
+
+                {forgotSent && (
+                  <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs rounded-xl font-bold">
+                    {lang === 'km'
+                      ? '✓ បានផ្ញើសារកំណត់ពាក្យសម្ងាត់ថ្មីទៅកាន់ Email របស់អ្នករួចរាល់ហើយ!'
+                      : '✓ Password reset instructions sent to your email!'}
+                  </div>
+                )}
+
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (!forgotEmail) return;
+                      setForgotSent(true);
+                      setTimeout(() => {
+                        setShowForgotPassword(false);
+                        setForgotSent(false);
+                      }, 3000);
+                    }}
+                    disabled={!forgotEmail || forgotSent}
+                    className="flex-1 py-3 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-xl font-bold text-sm transition-colors cursor-pointer"
+                  >
+                    {lang === 'km' ? 'ផ្ញើតំណរភ្ជាប់កំណត់ពាក្យសម្ងាត់' : 'Send Reset Link'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowForgotPassword(false)}
+                    className="px-4 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl font-bold text-xs cursor-pointer"
+                  >
+                    {lang === 'km' ? 'ត្រឡប់ក្រោយ' : 'Back'}
+                  </button>
                 </div>
               </div>
-
-              <div>
-                <label className="block text-xs font-bold text-slate-700 mb-1">
-                  {lang === 'km' ? 'ឈ្មោះអ្នកប្រើ (Full Name)' : 'Full Name'}
-                </label>
-                <div className="relative">
-                  <User className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
-                  <input
-                    type="text"
-                    placeholder="SOK SRORNG"
-                    value={nameInput}
-                    onChange={(e) => setNameInput(e.target.value)}
-                    className="w-full pl-9 pr-3 py-2.5 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  />
+            ) : (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    Gmail / Email Address
+                  </label>
+                  <div className="relative">
+                    <Mail className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                    <input
+                      type="email"
+                      placeholder="example@gmail.com"
+                      value={emailInput}
+                      onChange={(e) => setEmailInput(e.target.value)}
+                      className="w-full pl-9 pr-3 py-2.5 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
                 </div>
-              </div>
 
-              <button
-                onClick={() => handleProviderLogin('gmail')}
-                disabled={!emailInput}
-                className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-xl font-bold text-sm transition-colors shadow-xs cursor-pointer"
-              >
-                {lang === 'km' ? 'ចូលប្រើដោយ Gmail' : 'Continue with Gmail'}
-              </button>
-            </div>
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="block text-xs font-bold text-slate-700">
+                      {lang === 'km' ? 'ពាក្យសម្ងាត់ (Password)' : 'Password'}
+                    </label>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setForgotEmail(emailInput);
+                        setShowForgotPassword(true);
+                      }}
+                      className="text-xs text-indigo-600 hover:text-indigo-800 font-bold underline cursor-pointer"
+                    >
+                      {lang === 'km' ? 'ភ្លេចពាក្យសម្ងាត់?' : 'Forgot Password?'}
+                    </button>
+                  </div>
+                  <div className="relative">
+                    <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                    <input
+                      type="password"
+                      placeholder="••••••••"
+                      value={passwordInput}
+                      onChange={(e) => setPasswordInput(e.target.value)}
+                      className="w-full pl-9 pr-3 py-2.5 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">
+                    {lang === 'km' ? 'ឈ្មោះអ្នកប្រើ (Full Name)' : 'Full Name'}
+                  </label>
+                  <div className="relative">
+                    <User className="w-4 h-4 text-slate-400 absolute left-3 top-3" />
+                    <input
+                      type="text"
+                      placeholder="SOK SRORNG"
+                      value={nameInput}
+                      onChange={(e) => setNameInput(e.target.value)}
+                      className="w-full pl-9 pr-3 py-2.5 border border-slate-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    />
+                  </div>
+                </div>
+
+                <button
+                  onClick={() => handleProviderLogin('gmail')}
+                  disabled={!emailInput || !passwordInput}
+                  className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-xl font-bold text-sm transition-colors shadow-xs cursor-pointer"
+                >
+                  {lang === 'km' ? 'ចូលប្រើដោយ Gmail / Email' : 'Continue with Gmail'}
+                </button>
+              </div>
+            )
           ) : (
             <div className="space-y-4">
               <div className="p-3 bg-blue-50 rounded-2xl border border-blue-200 text-xs text-blue-900 space-y-1">
