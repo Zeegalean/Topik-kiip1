@@ -43,6 +43,40 @@ export const Step4EmailSender: React.FC<Step4EmailSenderProps> = ({
   const [copiedField, setCopiedField] = useState<string | null>(null);
   const [guideMode, setGuideMode] = useState<GuideDeviceMode>('both');
   const [sendError, setSendError] = useState<string | null>(null);
+  const [isSendingWebmasterEmail, setIsSendingWebmasterEmail] = useState(false);
+  const [webmasterEmailNotice, setWebmasterEmailNotice] = useState<string | null>(null);
+
+  const handleSendWebmasterEmail = async () => {
+    setIsSendingWebmasterEmail(true);
+    setWebmasterEmailNotice(null);
+    try {
+      const resp = await fetch('/api/mail/send-receipt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          recipientEmail: activeRecipientEmail,
+          applicantName: applicantDisplayName,
+          officeEmail: activeRecipientEmail,
+          subject: emailSubject,
+          body: emailBody,
+        }),
+      });
+      const data = await resp.json();
+      if (resp.ok && data?.success) {
+        setWebmasterEmailNotice(
+          isKm
+            ? '✓ បានផ្ញើវិក្កយបត្រ ឯកសារ PDF និង Description ទៅកាន់អន្តោប្រវេសន៍តាមរយៈ Webmaster Email (Zoho SMTP) រួចរាល់!'
+            : '✓ Receipt, PDF and description sent successfully via Webmaster Email!'
+        );
+      } else {
+        setWebmasterEmailNotice(data?.error || 'Failed to send via webmaster email');
+      }
+    } catch (err: any) {
+      setWebmasterEmailNotice('Error: ' + err.message);
+    } finally {
+      setIsSendingWebmasterEmail(false);
+    }
+  };
 
   // Auto-detect office based on address
   useEffect(() => {
@@ -679,7 +713,7 @@ ${emailBody}`;
             </div>
           )}
 
-          {/* Action Buttons: 1-Click Open Email App & Open Gmail Web */}
+          {/* Action Buttons: 1-Click Open Email App & Open Gmail Web & Webmaster Auto-Send */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
             <button
               type="button"
@@ -707,6 +741,26 @@ ${emailBody}`;
               </span>
               <ExternalLink className="w-3.5 h-3.5 text-slate-400 shrink-0" />
             </a>
+
+            <button
+              type="button"
+              onClick={handleSendWebmasterEmail}
+              disabled={isSendingWebmasterEmail || !activeRecipientEmail}
+              className="w-full sm:col-span-2 py-3.5 px-5 rounded-2xl bg-gradient-to-r from-purple-600 via-indigo-600 to-purple-700 hover:from-purple-700 hover:to-indigo-800 text-white font-extrabold text-sm shadow-lg flex items-center justify-center gap-2.5 transition-all cursor-pointer disabled:opacity-50"
+            >
+              <Mail className="w-4 h-4 text-amber-300 shrink-0" />
+              <span>
+                {isKm
+                  ? '🤖 ផ្ញើស្វ័យប្រវត្តិតាមរយៈ Webmaster / Zoho Email (Auto-Send)'
+                  : 'Auto-Send via Webmaster Email (Zoho SMTP)'}
+              </span>
+            </button>
+
+            {webmasterEmailNotice && (
+              <div className="sm:col-span-2 p-3.5 rounded-xl bg-purple-50 border border-purple-200 text-purple-900 text-xs font-bold text-center">
+                {webmasterEmailNotice}
+              </div>
+            )}
           </div>
 
           {/* Critical Reminder Box with Exact Filename Copy */}

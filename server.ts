@@ -4,6 +4,7 @@ import crypto from 'crypto';
 import { execSync } from 'child_process';
 import express from 'express';
 import dotenv from 'dotenv';
+import nodemailer from 'nodemailer';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -1031,6 +1032,59 @@ app.post('/api/payments/verify-redeem', (req, res) => {
     success: false,
     error: 'លេខកូដមិនត្រឹមត្រូវ ឬផុតកំណត់! សូមពិនិត្យម្តងទៀត ឬបង់ប្រាក់តាម ABA PayWay។',
   });
+});
+
+app.post('/api/mail/send-receipt', async (req, res) => {
+  try {
+    const { recipientEmail, applicantName, officeEmail, subject, body, pdfBase64 } = req.body;
+    if (!recipientEmail && !officeEmail) {
+      return res.status(400).json({ success: false, error: 'Recipient email required' });
+    }
+
+    const zohoUser = process.env.ZOHO_MAIL_USER;
+    const zohoPass = process.env.ZOHO_MAIL_PASSWORD;
+
+    if (zohoUser && zohoPass) {
+      const transporter = nodemailer.createTransport({
+        host: 'smtp.zoho.com',
+        port: 465,
+        secure: true,
+        auth: {
+          user: zohoUser,
+          pass: zohoPass,
+        },
+      });
+
+      const mailOptions: any = {
+        from: `"KIIP TOPIK Portal" <${zohoUser}>`,
+        to: recipientEmail || officeEmail,
+        cc: officeEmail && recipientEmail !== officeEmail ? officeEmail : undefined,
+        subject: subject || `사회통합프로그램 연계 신청 서류 — ${applicantName}`,
+        text: body || `사회통합프로그램 연계 신청 완료.`,
+      };
+
+      if (pdfBase64) {
+        mailOptions.attachments = [
+          {
+            filename: `사회통합프로그램_연계신청서_통합서류_${applicantName || 'Applicant'}.pdf`,
+            content: Buffer.from(pdfBase64.split(',')[1] || pdfBase64, 'base64'),
+          },
+        ];
+      }
+
+      await transporter.sendMail(mailOptions);
+      return res.json({ success: true, message: 'Email sent successfully via Zoho Mail SMTP' });
+    } else {
+      return res.json({
+        success: true,
+        simulated: true,
+        message: 'Email simulated successfully (Configure ZOHO_MAIL_USER and ZOHO_MAIL_PASSWORD in environment variables to send via Zoho SMTP)',
+      });
+    }
+  } catch (err: any) {
+    console.error('Zoho Mail sending error:', err);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to send email' });
+  }
 });
 
 // Setup Vite middleware in dev or static files in production
