@@ -19,6 +19,7 @@ import { PaymentModal } from './components/PaymentModal';
 import { SocinetNoticeModal } from './components/SocinetNoticeModal';
 import { LanguageSelectorModal } from './components/LanguageSelectorModal';
 import { AdminAuthModal } from './components/AdminAuthModal';
+import { AdminDashboard } from './components/AdminDashboard';
 import { VisitorStatsCounter } from './components/VisitorStatsCounter';
 import { getTranslation } from './utils/translations';
 import { saveFormDraft, isFormDataWorthSaving } from './utils/draftStorage';
@@ -96,6 +97,7 @@ export default function App() {
     return false;
   });
   const [isAdminAuthOpen, setIsAdminAuthOpen] = useState<boolean>(false);
+  const [isAdminDashboardOpen, setIsAdminDashboardOpen] = useState<boolean>(false);
 
   // Workflow navigation
   const [currentStep, setCurrentStep] = useState<number>(1);
@@ -472,7 +474,17 @@ export default function App() {
       <AdminAuthModal
         isOpen={isAdminAuthOpen}
         onClose={() => setIsAdminAuthOpen(false)}
-        onSuccess={() => setIsAdmin(true)}
+        onSuccess={() => {
+          setIsAdmin(true);
+          setIsAdminDashboardOpen(true);
+        }}
+        lang={lang}
+      />
+
+      {/* Admin Dashboard Modal */}
+      <AdminDashboard
+        isOpen={isAdminDashboardOpen}
+        onClose={() => setIsAdminDashboardOpen(false)}
         lang={lang}
       />
 
@@ -497,19 +509,25 @@ export default function App() {
             <span>{t.footerSupport}</span>
             <span>·</span>
             {isAdmin ? (
-              <div className="flex items-center gap-1.5 bg-emerald-50 text-emerald-900 border border-emerald-300 px-2.5 py-0.5 rounded-full text-[10px] font-bold shadow-2xs">
-                <Shield className="w-3 h-3 text-emerald-600" />
-                <span>Admin Mode ON (PC App បើក)</span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsAdminDashboardOpen(true)}
+                  className="px-3 py-1 bg-indigo-600 hover:bg-indigo-700 text-white font-bold rounded-xl shadow-xs flex items-center gap-1.5 cursor-pointer transition-colors"
+                >
+                  <Shield className="w-3.5 h-3.5 text-amber-300" />
+                  <span>⚙️ Admin Dashboard</span>
+                </button>
                 <button
                   type="button"
                   onClick={() => {
                     localStorage.removeItem("kiip_admin_mode");
                     setIsAdmin(false);
                   }}
-                  className="text-red-600 hover:text-red-800 underline ml-1 cursor-pointer font-bold"
-                  title="បិទ Admin Mode"
+                  className="text-slate-400 hover:text-red-600 underline cursor-pointer text-[10px]"
+                  title="Logout Admin"
                 >
-                  បិទ/Logout
+                  Logout
                 </button>
               </div>
             ) : (
