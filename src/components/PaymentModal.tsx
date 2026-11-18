@@ -83,6 +83,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const isKm = lang === 'km';
   const isKo = lang === 'ko';
 
+  const [successSecondsLeft, setSuccessSecondsLeft] = useState<number>(30);
+
   const completeUnlock = useCallback(() => {
     try {
       localStorage.setItem('kiip_doc_paid_v3', 'true');
@@ -91,17 +93,32 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     }
     setIsProcessing(false);
     setIsSuccess(true);
+    setSuccessSecondsLeft(30);
 
     confetti({
       particleCount: 150,
       spread: 95,
       origin: { y: 0.5 },
     });
+  }, []);
 
-    setTimeout(() => {
-      onPaymentSuccess();
-    }, 1300);
-  }, [onPaymentSuccess]);
+  // 30-second countdown timer for saving/downloading on mobile before auto-advancing to Step 4
+  useEffect(() => {
+    if (!isOpen || !isSuccess) return;
+
+    const timer = window.setInterval(() => {
+      setSuccessSecondsLeft((prev) => {
+        if (prev <= 1) {
+          clearInterval(timer);
+          onPaymentSuccess();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, [isOpen, isSuccess, onPaymentSuccess]);
 
   // Create fresh 15-minute ABA PayWay QR session
   const generateNewKhqr = useCallback(async () => {
@@ -407,22 +424,30 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         </div>
 
         {isSuccess ? (
-          /* Success Screen */
+          /* Success Screen with 30s Download & Save Countdown for Mobile */
           <div className="p-8 sm:p-10 text-center space-y-4">
             <div className="w-16 h-16 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center mx-auto shadow-lg shadow-emerald-200 animate-bounce">
               <CheckCircle2 className="w-9 h-9" />
             </div>
             <h4 className="text-2xl font-black text-slate-900">
-              {t.successTitle}
+              {isKm ? 'ទូទាត់ ឬ វាយលេខកូដជោគជ័យ!' : t.successTitle}
             </h4>
             <p className="text-sm text-slate-600 max-w-md mx-auto leading-relaxed">
-              {t.successDesc}
+              {isKm
+                ? `ឯកសារត្រូវបានដោះសោររួចរាល់។ សូមទាញយក និងរក្សាទុកឯកសាររបស់អ្នក (ប្រព័ន្ធនឹងរក្សាទុកជូនរយៈពេល ${successSecondsLeft} វិនាទីសិន មុននឹងលោតទៅជំហានទី៤)...`
+                : `Documents unlocked successfully. Please save and download your files (holding for ${successSecondsLeft}s for mobile saving before Step 4)...`}
             </p>
-            <div className="pt-2">
+
+            <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-900 font-bold inline-flex items-center gap-2 tabular-nums">
+              <Clock className="w-4 h-4 text-amber-600 shrink-0" />
+              <span>{isKm ? `⏱️ រយៈពេលរក្សាទុកទូរសព្ទ: ${successSecondsLeft} វិនាទី` : `⏱️ Mobile Save Window: ${successSecondsLeft}s`}</span>
+            </div>
+
+            <div className="pt-2 flex flex-col sm:flex-row items-center justify-center gap-3">
               <button
                 type="button"
-                onClick={onClose}
-                className="px-6 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm shadow-lg shadow-emerald-900/20 inline-flex items-center gap-2 transition-all hover:scale-105 cursor-pointer"
+                onClick={onPaymentSuccess}
+                className="w-full sm:w-auto px-6 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm shadow-lg shadow-emerald-900/20 inline-flex items-center justify-center gap-2 transition-all hover:scale-105 cursor-pointer"
               >
                 <span>{t.downloadCleanNow}</span>
                 <ArrowRight className="w-4 h-4" />
