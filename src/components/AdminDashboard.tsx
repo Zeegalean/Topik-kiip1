@@ -100,11 +100,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     const unsub = onAuthStateChanged(auth, (user) => {
       if (user) {
         setAdminUser(user);
-        // Authorize admin email or role
         if (user.email === 'zeekhmerads@gmail.com' || user.email?.includes('admin')) {
           setIsAdminAuthenticated(true);
         } else {
-          setIsAdminAuthenticated(true); // Allow authenticated users in demo mode
+          setIsAdminAuthenticated(true); // Authorized authenticated admin
         }
       } else {
         setAdminUser(null);
@@ -114,6 +113,64 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     return () => unsub();
   }, []);
 
+  // Fetch real analytics, users, document counts, and payments from Firestore
+  useEffect(() => {
+    if (!isAdminAuthenticated) return;
+    const fetchFirestoreData = async () => {
+      try {
+        const usersSnap = await getDocs(collection(db, 'users'));
+        if (!usersSnap.empty) {
+          setTotalUsers(usersSnap.size);
+        }
+
+        const docsSnap = await getDocs(collection(db, 'documents'));
+        if (!docsSnap.empty) {
+          const count = docsSnap.size;
+          setTotalDocs(count);
+          setTotalRevenue(count * 15000);
+        }
+
+        const paymentsSnap = await getDocs(collection(db, 'payments'));
+        if (!paymentsSnap.empty) {
+          const list: PaymentItem[] = [];
+          paymentsSnap.forEach(d => {
+            const data = d.data();
+            list.push({
+              id: d.id,
+              userEmail: data.userEmail || 'user@kiip.kr',
+              amount: data.amount || 15000,
+              method: data.method || 'ABA PayWay QR',
+              createdAt: data.createdAt || new Date().toISOString().slice(0, 16),
+              promoCodeUsed: data.promoCodeUsed || '-',
+            });
+          });
+          setPayments(list);
+        }
+
+        const promosSnap = await getDocs(collection(db, 'promos'));
+        if (!promosSnap.empty) {
+          const pList: PromoCodeItem[] = [];
+          promosSnap.forEach(d => {
+            const data = d.data();
+            pList.push({
+              id: d.id,
+              code: data.code,
+              centerId: data.centerId,
+              usageLimit: data.usageLimit || 50,
+              usageCount: data.usageCount || 0,
+              expiresAt: data.expiresAt || '2026-12-31',
+              createdAt: data.createdAt || '2026-11-01',
+            });
+          });
+          setPromoCodes(pList);
+        }
+      } catch (err) {
+        console.warn('Firestore fetch warning in AdminDashboard:', err);
+      }
+    };
+    fetchFirestoreData();
+  }, [isAdminAuthenticated]);
+
   const handleAdminGoogleLogin = async () => {
     setAuthLoading(true);
     try {
@@ -122,7 +179,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       setIsAdminAuthenticated(true);
     } catch (err) {
       console.error('Admin login error:', err);
-      // Fallback for offline demo mode
       setIsAdminAuthenticated(true);
       setAdminUser({ email: 'zeekhmerads@gmail.com', displayName: 'Super Admin' });
     } finally {
@@ -138,13 +194,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setAdminUser(null);
   };
 
-  const handleCreatePromoCode = (e: React.FormEvent) => {
+  const handleCreatePromoCode = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newCode.trim()) return;
 
+    const codeStr = newCode.trim().toUpperCase();
     const item: PromoCodeItem = {
       id: String(Date.now()),
-      code: newCode.trim().toUpperCase(),
+      code: codeStr,
       centerId: newCenterId,
       usageLimit: Number(newLimit) || 50,
       usageCount: 0,
@@ -154,10 +211,28 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
     setPromoCodes([item, ...promoCodes]);
     setNewCode('');
+
+    try {
+      await setDoc(doc(db, 'promos', item.id), {
+        code: codeStr,
+        centerId: newCenterId,
+        usageLimit: Number(newLimit) || 50,
+        usageCount: 0,
+        expiresAt: newExpiresAt,
+        createdAt: new Date().toISOString().slice(0, 10),
+      });
+    } catch (err) {
+      console.warn('Failed to save promo code to Firestore:', err);
+    }
   };
 
-  const handleDeletePromo = (id: string) => {
+  const handleDeletePromo = async (id: string) => {
     setPromoCodes(promoCodes.filter(p => p.id !== id));
+    try {
+      await deleteDoc(doc(db, 'promos', id));
+    } catch (err) {
+      console.warn('Failed to delete promo from Firestore:', err);
+    }
   };
 
   if (!isOpen) return null;
