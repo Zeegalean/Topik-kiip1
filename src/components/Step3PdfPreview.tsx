@@ -173,6 +173,19 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
 
   // Download Full Merged Packet (Form + TOPIK + ARC + Passport)
   const handleDownloadMerged = async () => {
+    if (!isPaid) {
+      if (onOpenPayment) {
+        onOpenPayment();
+      }
+      setStatusNotice({
+        type: 'error',
+        text: lang === 'km'
+          ? 'សូមបង់ប្រាក់ ឬ វាយលេខកូដ Promo Code ដើម្បីដោះសោការទាញយកឯកសារ!'
+          : 'Please pay or enter a promo code to unlock document download!',
+      });
+      return;
+    }
+
     setIsGeneratingMerged(true);
     setStatusNotice(null);
 
