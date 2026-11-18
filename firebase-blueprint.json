@@ -1,0 +1,61 @@
+{
+  "version": "1.0",
+  "entities": {
+    "User": {
+      "uid": "string",
+      "email": "string",
+      "role": "string",
+      "createdAt": "timestamp"
+    },
+    "Document": {
+      "id": "string",
+      "userId": "string",
+      "applicantName": "string",
+      "createdAt": "timestamp",
+      "isPaid": "boolean"
+    },
+    "Payment": {
+      "id": "string",
+      "userId": "string",
+      "amount": "number",
+      "currency": "string",
+      "method": "string",
+      "status": "string",
+      "createdAt": "timestamp",
+      "promoCodeUsed": "string"
+    },
+    "PromoCode": {
+      "id": "string",
+      "code": "string",
+      "centerId": "string",
+      "usageLimit": "number",
+      "usageCount": "number",
+      "expiresAt": "string",
+      "createdAt": "timestamp"
+    },
+    "Center": {
+      "id": "string",
+      "centerName": "string",
+      "region": "string",
+      "contactPhone": "string",
+      "managerEmail": "string"
+    }
+  },
+  "firestore": {
+    "users/{uid}": {
+      "schema": "User"
+    },
+    "documents/{docId}": {
+      "schema": "Document"
+    },
+    "payments/{payId}": {
+      "schema": "Payment"
+    },
+    "promoCodes/{codeId}": {
+      "schema": "PromoCode"
+    },
+    "centers/{centerId}": {
+      "schema": "Center"
+    }
+  }
+}
