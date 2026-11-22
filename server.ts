@@ -29,9 +29,26 @@ const cliHost = getCliArg('--host');
 const port = parseInt(cliPort || process.env.PORT || '3000', 10);
 const host = cliHost || process.env.HOST || '0.0.0.0';
 
-// Enable CORS so static frontends (e.g., GitHub Pages) can also use the Cloud Run OCR API
+// Enable CORS for public OCR/static endpoints; never allow wildcard CORS on authenticated /api/admin/* routes
 app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
+  const isAdminRoute = req.path.startsWith('/api/admin');
+  if (!isAdminRoute) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  } else {
+    const origin = req.headers.origin;
+    const hostHeader = req.headers['x-forwarded-host'] || req.headers.host;
+    if (origin && hostHeader) {
+      try {
+        const originHost = new URL(origin).host;
+        if (originHost === String(hostHeader).split(',')[0].trim()) {
+          res.setHeader('Access-Control-Allow-Origin', origin);
+          res.setHeader('Vary', 'Origin');
+        }
+      } catch {
+        // Ignore invalid origin
+      }
+    }
+  }
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (req.method === 'OPTIONS') {
@@ -999,6 +1016,18 @@ app.post('/api/payments/aba-confirm', (req, res) => {
   });
 });
 
+// Single-use unlock codes generated automatically by Korean Bank Receipt / Telegram verification
+interface IssuedUnlockCode {
+  code: string;
+  source: 'kr_receipt' | 'telegram_bot';
+  createdAt: number;
+  used: boolean;
+  usedAt?: number;
+  verifiedAmount?: number;
+  bankName?: string;
+}
+const issuedUnlockCodes = new Map<string, IssuedUnlockCode>();
+
 app.post('/api/payments/verify-redeem', (req, res) => {
   const rawCode = String(req.body?.code || '').trim().toUpperCase();
   if (!rawCode) {
@@ -1010,6 +1039,20 @@ app.post('/api/payments/verify-redeem', (req, res) => {
 
   if (MASTER_PROMO_CODES.has(rawCode)) {
     return res.json({ success: true, type: 'promo' });
+  }
+
+  // Check auto-generated single-use Korean Bank Receipt / Telegram unlock codes
+  const issued = issuedUnlockCodes.get(rawCode);
+  if (issued) {
+    if (issued.used) {
+      return res.status(409).json({
+        success: false,
+        error: 'លេខកូដដោះសោនេះត្រូវបានប្រើប្រាស់រួចហើយ!',
+      });
+    }
+    issued.used = true;
+    issued.usedAt = Date.now();
+    return res.json({ success: true, type: issued.source });
   }
 
   const envCodes = (process.env.REDEEM_CODES || '')
@@ -1030,8 +1073,950 @@ app.post('/api/payments/verify-redeem', (req, res) => {
 
   return res.status(400).json({
     success: false,
-    error: 'លេខកូដមិនត្រឹមត្រូវ ឬផុតកំណត់! សូមពិនិត្យម្តងទៀត ឬបង់ប្រាក់តាម ABA PayWay។',
+    error: 'លេខកូដមិនត្រឹមត្រូវ ឬផុតកំណត់! សូមពិនិត្យម្តងទៀត ឬបង់ប្រាក់តាម ABA PayWay / Korea Bank។',
   });
+});
+
+// ============================================================================
+// SECURE ADMIN AUTHENTICATION (Server-Side scrypt + HMAC Bearer Session Token)
+// ============================================================================
+const SESSION_SIGNING_SECRET =
+  process.env.ADMIN_SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+const ADMIN_SESSION_TTL_MS = 8 * 60 * 60 * 1000; // 8 hours
+
+interface ClaimedAdminCredential {
+  username: string;
+  salt: string;
+  passwordHash: string;
+  claimedAt: number;
+}
+
+let claimedAdmin: ClaimedAdminCredential | null = null;
+const revokedAdminTokens = new Set<string>();
+
+function hashPasswordScrypt(password: string, salt: string): string {
+  return crypto.scryptSync(password, salt, 64).toString('hex');
+}
+
+function safeEqualStrings(a: string, b: string): boolean {
+  const bufA = Buffer.from(a, 'utf8');
+  const bufB = Buffer.from(b, 'utf8');
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+function issueAdminBearerToken(username: string): string {
+  const payload = Buffer.from(
+    JSON.stringify({
+      sub: username,
+      role: 'admin',
+      iat: Date.now(),
+      exp: Date.now() + ADMIN_SESSION_TTL_MS,
+      nonce: crypto.randomBytes(12).toString('hex'),
+    })
+  ).toString('base64url');
+  const sig = crypto
+    .createHmac('sha256', SESSION_SIGNING_SECRET)
+    .update(payload)
+    .digest('base64url');
+  return `${payload}.${sig}`;
+}
+
+function verifyAdminBearerToken(token: string): { sub: string; role: string } | null {
+  if (!token || revokedAdminTokens.has(token)) return null;
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const [payload, sig] = parts;
+  const expectedSig = crypto
+    .createHmac('sha256', SESSION_SIGNING_SECRET)
+    .update(payload)
+    .digest('base64url');
+  if (!safeEqualStrings(sig, expectedSig)) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    if (!parsed || parsed.role !== 'admin' || typeof parsed.exp !== 'number' || Date.now() > parsed.exp) {
+      return null;
+    }
+    return { sub: String(parsed.sub || 'Admin'), role: 'admin' };
+  } catch {
+    return null;
+  }
+}
+
+function requireAdminAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const authHeader = String(req.headers.authorization || '');
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  const verified = verifyAdminBearerToken(token);
+  if (!verified) {
+    return res.status(401).json({ success: false, error: 'Unauthorized admin session' });
+  }
+  (req as any).adminSession = verified;
+  next();
+}
+
+app.get('/api/admin/auth-status', (req, res) => {
+  const hasEnvCredentials = Boolean(process.env.ADMIN_PASSWORD && process.env.ADMIN_PASSWORD.trim().length > 0);
+  const authHeader = String(req.headers.authorization || '');
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  const session = verifyAdminBearerToken(token);
+  return res.json({
+    success: true,
+    needsSetup: !hasEnvCredentials && !claimedAdmin,
+    configuredViaEnv: hasEnvCredentials,
+    authenticated: Boolean(session),
+    username: session?.sub || null,
+  });
+});
+
+// One-time first-run admin setup (locked once claimed or whenever ADMIN_PASSWORD env var is set)
+app.post('/api/admin/bootstrap', (req, res) => {
+  const hasEnvCredentials = Boolean(process.env.ADMIN_PASSWORD && process.env.ADMIN_PASSWORD.trim().length > 0);
+  if (hasEnvCredentials || claimedAdmin) {
+    return res.status(403).json({
+      success: false,
+      error: 'Admin credentials are already configured.',
+    });
+  }
+
+  const username = String(req.body?.username || '').trim();
+  const password = String(req.body?.password || '');
+
+  if (username.length < 3 || username.length > 64 || !/^[a-zA-Z0-9._@-]+$/.test(username)) {
+    return res.status(400).json({
+      success: false,
+      error: 'Admin ID must be 3–64 alphanumeric characters.',
+    });
+  }
+  if (password.length < 8 || password.length > 128) {
+    return res.status(400).json({
+      success: false,
+      error: 'Admin password must be at least 8 characters.',
+    });
+  }
+
+  const salt = crypto.randomBytes(16).toString('hex');
+  claimedAdmin = {
+    username,
+    salt,
+    passwordHash: hashPasswordScrypt(password, salt),
+    claimedAt: Date.now(),
+  };
+
+  const token = issueAdminBearerToken(username);
+  return res.json({
+    success: true,
+    token,
+    username,
+  });
+});
+
+app.post('/api/admin/login', (req, res) => {
+  const username = String(req.body?.username || '').trim();
+  const password = String(req.body?.password || '');
+
+  if (!username || !password) {
+    return res.status(400).json({
+      success: false,
+      error: 'សូមបញ្ចូល Admin ID និង Password!',
+    });
+  }
+
+  const envPass = process.env.ADMIN_PASSWORD?.trim();
+  if (envPass) {
+    const envUser = (process.env.ADMIN_USERNAME || 'Admin').trim();
+    const userMatch = safeEqualStrings(username.toLowerCase(), envUser.toLowerCase());
+    const passMatch = safeEqualStrings(password, envPass);
+    if (!userMatch || !passMatch) {
+      return res.status(401).json({
+        success: false,
+        error: 'Admin ID ឬ Password មិនត្រឹមត្រូវ!',
+      });
+    }
+    const token = issueAdminBearerToken(envUser);
+    return res.json({ success: true, token, username: envUser });
+  }
+
+  if (!claimedAdmin) {
+    return res.status(409).json({
+      success: false,
+      needsSetup: true,
+      error: 'Admin account not initialized yet. Complete first-run setup.',
+    });
+  }
+
+  const userMatch = safeEqualStrings(username.toLowerCase(), claimedAdmin.username.toLowerCase());
+  const candidateHash = hashPasswordScrypt(password, claimedAdmin.salt);
+  const passMatch = safeEqualStrings(candidateHash, claimedAdmin.passwordHash);
+
+  if (!userMatch || !passMatch) {
+    return res.status(401).json({
+      success: false,
+      error: 'Admin ID ឬ Password មិនត្រឹមត្រូវ!',
+    });
+  }
+
+  const token = issueAdminBearerToken(claimedAdmin.username);
+  return res.json({ success: true, token, username: claimedAdmin.username });
+});
+
+app.post('/api/admin/logout', (req, res) => {
+  const authHeader = String(req.headers.authorization || '');
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  if (token) {
+    revokedAdminTokens.add(token);
+  }
+  return res.json({ success: true });
+});
+
+// ============================================================================
+// REAL LIVE VISITORS IP-TO-LOCATION TRACKING (PRIVACY-MASKED IPs)
+// ============================================================================
+interface LiveVisitorEntry {
+  sessionId: string;
+  maskedIp: string;
+  city: string;
+  region: string;
+  country: string;
+  countryCode: string;
+  firstSeen: number;
+  lastSeen: number;
+  page: string;
+}
+
+interface GeoCacheEntry {
+  city: string;
+  region: string;
+  country: string;
+  countryCode: string;
+  resolvedIp?: string;
+  cachedAt: number;
+}
+
+const activeVisitorMap = new Map<string, LiveVisitorEntry>();
+const seenSessionIds = new Set<string>();
+const geoCacheByIpHash = new Map<string, GeoCacheEntry>();
+const LIVE_VISITOR_TTL_MS = 5 * 60 * 1000; // 5 minutes active window
+const GEO_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const IP_HASH_SALT = crypto.randomBytes(16).toString('hex');
+
+function extractClientIp(req: express.Request): string {
+  const xff = req.headers['x-forwarded-for'];
+  let raw = '';
+  if (typeof xff === 'string' && xff.trim()) {
+    raw = xff.split(',')[0].trim();
+  } else if (Array.isArray(xff) && xff.length > 0) {
+    raw = String(xff[0]).split(',')[0].trim();
+  } else {
+    raw = String(req.socket?.remoteAddress || req.ip || '').trim();
+  }
+  if (raw.startsWith('::ffff:')) {
+    raw = raw.slice(7);
+  }
+  return raw;
+}
+
+function isPrivateOrLocalIp(ip: string): boolean {
+  if (!ip) return true;
+  if (ip === '::1' || ip === '127.0.0.1' || ip === 'localhost' || ip === '0.0.0.0') return true;
+  if (ip.startsWith('10.') || ip.startsWith('192.168.') || ip.startsWith('169.254.')) return true;
+  if (/^172\.(1[6-9]|2\d|3[0-1])\./.test(ip)) return true;
+  if (ip.startsWith('fc') || ip.startsWith('fd') || ip.startsWith('fe80:')) return true;
+  return false;
+}
+
+function isValidIpLiteral(ip: string): boolean {
+  const ipv4 = /^(\d{1,3}\.){3}\d{1,3}$/;
+  const ipv6 = /^[0-9a-fA-F:]+$/;
+  return ipv4.test(ip) || (ip.includes(':') && ipv6.test(ip));
+}
+
+function maskIpAddress(ip: string): string {
+  if (!ip || !isValidIpLiteral(ip)) return '***.***.***.***';
+  if (ip.includes('.')) {
+    const octets = ip.split('.');
+    if (octets.length === 4) {
+      return `${octets[0]}.${octets[1]}.***.***`;
+    }
+  }
+  if (ip.includes(':')) {
+    const groups = ip.split(':').filter(Boolean);
+    if (groups.length >= 2) {
+      return `${groups[0]}:${groups[1]}:****:****`;
+    }
+  }
+  return '***.***.***.***';
+}
+
+async function resolveIpToLocation(req: express.Request, rawIp: string): Promise<GeoCacheEntry> {
+  // 1. Check trusted cloud proxy geo headers first (Cloud Run / Cloudflare / App Engine / Vercel)
+  const headerCity = String(
+    req.headers['x-appengine-city'] ||
+      req.headers['cf-ipcity'] ||
+      req.headers['x-vercel-ip-city'] ||
+      ''
+  ).trim();
+  const headerCountry = String(
+    req.headers['x-appengine-country'] ||
+      req.headers['cf-ipcountry'] ||
+      req.headers['x-vercel-ip-country'] ||
+      ''
+  ).trim();
+  const headerRegion = String(
+    req.headers['x-appengine-region'] ||
+      req.headers['x-vercel-ip-country-region'] ||
+      ''
+  ).trim();
+
+  if (headerCity && headerCity.toLowerCase() !== 'unknown') {
+    const formattedCity = decodeURIComponent(headerCity)
+      .split(' ')
+      .map((w) => (w ? w[0].toUpperCase() + w.slice(1).toLowerCase() : ''))
+      .join(' ');
+    return {
+      city: formattedCity,
+      region: headerRegion || formattedCity,
+      country: headerCountry || 'Unknown',
+      countryCode: headerCountry.length === 2 ? headerCountry.toUpperCase() : '',
+      resolvedIp: rawIp,
+      cachedAt: Date.now(),
+    };
+  }
+
+  const isLocal = isPrivateOrLocalIp(rawIp) || !isValidIpLiteral(rawIp);
+  const cacheKey = crypto
+    .createHash('sha256')
+    .update(`${IP_HASH_SALT}:${isLocal ? 'egress' : rawIp}`)
+    .digest('hex');
+
+  const cached = geoCacheByIpHash.get(cacheKey);
+  if (cached && Date.now() - cached.cachedAt < GEO_CACHE_TTL_MS) {
+    return cached;
+  }
+
+  // 2. Call allowlisted IP-to-Location HTTPS API (ipwho.is primary, ipapi.co fallback)
+  const primaryUrl = isLocal
+    ? 'https://ipwho.is/'
+    : `https://ipwho.is/${encodeURIComponent(rawIp)}`;
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3500);
+    const resp = await fetch(primaryUrl, { signal: controller.signal });
+    clearTimeout(timer);
+    if (resp.ok) {
+      const data: any = await resp.json();
+      if (data && data.success !== false && data.city) {
+        const entry: GeoCacheEntry = {
+          city: String(data.city).slice(0, 80),
+          region: String(data.region || data.city).slice(0, 80),
+          country: String(data.country || 'Unknown').slice(0, 80),
+          countryCode: String(data.country_code || '').toUpperCase().slice(0, 4),
+          resolvedIp: typeof data.ip === 'string' ? data.ip : rawIp,
+          cachedAt: Date.now(),
+        };
+        geoCacheByIpHash.set(cacheKey, entry);
+        return entry;
+      }
+    }
+  } catch {
+    // Try secondary provider
+  }
+
+  const fallbackUrl = isLocal
+    ? 'https://ipapi.co/json/'
+    : `https://ipapi.co/${encodeURIComponent(rawIp)}/json/`;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3500);
+    const resp = await fetch(fallbackUrl, { signal: controller.signal });
+    clearTimeout(timer);
+    if (resp.ok) {
+      const data: any = await resp.json();
+      if (data && !data.error && data.city) {
+        const entry: GeoCacheEntry = {
+          city: String(data.city).slice(0, 80),
+          region: String(data.region || data.city).slice(0, 80),
+          country: String(data.country_name || data.country || 'Unknown').slice(0, 80),
+          countryCode: String(data.country_code || '').toUpperCase().slice(0, 4),
+          resolvedIp: typeof data.ip === 'string' ? data.ip : rawIp,
+          cachedAt: Date.now(),
+        };
+        geoCacheByIpHash.set(cacheKey, entry);
+        return entry;
+      }
+    }
+  } catch {
+    // Graceful unknown fallback
+  }
+
+  return {
+    city: 'Unknown City',
+    region: '',
+    country: 'Unknown',
+    countryCode: '',
+    resolvedIp: rawIp,
+    cachedAt: Date.now(),
+  };
+}
+
+function pruneStaleVisitors() {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+  for (const [sid, entry] of activeVisitorMap.entries()) {
+    if (entry.lastSeen < cutoff) {
+      activeVisitorMap.delete(sid);
+    }
+  }
+}
+
+app.post('/api/visitors/heartbeat', async (req, res) => {
+  try {
+    pruneStaleVisitors();
+    const rawSessionId = String(req.body?.sessionId || '').trim();
+    const sessionId = /^[a-zA-Z0-9_-]{4,64}$/.test(rawSessionId)
+      ? rawSessionId
+      : `sess_${crypto.randomBytes(6).toString('hex')}`;
+    const page = String(req.body?.page || '/').slice(0, 64);
+
+    const rawIp = extractClientIp(req);
+    const geo = await resolveIpToLocation(req, rawIp);
+    const ipForMask = !isPrivateOrLocalIp(rawIp) ? rawIp : geo.resolvedIp || rawIp;
+    const maskedIp = maskIpAddress(ipForMask);
+
+    const now = Date.now();
+    const existingEntry = activeVisitorMap.get(sessionId);
+    activeVisitorMap.set(sessionId, {
+      sessionId,
+      maskedIp,
+      city: geo.city,
+      region: geo.region,
+      country: geo.country,
+      countryCode: geo.countryCode,
+      firstSeen: existingEntry ? existingEntry.firstSeen : now,
+      lastSeen: now,
+      page,
+    });
+    seenSessionIds.add(sessionId);
+
+    const liveList = Array.from(activeVisitorMap.values()).filter(
+      (v) => now - v.lastSeen <= LIVE_VISITOR_TTL_MS
+    );
+
+    return res.json({
+      success: true,
+      sessionId,
+      city: geo.city,
+      country: geo.country,
+      countryCode: geo.countryCode,
+      liveCount: liveList.length,
+      totalVisits: seenSessionIds.size,
+    });
+  } catch {
+    return res.status(500).json({ success: false });
+  }
+});
+
+// Public visitor stats: strictly exposes CITY ONLY (zero IP addresses!)
+app.get('/api/visitors/public-stats', (_req, res) => {
+  pruneStaleVisitors();
+  const now = Date.now();
+  const liveList = Array.from(activeVisitorMap.values())
+    .filter((v) => now - v.lastSeen <= LIVE_VISITOR_TTL_MS)
+    .sort((a, b) => b.lastSeen - a.lastSeen);
+
+  const recentList = Array.from(activeVisitorMap.values())
+    .sort((a, b) => b.lastSeen - a.lastSeen)
+    .slice(0, 30);
+
+  const sourceList = liveList.length > 0 ? liveList : recentList;
+  const liveCities = sourceList.map((v) => ({
+    city: v.city,
+    country: v.country,
+    countryCode: v.countryCode,
+    isLive: now - v.lastSeen <= LIVE_VISITOR_TTL_MS,
+  }));
+
+  return res.json({
+    success: true,
+    liveCount: liveList.length,
+    totalVisits: seenSessionIds.size,
+    liveCities,
+  });
+});
+
+// Admin-only live visitors endpoint: includes privacy-masked IP digits + city
+app.get('/api/admin/live-visitors', requireAdminAuth, (_req, res) => {
+  pruneStaleVisitors();
+  const now = Date.now();
+  const visitors = Array.from(activeVisitorMap.values())
+    .sort((a, b) => b.lastSeen - a.lastSeen)
+    .slice(0, 100)
+    .map((v) => ({
+      sessionId: v.sessionId,
+      maskedIp: v.maskedIp,
+      city: v.city,
+      region: v.region,
+      country: v.country,
+      countryCode: v.countryCode,
+      lastSeen: new Date(v.lastSeen).toISOString(),
+      firstSeen: new Date(v.firstSeen).toISOString(),
+      page: v.page,
+      isLive: now - v.lastSeen <= LIVE_VISITOR_TTL_MS,
+    }));
+
+  const liveCount = visitors.filter((v) => v.isLive).length;
+  const cityCounts: Record<string, number> = {};
+  for (const v of visitors) {
+    const label = v.countryCode ? `${v.city} (${v.countryCode})` : v.city;
+    cityCounts[label] = (cityCounts[label] || 0) + 1;
+  }
+
+  return res.json({
+    success: true,
+    liveCount,
+    totalVisits: seenSessionIds.size,
+    visitors,
+    cityBreakdown: Object.entries(cityCounts)
+      .map(([cityLabel, count]) => ({ cityLabel, count }))
+      .sort((a, b) => b.count - a.count),
+  });
+});
+
+// ============================================================================
+// REAL SERVER ANALYTICS EVENT LOG (NO FAKE DATA, NO SENSITIVE CREDENTIALS/IMAGES)
+// ============================================================================
+interface RealDocumentEvent {
+  id: string;
+  applicantName: string;
+  pageCount: number;
+  isPaid: boolean;
+  centerId?: string;
+  createdAt: string;
+}
+
+interface RealPaymentEvent {
+  id: string;
+  userEmail: string;
+  amount: number;
+  currency: 'KRW' | 'USD';
+  method: string;
+  promoCodeUsed: string;
+  centerId?: string;
+  createdAt: string;
+}
+
+const serverDocumentsLog: RealDocumentEvent[] = [];
+const serverPaymentsLog: RealPaymentEvent[] = [];
+
+app.post('/api/analytics/event', (req, res) => {
+  const type = String(req.body?.type || '');
+  const nowIso = new Date().toISOString();
+
+  if (type === 'document_generated') {
+    const id = String(req.body?.id || `doc_${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 128);
+    if (!serverDocumentsLog.some((d) => d.id === id)) {
+      serverDocumentsLog.unshift({
+        id,
+        applicantName: String(req.body?.applicantName || 'Applicant').slice(0, 120),
+        pageCount: Math.max(1, Math.min(50, Number(req.body?.pageCount) || 1)),
+        isPaid: Boolean(req.body?.isPaid),
+        centerId: req.body?.centerId ? String(req.body.centerId).slice(0, 64) : undefined,
+        createdAt: nowIso,
+      });
+      if (serverDocumentsLog.length > 500) serverDocumentsLog.pop();
+    }
+    return res.json({ success: true });
+  }
+
+  if (type === 'payment_completed') {
+    const id = String(req.body?.id || `pay_${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 128);
+    if (!serverPaymentsLog.some((p) => p.id === id)) {
+      serverPaymentsLog.unshift({
+        id,
+        userEmail: String(req.body?.userEmail || 'guest@kiip-portal.kr').slice(0, 254),
+        amount: Math.max(0, Math.min(10000000, Number(req.body?.amount) || 0)),
+        currency: req.body?.currency === 'USD' ? 'USD' : 'KRW',
+        method: String(req.body?.method || 'ABA PayWay QR').slice(0, 64),
+        promoCodeUsed: String(req.body?.promoCodeUsed || '-').slice(0, 64),
+        centerId: req.body?.centerId ? String(req.body.centerId).slice(0, 64) : undefined,
+        createdAt: nowIso,
+      });
+      if (serverPaymentsLog.length > 500) serverPaymentsLog.pop();
+    }
+    return res.json({ success: true });
+  }
+
+  return res.status(400).json({ success: false, error: 'Unsupported analytics event type' });
+});
+
+app.get('/api/admin/analytics', requireAdminAuth, (_req, res) => {
+  return res.json({
+    success: true,
+    documents: serverDocumentsLog,
+    payments: serverPaymentsLog,
+    issuedUnlockCodes: Array.from(issuedUnlockCodes.values()).sort((a, b) => b.createdAt - a.createdAt),
+    integrations: {
+      krBankConfigured: Boolean(process.env.KR_BANK_ACCOUNT),
+      telegramConfigured: Boolean(process.env.TELEGRAM_BOT_TOKEN),
+      zohoMailConfigured: Boolean(process.env.ZOHO_MAIL_USER && process.env.ZOHO_MAIL_PASSWORD),
+    },
+  });
+});
+
+// ============================================================================
+// KOREAN BANK TRANSFER RECEIPT VERIFICATION & TELEGRAM BOT AUTO-UNLOCK
+// ============================================================================
+async function analyzeKoreanBankReceiptWithGemini(
+  imageBase64: string,
+  mimeType: string
+): Promise<{
+  isValidReceipt: boolean;
+  amountKrw: number;
+  bankName: string;
+  recipientName: string;
+  transferCompleted: boolean;
+  reason: string;
+}> {
+  const ai = getAiClient();
+  if (!ai) {
+    return {
+      isValidReceipt: false,
+      amountKrw: 0,
+      bankName: '',
+      recipientName: '',
+      transferCompleted: false,
+      reason: 'GEMINI_API_KEY is not configured on the server for automated receipt inspection.',
+    };
+  }
+
+  const expectedHolder = (process.env.KR_BANK_HOLDER || '').trim();
+  const expectedAccountTail = (process.env.KR_BANK_ACCOUNT || '').replace(/\D/g, '').slice(-4);
+
+  const prompt = `You are a Korean banking receipt verification specialist.
+Inspect this uploaded screenshot of a South Korean bank transfer confirmation (e.g., KB 국민은행, 신한은행, 우리은행, 하나은행, NH농협, 카카오뱅크, 토스뱅크, 케이뱅크, IBK기업은행, 새마을금고, etc.).
+Extract strictly what is visible in the image:
+1. isBankTransferScreenshot: true ONLY if this is a genuine bank transfer / remittance confirmation screen.
+2. transferCompleted: true ONLY if the transfer status clearly indicates completion (e.g., 이체완료, 송금완료, 출금완료, 이체 성공, Completed, Sent).
+3. amountKrw: numeric integer amount transferred in KRW (e.g., 15000). Return 0 if not clearly visible.
+4. bankName: bank or app name (e.g., KakaoBank, Toss, KB Kookmin, Shinhan, NH, Woori, Hana).
+5. recipientName: recipient name or account label visible on the receipt.
+6. recipientAccountDigits: digits visible for the recipient account number (if any).
+Return ONLY valid JSON matching the schema.`;
+
+  const schema = {
+    type: Type.OBJECT,
+    properties: {
+      isBankTransferScreenshot: { type: Type.BOOLEAN },
+      transferCompleted: { type: Type.BOOLEAN },
+      amountKrw: { type: Type.NUMBER },
+      bankName: { type: Type.STRING },
+      recipientName: { type: Type.STRING },
+      recipientAccountDigits: { type: Type.STRING },
+    },
+  };
+
+  for (const model of ['gemini-3.1-flash-lite', 'gemini-4-hydrogen'] as const) {
+    try {
+      const response = await ai.models.generateContent({
+        model,
+        contents: {
+          parts: [
+            { inlineData: { mimeType, data: imageBase64 } },
+            { text: prompt },
+          ],
+        },
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: schema,
+        },
+      });
+      const text = response.text;
+      if (!text) continue;
+      const parsed = JSON.parse(text.replace(/```json/gi, '').replace(/```/g, '').trim());
+      const amountKrw = Math.round(Number(parsed.amountKrw) || 0);
+      const isReceipt = Boolean(parsed.isBankTransferScreenshot);
+      const completed = Boolean(parsed.transferCompleted);
+      const bankName = String(parsed.bankName || 'Korea Bank').slice(0, 60);
+      const recipientName = String(parsed.recipientName || '').slice(0, 80);
+      const accountDigits = String(parsed.recipientAccountDigits || '').replace(/\D/g, '');
+
+      if (!isReceipt) {
+        return {
+          isValidReceipt: false,
+          amountKrw,
+          bankName,
+          recipientName,
+          transferCompleted: false,
+          reason: 'រូបភាពនេះមិនមែនជាវិក្កយបត្រផ្ទេរប្រាក់ធនាគារកូរ៉េទេ។ សូមផ្ញើ Screenshot វិក្កយបត្រដែលមានពាក្យ 이체완료 / 송금완료។',
+        };
+      }
+      if (!completed) {
+        return {
+          isValidReceipt: false,
+          amountKrw,
+          bankName,
+          recipientName,
+          transferCompleted: false,
+          reason: 'វិក្កយបត្រមិនទាន់បង្ហាញស្ថានភាពផ្ទេរប្រាក់ជោគជ័យ (이체완료 / 송금완료) ទេ។',
+        };
+      }
+      if (amountKrw < 15000) {
+        return {
+          isValidReceipt: false,
+          amountKrw,
+          bankName,
+          recipientName,
+          transferCompleted: true,
+          reason: `ទឹកប្រាក់លើវិក្កយបត្រ (₩${amountKrw.toLocaleString()}) តិចជាងតម្លៃសេវា ₩15,000។`,
+        };
+      }
+      if (expectedAccountTail && accountDigits && !accountDigits.endsWith(expectedAccountTail)) {
+        return {
+          isValidReceipt: false,
+          amountKrw,
+          bankName,
+          recipientName,
+          transferCompleted: true,
+          reason: 'លេខគណនីអ្នកទទួលលើវិក្កយបត្រមិនត្រូវគ្នានឹងគណនីធនាគារកំណត់ទេ។',
+        };
+      }
+      if (expectedHolder && recipientName && !recipientName.toLowerCase().includes(expectedHolder.toLowerCase().slice(0, 3))) {
+        // Soft check only if account digits didn't already confirm
+        if (!expectedAccountTail || !accountDigits.endsWith(expectedAccountTail)) {
+          return {
+            isValidReceipt: false,
+            amountKrw,
+            bankName,
+            recipientName,
+            transferCompleted: true,
+            reason: 'ឈ្មោះអ្នកទទួលលើវិក្កយបត្រមិនត្រូវគ្នាទេ។ សូមពិនិត្យគណនីអ្នកទទួលម្តងទៀត។',
+          };
+        }
+      }
+
+      return {
+        isValidReceipt: true,
+        amountKrw,
+        bankName,
+        recipientName,
+        transferCompleted: true,
+        reason: 'Verified',
+      };
+    } catch {
+      continue;
+    }
+  }
+
+  return {
+    isValidReceipt: false,
+    amountKrw: 0,
+    bankName: '',
+    recipientName: '',
+    transferCompleted: false,
+    reason: 'មិនអាចផ្ទៀងផ្ទាត់រូបភាពវិក្កយបត្របាននៅពេលនេះទេ។ សូមព្យាយាមម្តងទៀតជាមួយរូបភាពច្បាស់។',
+  };
+}
+
+async function sendTelegramMessage(chatId: string | number, text: string): Promise<void> {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN?.trim();
+  if (!botToken || !chatId) return;
+  try {
+    await fetch(`https://api.telegram.org/bot${encodeURIComponent(botToken)}/sendMessage`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        chat_id: chatId,
+        text,
+      }),
+    });
+  } catch {
+    // Non-blocking Telegram notification
+  }
+}
+
+app.get('/api/payments/kr-config', (_req, res) => {
+  return res.json({
+    success: true,
+    bankName: process.env.KR_BANK_NAME || '',
+    accountNumber: process.env.KR_BANK_ACCOUNT || '',
+    accountHolder: process.env.KR_BANK_HOLDER || '',
+    telegramBotUsername: (process.env.TELEGRAM_BOT_USERNAME || '').replace(/^@/, ''),
+    amountKrw: 15000,
+    autoReceiptVerifyEnabled: Boolean(process.env.GEMINI_API_KEY),
+    telegramBotEnabled: Boolean(process.env.TELEGRAM_BOT_TOKEN),
+  });
+});
+
+app.post('/api/payments/verify-kr-receipt', async (req, res) => {
+  try {
+    const receiptImage = String(req.body?.receiptImage || '');
+    const userEmail = String(req.body?.userEmail || 'guest@kiip-portal.kr').slice(0, 254);
+    const commaIdx = receiptImage.indexOf(',');
+    if (!receiptImage.startsWith('data:image/') || commaIdx === -1) {
+      return res.status(400).json({
+        success: false,
+        error: 'សូម Upload រូបភាព Screenshot វិក្កយបត្រផ្ទេរប្រាក់ (PNG / JPG)!',
+      });
+    }
+
+    const meta = receiptImage.substring(0, commaIdx);
+    const base64Data = receiptImage.substring(commaIdx + 1).replace(/\s/g, '');
+    const mimeType = meta.split(';')[0]?.replace('data:', '') || 'image/jpeg';
+
+    if (base64Data.length < 100 || base64Data.length > 14 * 1024 * 1024) {
+      return res.status(400).json({
+        success: false,
+        error: 'ទំហំរូបភាពមិនត្រឹមត្រូវ (អតិបរមា 10MB)។',
+      });
+    }
+
+    const analysis = await analyzeKoreanBankReceiptWithGemini(base64Data, mimeType);
+    if (!analysis.isValidReceipt) {
+      return res.status(422).json({
+        success: false,
+        error: analysis.reason,
+      });
+    }
+
+    const unlockCode = `KIIP-KR-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+    issuedUnlockCodes.set(unlockCode, {
+      code: unlockCode,
+      source: 'kr_receipt',
+      createdAt: Date.now(),
+      used: false,
+      verifiedAmount: analysis.amountKrw,
+      bankName: analysis.bankName,
+    });
+
+    serverPaymentsLog.unshift({
+      id: `pay_kr_${Date.now()}`,
+      userEmail,
+      amount: analysis.amountKrw,
+      currency: 'KRW',
+      method: `Korea Bank (${analysis.bankName})`,
+      promoCodeUsed: unlockCode,
+      createdAt: new Date().toISOString(),
+    });
+
+    if (process.env.TELEGRAM_ADMIN_CHAT_ID) {
+      await sendTelegramMessage(
+        process.env.TELEGRAM_ADMIN_CHAT_ID,
+        `✅ Verified Korea Bank Transfer\nBank: ${analysis.bankName}\nAmount: ₩${analysis.amountKrw.toLocaleString()}\nUser: ${userEmail}\nIssued Code: ${unlockCode}`
+      );
+    }
+
+    return res.json({
+      success: true,
+      unlockCode,
+      verifiedAmount: analysis.amountKrw,
+      bankName: analysis.bankName,
+    });
+  } catch (err: any) {
+    console.error('[KR Receipt] Verification failed:', err);
+    return res.status(500).json({
+      success: false,
+      error: 'មានបញ្ហាបច្ចេកទេសក្នុងការផ្ទៀងផ្ទាត់វិក្កយបត្រ។ សូមព្យាយាមម្តងទៀត។',
+    });
+  }
+});
+
+// Telegram Bot Webhook: User sends Korean Bank transfer screenshot -> Bot auto-verifies & replies with unlock code
+app.post('/api/telegram/webhook', async (req, res) => {
+  const botToken = process.env.TELEGRAM_BOT_TOKEN?.trim();
+  const expectedSecret = process.env.TELEGRAM_WEBHOOK_SECRET?.trim();
+  if (!botToken || !expectedSecret) {
+    return res.status(503).json({ success: false, error: 'Telegram webhook not configured' });
+  }
+
+  const incomingSecret = String(req.headers['x-telegram-bot-api-secret-token'] || '');
+  if (!safeEqualStrings(incomingSecret, expectedSecret)) {
+    return res.status(403).json({ success: false, error: 'Invalid webhook secret' });
+  }
+
+  // Acknowledge Telegram immediately or process swiftly
+  try {
+    const message = req.body?.message;
+    const chatId = message?.chat?.id;
+    if (!chatId) {
+      return res.json({ ok: true });
+    }
+
+    const photos = Array.isArray(message?.photo) ? message.photo : [];
+    if (photos.length === 0) {
+      await sendTelegramMessage(
+        chatId,
+        'សួស្តី! សូមផ្ញើរូបភាព Screenshot វិក្កយបត្រផ្ទេរប្រាក់ (₩15,000) មកទីនេះ ដើម្បីទទួលបានលេខកូដដោះសោ KIIP-TOPIK PDF ដោយស្វ័យប្រវត្តិ។'
+      );
+      return res.json({ ok: true });
+    }
+
+    const largestPhoto = photos[photos.length - 1];
+    const fileId = String(largestPhoto?.file_id || '');
+    if (!fileId) return res.json({ ok: true });
+
+    // Fetch file path from allowlisted api.telegram.org
+    const fileResp = await fetch(
+      `https://api.telegram.org/bot${encodeURIComponent(botToken)}/getFile?file_id=${encodeURIComponent(fileId)}`
+    );
+    const fileJson: any = await fileResp.json();
+    const filePath = String(fileJson?.result?.file_path || '');
+    if (!filePath || filePath.includes('..') || !/^[a-zA-Z0-9/._-]+$/.test(filePath)) {
+      await sendTelegramMessage(chatId, '❌ មិនអាចទាញយករូបភាពបានទេ។ សូមផ្ញើម្តងទៀត!');
+      return res.json({ ok: true });
+    }
+
+    const imgResp = await fetch(
+      `https://api.telegram.org/file/bot${encodeURIComponent(botToken)}/${filePath}`
+    );
+    const imgBuf = Buffer.from(await imgResp.arrayBuffer());
+    const base64Img = imgBuf.toString('base64');
+
+    const analysis = await analyzeKoreanBankReceiptWithGemini(base64Img, 'image/jpeg');
+    if (!analysis.isValidReceipt) {
+      await sendTelegramMessage(chatId, `❌ ផ្ទៀងផ្ទាត់មិនជោគជ័យ៖ ${analysis.reason}`);
+      return res.json({ ok: true });
+    }
+
+    const unlockCode = `KIIP-TG-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+    issuedUnlockCodes.set(unlockCode, {
+      code: unlockCode,
+      source: 'telegram_bot',
+      createdAt: Date.now(),
+      used: false,
+      verifiedAmount: analysis.amountKrw,
+      bankName: analysis.bankName,
+    });
+
+    const senderLabel = message?.from?.username
+      ? `@${message.from.username}`
+      : `tg_${chatId}`;
+
+    serverPaymentsLog.unshift({
+      id: `pay_tg_${Date.now()}`,
+      userEmail: `${senderLabel}@telegram`,
+      amount: analysis.amountKrw,
+      currency: 'KRW',
+      method: `Telegram Receipt (${analysis.bankName})`,
+      promoCodeUsed: unlockCode,
+      createdAt: new Date().toISOString(),
+    });
+
+    await sendTelegramMessage(
+      chatId,
+      `✅ ផ្ទៀងផ្ទាត់វិក្កយបត្រជោគជ័យ! (₩${analysis.amountKrw.toLocaleString()} · ${analysis.bankName})\n\n🔑 លេខកូដដោះសោរបស់អ្នក (Single-Use Unlock Code):\n${unlockCode}\n\nសូមចម្លងលេខកូដនេះយកទៅបញ្ចូលក្នុងប្រអប់ Promo / Redeem Code លើគេហទំព័រដើម្បីទាញយកឯកសារ Clean PDF ភ្លាមៗ!`
+    );
+
+    if (process.env.TELEGRAM_ADMIN_CHAT_ID && String(process.env.TELEGRAM_ADMIN_CHAT_ID) !== String(chatId)) {
+      await sendTelegramMessage(
+        process.env.TELEGRAM_ADMIN_CHAT_ID,
+        `🤖 Telegram Auto-Unlock Issued\nFrom: ${senderLabel}\nBank: ${analysis.bankName}\nAmount: ₩${analysis.amountKrw.toLocaleString()}\nCode: ${unlockCode}`
+      );
+    }
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error('[Telegram Webhook] Error:', err);
+    return res.json({ ok: true });
+  }
 });
 
 app.post('/api/mail/send-receipt', async (req, res) => {

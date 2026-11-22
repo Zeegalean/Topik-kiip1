@@ -1,39 +1,245 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    function isAuthenticated() {
+    // 1. Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Reusable Hardened Primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+    function incoming() {
+      return request.resource.data;
+    }
+    function existing() {
+      return resource.data;
+    }
+    function isSignedIn() {
       return request.auth != null;
     }
-    
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+    function isRootAdmin() {
+      return isVerified() && request.auth.token.email == 'zeekhmerads@gmail.com';
+    }
     function isAdmin() {
-      return isAuthenticated() && 
-        (request.auth.token.email == 'zeekhmerads@gmail.com' || 
-         (resource != null && resource.data.role == 'admin') ||
-         exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
-         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin');
+      return isRootAdmin() || (
+        isVerified() &&
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
     }
 
+    // 3. Entity Validation Blueprints (Anti-Update-Gap)
+    function isValidUser(data, uid) {
+      return data.keys().hasAll(['uid', 'email', 'role', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'displayName', 'role', 'provider', 'createdAt', 'lastLoginAt']) &&
+        data.uid is string && data.uid == uid && isValidId(data.uid) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 254 &&
+        data.role in ['user', 'center_manager', 'admin'] &&
+        data.createdAt is timestamp &&
+        (!('displayName' in data) || (data.displayName is string && data.displayName.size() <= 120)) &&
+        (!('provider' in data) || (data.provider is string && data.provider.size() <= 32)) &&
+        (!('lastLoginAt' in data) || data.lastLoginAt is timestamp);
+    }
+
+    function isValidDocument(data, docId) {
+      return data.keys().hasAll(['id', 'userId', 'applicantName', 'isPaid', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'userId', 'applicantName', 'pageCount', 'isPaid', 'centerId', 'createdAt']) &&
+        data.id is string && data.id == docId && isValidId(data.id) &&
+        data.userId is string && isValidId(data.userId) &&
+        data.applicantName is string && data.applicantName.size() >= 1 && data.applicantName.size() <= 120 &&
+        data.isPaid is bool &&
+        data.createdAt is timestamp &&
+        (!('pageCount' in data) || (data.pageCount is number && data.pageCount >= 1 && data.pageCount <= 50)) &&
+        (!('centerId' in data) || (data.centerId is string && data.centerId.size() <= 64));
+    }
+
+    function isValidPayment(data, payId) {
+      return data.keys().hasAll(['id', 'userId', 'userEmail', 'amount', 'currency', 'method', 'status', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'userId', 'userEmail', 'amount', 'currency', 'method', 'status', 'promoCodeUsed', 'centerId', 'createdAt']) &&
+        data.id is string && data.id == payId && isValidId(data.id) &&
+        data.userId is string && isValidId(data.userId) &&
+        data.userEmail is string && data.userEmail.size() >= 3 && data.userEmail.size() <= 254 &&
+        data.amount is number && data.amount >= 0 && data.amount <= 10000000 &&
+        data.currency in ['KRW', 'USD'] &&
+        data.method is string && data.method.size() >= 1 && data.method.size() <= 64 &&
+        data.status in ['pending', 'completed', 'failed', 'refunded'] &&
+        data.createdAt is timestamp &&
+        (!('promoCodeUsed' in data) || (data.promoCodeUsed is string && data.promoCodeUsed.size() <= 64)) &&
+        (!('centerId' in data) || (data.centerId is string && data.centerId.size() <= 64));
+    }
+
+    function isValidPromoCode(data, codeId) {
+      return data.keys().hasAll(['id', 'code', 'centerId', 'usageLimit', 'usageCount', 'expiresAt', 'isActive', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'code', 'centerId', 'monthLabel', 'usageLimit', 'usageCount', 'expiresAt', 'isActive', 'createdAt']) &&
+        data.id is string && data.id == codeId && isValidId(data.id) &&
+        data.code is string && data.code.size() >= 3 && data.code.size() <= 64 && data.code.matches('^[A-Z0-9_\\-]+$') &&
+        data.centerId is string && data.centerId.size() >= 1 && data.centerId.size() <= 64 && isValidId(data.centerId) &&
+        data.usageLimit is number && data.usageLimit >= 1 && data.usageLimit <= 100000 &&
+        data.usageCount is number && data.usageCount >= 0 && data.usageCount <= data.usageLimit &&
+        data.expiresAt is string && data.expiresAt.size() >= 8 && data.expiresAt.size() <= 32 &&
+        data.isActive is bool &&
+        data.createdAt is timestamp &&
+        (!('monthLabel' in data) || (data.monthLabel is string && data.monthLabel.size() <= 32));
+    }
+
+    function isValidCenter(data, centerId) {
+      return data.keys().hasAll(['id', 'centerName', 'region', 'contactPhone', 'managerEmail', 'createdAt']) &&
+        data.keys().hasOnly(['id', 'centerName', 'region', 'contactPhone', 'managerEmail', 'createdAt']) &&
+        data.id is string && data.id == centerId && isValidId(data.id) &&
+        data.centerName is string && data.centerName.size() >= 2 && data.centerName.size() <= 120 &&
+        data.region is string && data.region.size() >= 2 && data.region.size() <= 80 &&
+        data.contactPhone is string && data.contactPhone.size() <= 32 &&
+        data.managerEmail is string && data.managerEmail.size() <= 254 &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidVisitor(data, sessionId) {
+      return data.keys().hasAll(['sessionId', 'maskedIp', 'city', 'country', 'lastSeen']) &&
+        data.keys().hasOnly(['sessionId', 'maskedIp', 'city', 'region', 'country', 'countryCode', 'lastSeen']) &&
+        data.sessionId is string && data.sessionId == sessionId && isValidId(data.sessionId) &&
+        data.maskedIp is string && data.maskedIp.size() >= 3 && data.maskedIp.size() <= 64 &&
+        data.city is string && data.city.size() >= 1 && data.city.size() <= 80 &&
+        data.country is string && data.country.size() >= 1 && data.country.size() <= 80 &&
+        data.lastSeen is timestamp &&
+        (!('region' in data) || (data.region is string && data.region.size() <= 80)) &&
+        (!('countryCode' in data) || (data.countryCode is string && data.countryCode.size() <= 8));
+    }
+
+    // 4. Collection Rules
+
+    // Admins registry (read-only for self check, never client-writable)
+    match /admins/{adminUid} {
+      allow get: if isValidId(adminUid) && isSignedIn() && request.auth.uid == adminUid;
+      allow list, create, update, delete: if false;
+    }
+
+    // Users collection (PII strictly isolated to owner or admin)
     match /users/{uid} {
-      allow read: if isAuthenticated();
-      allow write: if isAuthenticated() && (request.auth.uid == uid || isAdmin());
+      allow get: if isValidId(uid) && isSignedIn() && (request.auth.uid == uid || isAdmin());
+      allow list: if isRootAdmin();
+      allow create: if isValidId(uid) && isVerified() &&
+        isValidUser(incoming(), uid) &&
+        incoming().createdAt == request.time &&
+        (
+          (request.auth.uid == uid && incoming().role == 'user') ||
+          isAdmin()
+        );
+      allow update: if isValidId(uid) && isVerified() &&
+        isValidUser(incoming(), uid) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        (
+          isAdmin() ||
+          (
+            request.auth.uid == uid &&
+            incoming().role == existing().role &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'lastLoginAt']) &&
+            incoming().lastLoginAt == request.time
+          )
+        );
+      allow delete: if isValidId(uid) && isAdmin();
     }
 
+    // Generated PDF Documents collection
     match /documents/{docId} {
-      allow read, write: if isAuthenticated();
+      allow get: if isValidId(docId) && isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isRootAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isValidId(docId) && isVerified() &&
+        isValidDocument(incoming(), docId) &&
+        incoming().userId == request.auth.uid &&
+        incoming().createdAt == request.time;
+      allow update: if isValidId(docId) && isVerified() &&
+        isValidDocument(incoming(), docId) &&
+        incoming().id == existing().id &&
+        incoming().userId == existing().userId &&
+        incoming().createdAt == existing().createdAt &&
+        isAdmin();
+      allow delete: if isValidId(docId) && isAdmin();
     }
 
+    // Payments collection (Terminal state protected for completed/refunded)
     match /payments/{payId} {
-      allow read, write: if isAuthenticated();
+      allow get: if isValidId(payId) && isSignedIn() && (existing().userId == request.auth.uid || isAdmin());
+      allow list: if isRootAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+      allow create: if isValidId(payId) && isVerified() &&
+        isValidPayment(incoming(), payId) &&
+        incoming().userId == request.auth.uid &&
+        incoming().createdAt == request.time;
+      allow update: if isValidId(payId) && isVerified() &&
+        isValidPayment(incoming(), payId) &&
+        incoming().id == existing().id &&
+        incoming().userId == existing().userId &&
+        incoming().createdAt == existing().createdAt &&
+        (
+          isAdmin() ||
+          (
+            existing().status == 'pending' &&
+            existing().userId == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status'])
+          )
+        );
+      allow delete: if isValidId(payId) && isAdmin();
     }
 
+    // Promotion Codes collection (Only Admin can list; users can get an exact code ID to verify & increment usageCount by 1)
     match /promoCodes/{codeId} {
-      allow read: if true;
-      allow write: if isAuthenticated();
+      allow get: if isValidId(codeId) && (isSignedIn() || isAdmin());
+      allow list: if isRootAdmin();
+      allow create: if isValidId(codeId) && isAdmin() &&
+        isValidPromoCode(incoming(), codeId) &&
+        incoming().createdAt == request.time;
+      allow update: if isValidId(codeId) && isVerified() &&
+        isValidPromoCode(incoming(), codeId) &&
+        incoming().id == existing().id &&
+        incoming().createdAt == existing().createdAt &&
+        (
+          isAdmin() ||
+          (
+            existing().isActive == true &&
+            existing().usageCount < existing().usageLimit &&
+            incoming().usageCount == existing().usageCount + 1 &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['usageCount'])
+          )
+        );
+      allow delete: if isValidId(codeId) && isAdmin();
     }
 
+    // Foreigner Support Centers collection (Admin lists & manages; authenticated users can get by ID)
     match /centers/{centerId} {
-      allow read: if true;
-      allow write: if isAuthenticated();
+      allow get: if isValidId(centerId) && isSignedIn();
+      allow list: if isRootAdmin();
+      allow create: if isValidId(centerId) && isAdmin() &&
+        isValidCenter(incoming(), centerId) &&
+        incoming().createdAt == request.time;
+      allow update: if isValidId(centerId) && isAdmin() &&
+        isValidCenter(incoming(), centerId) &&
+        incoming().id == existing().id &&
+        incoming().createdAt == existing().createdAt;
+      allow delete: if isValidId(centerId) && isAdmin();
+    }
+
+    // Privacy-masked Live Visitors collection (Admin only)
+    match /visitors/{sessionId} {
+      allow get: if isValidId(sessionId) && isAdmin();
+      allow list: if isRootAdmin();
+      allow create: if isValidId(sessionId) && isAdmin() &&
+        isValidVisitor(incoming(), sessionId) &&
+        incoming().lastSeen == request.time;
+      allow update: if isValidId(sessionId) && isAdmin() &&
+        isValidVisitor(incoming(), sessionId) &&
+        incoming().sessionId == existing().sessionId &&
+        incoming().lastSeen == request.time;
+      allow delete: if isValidId(sessionId) && isAdmin();
+    }
+
+    // Connection test document (read-only ping)
+    match /test/{docId} {
+      allow get: if isValidId(docId) && docId == 'connection';
+      allow list, write: if false;
     }
   }
 }

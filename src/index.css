@@ -528,3 +528,24 @@ body[data-lang="km"],
   }
 }
 
+/* Smooth right-to-left scrolling marquee for Live Visitors city ticker */
+@keyframes marquee-rtl {
+  0% {
+    transform: translateX(0%);
+  }
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+.animate-marquee-rtl {
+  display: inline-flex;
+  width: max-content;
+  animation: marquee-rtl 32s linear infinite;
+}
+
+.animate-marquee-rtl:hover {
+  animation-play-state: paused;
+}
+
+

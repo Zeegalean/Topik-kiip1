@@ -23,6 +23,8 @@ import { AdminDashboard } from './components/AdminDashboard';
 import { VisitorStatsCounter } from './components/VisitorStatsCounter';
 import { getTranslation } from './utils/translations';
 import { saveFormDraft, isFormDataWorthSaving } from './utils/draftStorage';
+import { auth } from './utils/firebase';
+import { signOut } from 'firebase/auth';
 import { 
   BookOpen, 
   FileCheck2, 
@@ -82,22 +84,36 @@ export default function App() {
     }
   });
 
-  // Admin Mode (Protects PC App install and source code packaging from public users)
-  const [isAdmin, setIsAdmin] = useState<boolean>(() => {
-    try {
-      if (typeof window !== "undefined") {
-        const query = window.location.search.toLowerCase();
-        if (query.includes("admin=true") || query.includes("admin=1") || query.includes("admin=zeekhmerads")) {
-          localStorage.setItem("kiip_admin_mode", "true");
-          return true;
-        }
-        return localStorage.getItem("kiip_admin_mode") === "true";
-      }
-    } catch {}
-    return false;
-  });
+  // Admin Mode (Stored strictly in React memory — never in localStorage or URL query params)
+  const [adminToken, setAdminToken] = useState<string | null>(null);
+  const [adminUsername, setAdminUsername] = useState<string | null>(null);
+  const isAdmin = Boolean(adminToken);
   const [isAdminAuthOpen, setIsAdminAuthOpen] = useState<boolean>(false);
   const [isAdminDashboardOpen, setIsAdminDashboardOpen] = useState<boolean>(false);
+
+  // Clean up any legacy localStorage admin flag from prior versions
+  useEffect(() => {
+    try {
+      localStorage.removeItem('kiip_admin_mode');
+    } catch {}
+  }, []);
+
+  const handleAdminLogout = async () => {
+    const tokenToRevoke = adminToken;
+    setAdminToken(null);
+    setAdminUsername(null);
+    setIsAdminDashboardOpen(false);
+    if (tokenToRevoke) {
+      try {
+        await fetch('/api/admin/logout', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${tokenToRevoke}` },
+        });
+      } catch {
+        // ignore network errors on logout
+      }
+    }
+  };
 
   // Workflow navigation
   const [currentStep, setCurrentStep] = useState<number>(1);
@@ -306,15 +322,16 @@ export default function App() {
           setLang={setLang}
           user={user}
           onOpenAuth={() => setIsAuthModalOpen(true)}
-          onLogout={() =>
+          onLogout={() => {
+            signOut(auth).catch(() => {});
             setUser({
               isLoggedIn: false,
               name: '',
               email: '',
               avatar: '',
               provider: 'guest',
-            })
-          }
+            });
+          }}
           onLoadSample={handleLoadSample}
           onTestDownload={handleTestDownload}
           onOpenBgSettings={() => setIsBgModalOpen(true)}
@@ -431,6 +448,7 @@ export default function App() {
         }}
         lang={lang}
         formData={formData}
+        userEmail={user.isLoggedIn ? user.email : undefined}
       />
 
       {/* Auth Modal */}
@@ -474,8 +492,10 @@ export default function App() {
       <AdminAuthModal
         isOpen={isAdminAuthOpen}
         onClose={() => setIsAdminAuthOpen(false)}
-        onSuccess={() => {
-          setIsAdmin(true);
+        onSuccess={({ token, username }) => {
+          setAdminToken(token);
+          setAdminUsername(username);
+          setIsAdminAuthOpen(false);
           setIsAdminDashboardOpen(true);
         }}
         lang={lang}
@@ -486,6 +506,9 @@ export default function App() {
         isOpen={isAdminDashboardOpen}
         onClose={() => setIsAdminDashboardOpen(false)}
         lang={lang}
+        adminToken={adminToken}
+        adminUsername={adminUsername}
+        onAdminSessionLogout={handleAdminLogout}
       />
 
       {/* Footer */}
@@ -520,10 +543,7 @@ export default function App() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => {
-                    localStorage.removeItem("kiip_admin_mode");
-                    setIsAdmin(false);
-                  }}
+                  onClick={handleAdminLogout}
                   className="text-slate-400 hover:text-red-600 underline cursor-pointer text-[10px]"
                   title="Logout Admin"
                 >

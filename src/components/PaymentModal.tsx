@@ -19,10 +19,15 @@ import {
   Clock,
   ArrowRight,
   Info,
+  Upload,
+  Send,
+  Landmark,
+  Camera,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { ApplicationFormData, Language } from '../types';
 import { getTranslation } from '../utils/translations';
+import { recordPaymentTransaction, verifyAndRedeemFirestorePromo } from '../utils/firebase';
 
 interface PaymentModalProps {
   isOpen: boolean;
@@ -30,9 +35,10 @@ interface PaymentModalProps {
   onPaymentSuccess: () => void;
   lang?: Language;
   formData?: ApplicationFormData;
+  userEmail?: string;
 }
 
-export type PaymentMethod = 'khqr' | 'redeem' | 'card' | 'playstore' | 'appstore' | 'paypal';
+export type PaymentMethod = 'khqr' | 'krbank' | 'redeem' | 'card' | 'playstore' | 'appstore' | 'paypal';
 
 const DEFAULT_PAYWAY_URL = 'https://link.payway.com.kh/ABAPAYzz552103m';
 const QR_TTL_SECONDS = 15 * 60; // 15 minutes
@@ -49,6 +55,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   onClose,
   onPaymentSuccess,
   lang = 'km',
+  userEmail,
 }) => {
   const t = getTranslation(lang);
   const [activeTab, setActiveTab] = useState<PaymentMethod>('khqr');
@@ -79,6 +86,27 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const [isGeneratingQr, setIsGeneratingQr] = useState<boolean>(false);
   const [copiedTxId, setCopiedTxId] = useState(false);
   const [qrPayCount, setQrPayCount] = useState<number>(0);
+
+  // Korea Bank Transfer Receipt Auto-Verification & Telegram Bot State
+  const [krConfig, setKrConfig] = useState<{
+    bankName: string;
+    accountNumber: string;
+    accountHolder: string;
+    telegramBotUsername: string;
+    amountKrw: number;
+    autoReceiptVerifyEnabled: boolean;
+    telegramBotEnabled: boolean;
+  } | null>(null);
+  const [copiedKrAccount, setCopiedKrAccount] = useState(false);
+  const [receiptPreview, setReceiptPreview] = useState<string | null>(null);
+  const [verifyingReceipt, setVerifyingReceipt] = useState(false);
+  const [receiptError, setReceiptError] = useState<string | null>(null);
+  const [issuedKrCode, setIssuedKrCode] = useState<{
+    code: string;
+    bankName: string;
+    verifiedAmount: number;
+  } | null>(null);
+  const [copiedKrCode, setCopiedKrCode] = useState(false);
 
   const isKm = lang === 'km';
   const isKo = lang === 'ko';
@@ -180,6 +208,31 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     }
   }, [isOpen, activeTab, qrCodeDataUrl, generateNewKhqr]);
 
+  // Fetch Korea Bank & Telegram Bot configuration when modal opens
+  useEffect(() => {
+    if (!isOpen || krConfig) return;
+    let mounted = true;
+    fetch('/api/payments/kr-config')
+      .then((r) => r.json())
+      .then((data) => {
+        if (mounted && data?.success) {
+          setKrConfig({
+            bankName: String(data.bankName || ''),
+            accountNumber: String(data.accountNumber || ''),
+            accountHolder: String(data.accountHolder || ''),
+            telegramBotUsername: String(data.telegramBotUsername || ''),
+            amountKrw: Number(data.amountKrw) || 15000,
+            autoReceiptVerifyEnabled: Boolean(data.autoReceiptVerifyEnabled),
+            telegramBotEnabled: Boolean(data.telegramBotEnabled),
+          });
+        }
+      })
+      .catch(() => {});
+    return () => {
+      mounted = false;
+    };
+  }, [isOpen, krConfig]);
+
   // Live 1-second countdown timer for the 15-minute ABA QR window
   useEffect(() => {
     if (!isOpen || !qrExpiresAt) return;
@@ -222,7 +275,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const isQrExpired = qrExpiresAt > 0 && qrSecondsLeft <= 0;
   const isQrWarning = qrSecondsLeft > 0 && qrSecondsLeft <= 180;
 
-  // Strict Promo / Redeem Code verification
+  // Strict Promo / Redeem Code verification (Server API + Firestore /promoCodes/{CODE})
   const verifyCodeAndUnlock = async (rawInput: string, source: 'promo' | 'redeem') => {
     const trimmed = rawInput.trim().toUpperCase();
     const setErr = source === 'promo' ? setPromoCodeError : setRedeemError;
@@ -249,39 +302,56 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     );
 
     let verified = false;
+    let matchedCenterId: string | undefined;
+    let matchedType = source === 'promo' ? 'Promo Code' : 'Redeem Code';
     let serverErrorMsg: string | null = null;
 
-    if (trimmed === '199621147' || trimmed === 'KIIP-199621147' || trimmed === 'PROMO-199621147' || trimmed.startsWith('KIIP') || trimmed.startsWith('PROMO') || trimmed.length >= 5) {
-      verified = true;
-    } else {
-      try {
-        const resp = await fetch('/api/payments/verify-redeem', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code: trimmed }),
-        });
-        const data = await resp.json().catch(() => ({}));
-        if (resp.ok && data?.success) {
-          verified = true;
-        } else {
-          serverErrorMsg = data?.error || null;
-        }
-      } catch {
-        if (trimmed === '199621147' || trimmed === 'KIIP-199621147' || trimmed === 'PROMO-199621147') {
-          verified = true;
-        }
+    // 1. Strict server verification (covers Master Promo, Korea Bank/Telegram single-use codes, REDEEM_CODES)
+    try {
+      const resp = await fetch('/api/payments/verify-redeem', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: trimmed }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.ok && data?.success) {
+        verified = true;
+        if (data.type === 'telegram_receipt') matchedType = 'Telegram Auto-Unlock';
+        else if (data.type === 'kr_receipt') matchedType = 'Korea Bank Receipt Code';
+        else if (data.type === 'redeem') matchedType = 'Single-Use Voucher';
+        else matchedType = 'Promo Code';
+      } else {
+        serverErrorMsg = data?.error || null;
+      }
+    } catch {
+      // Fall through to Firestore check
+    }
+
+    // 2. Firestore Admin-managed Promo Code lookup by exact code ID
+    if (!verified) {
+      const fsCheck = await verifyAndRedeemFirestorePromo(trimmed);
+      if (fsCheck.valid) {
+        verified = true;
+        matchedCenterId = fsCheck.centerId;
+        matchedType = 'Admin Promo Code';
+      } else if (fsCheck.reason) {
+        serverErrorMsg = fsCheck.reason;
       }
     }
 
     if (verified) {
       if (source === 'promo') {
         setPromoCodeSuccess(true);
-        try {
-          localStorage.setItem('kiip_promo_199621147', 'true');
-        } catch {
-          // ignore
-        }
       }
+      recordPaymentTransaction({
+        userEmail: userEmail || '',
+        amount: 0,
+        currency: 'KRW',
+        method: matchedType,
+        promoCodeUsed: trimmed,
+        centerId: matchedCenterId,
+      }).catch(() => {});
+
       setProcessingStep(
         isKm
           ? '✓ លេខកូដត្រឹមត្រូវ! កំពុងដោះសោ Clean PDF...'
@@ -289,18 +359,100 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
           ? '✓ 코드 확인 완료! Clean PDF 잠금 해제 중...'
           : '✓ Code verified! Unlocking Clean PDF...'
       );
-      await new Promise((r) => setTimeout(r, 500));
+      await new Promise((r) => setTimeout(r, 450));
       completeUnlock();
     } else {
       setIsProcessing(false);
       setErr(
         serverErrorMsg ||
           (isKm
-            ? 'លេខកូដមិនត្រឹមត្រូវ! សូមពិនិត្យម្តងទៀត ឬបង់ប្រាក់តាម ABA PayWay។'
+            ? 'លេខកូដមិនត្រឹមត្រូវ ឬផុតកំណត់! សូមពិនិត្យម្តងទៀត ឬបង់ប្រាក់តាម ABA PayWay / Korea Bank។'
             : isKo
-            ? '유효하지 않은 코드입니다. 다시 확인하거나 ABA PayWay로 결제해 주세요.'
-            : 'Invalid code! Please check your code or pay via ABA PayWay.')
+            ? '유효하지 않은 코드입니다. 다시 확인하거나 결제 후 이용해 주세요.'
+            : 'Invalid or expired code! Please check your code or pay via ABA PayWay / Korea Bank.')
       );
+    }
+  };
+
+  // Handle Korean Bank Transfer Screenshot upload -> AI auto-verifies -> issues single-use unlock code
+  const handleKrReceiptFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      setReceiptError(
+        isKm
+          ? 'សូមជ្រើសរើសរូបភាព Screenshot (PNG / JPG) តែប៉ុណ្ណោះ!'
+          : 'Please upload an image screenshot (PNG / JPG).'
+      );
+      return;
+    }
+    setReceiptError(null);
+    setIssuedKrCode(null);
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        setReceiptPreview(reader.result);
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleVerifyKrReceipt = async () => {
+    if (!receiptPreview) {
+      setReceiptError(
+        isKm
+          ? 'សូម Upload រូបភាព Screenshot វិក្កយបត្របាញ់ប្រាក់កូរ៉េជាមុនសិន!'
+          : 'Please upload your Korean bank transfer screenshot first.'
+      );
+      return;
+    }
+
+    setReceiptError(null);
+    setVerifyingReceipt(true);
+    try {
+      const resp = await fetch('/api/payments/verify-kr-receipt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          receiptImage: receiptPreview,
+          userEmail: userEmail || 'guest@kiip-portal.kr',
+        }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok || !data?.success || !data?.unlockCode) {
+        setReceiptError(
+          data?.error ||
+            (isKm
+              ? 'មិនអាចផ្ទៀងផ្ទាត់វិក្កយបត្របានទេ។ សូមថត Screenshot ឱ្យច្បាស់លាស់ (បង្ហាញទឹកប្រាក់ ≥ ₩15,000 និងស្ថានភាពជោគជ័យ)។'
+              : 'Could not verify receipt. Please upload a clear transfer confirmation screenshot showing ≥ ₩15,000.')
+        );
+        return;
+      }
+
+      setIssuedKrCode({
+        code: data.unlockCode,
+        bankName: data.bankName || 'Korean Bank',
+        verifiedAmount: Number(data.verifiedAmount) || 15000,
+      });
+
+      // Automatically burn the single-use code and unlock Clean PDF
+      await fetch('/api/payments/verify-redeem', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: data.unlockCode }),
+      }).catch(() => {});
+
+      setTimeout(() => {
+        completeUnlock();
+      }, 1200);
+    } catch {
+      setReceiptError(
+        isKm
+          ? 'មានបញ្ហាតភ្ជាប់ទៅប្រព័ន្ធផ្ទៀងផ្ទាត់។ សូមព្យាយាមម្ដងទៀត!'
+          : 'Network error while verifying receipt. Please try again.'
+      );
+    } finally {
+      setVerifyingReceipt(false);
     }
   };
 
@@ -385,6 +537,13 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         ? '✓ ABA 결제 확인 완료! Clean PDF 잠금 해제 중...'
         : '✓ Payment confirmed! Unlocking Clean PDF...'
     );
+    recordPaymentTransaction({
+      userEmail: userEmail || '',
+      amount: 15000,
+      currency: 'KRW',
+      method: 'ABA PayWay QR',
+      promoCodeUsed: '-',
+    }).catch(() => {});
     await new Promise((r) => setTimeout(r, 600));
     setQrPayCount((prev) => prev + 1);
     completeUnlock();
@@ -560,7 +719,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               <label className="text-xs font-bold text-slate-700 uppercase tracking-wider block mb-2.5">
                 {t.paymentModalSubtitle}
               </label>
-              <div className="grid grid-cols-3 sm:grid-cols-6 gap-2">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 {/* 1. ABA PayWay (KHQR 15-min & Cards) */}
                 <button
                   type="button"
@@ -574,6 +733,21 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                   <QrCode className="w-5 h-5 text-[#004f80]" />
                   <span className="text-[11px] font-bold">ABA PayWay</span>
                   <span className="text-[9px] text-[#004f80] font-bold">KHQR · 15m</span>
+                </button>
+
+                {/* 1b. Korea Bank Transfer + Auto Receipt / Telegram Bot */}
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('krbank')}
+                  className={`p-2.5 rounded-2xl border text-center transition-all cursor-pointer flex flex-col items-center justify-center gap-1 relative ${
+                    activeTab === 'krbank'
+                      ? 'border-emerald-600 bg-emerald-50 text-emerald-900 ring-2 ring-emerald-500/20 font-bold shadow-xs'
+                      : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
+                  }`}
+                >
+                  <Landmark className="w-5 h-5 text-emerald-600" />
+                  <span className="text-[11px] font-bold">🇰🇷 Korea Bank</span>
+                  <span className="text-[9px] text-emerald-700 font-bold">Slip · Telegram</span>
                 </button>
 
                 {/* 2. Credit Card (Visa / Master via ABA PayWay) */}
@@ -912,6 +1086,204 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                       </>
                     )}
                   </button>
+                </div>
+              </div>
+            )}
+
+            {/* TAB 1B: KOREA BANK TRANSFER + AUTO RECEIPT VERIFICATION / TELEGRAM BOT */}
+            {activeTab === 'krbank' && (
+              <div className="space-y-4 text-left">
+                {/* Bank Transfer Info Box */}
+                <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-50 via-teal-50 to-sky-50 border border-emerald-200 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="p-1.5 rounded-lg bg-emerald-600 text-white">
+                        <Landmark className="w-4 h-4" />
+                      </span>
+                      <div>
+                        <h4 className="text-xs sm:text-sm font-black text-emerald-950">
+                          {isKm
+                            ? '🇰🇷 ផ្ទេរប្រាក់តាមធនាគារកូរ៉េ & ផ្ទៀងផ្ទាត់វិក្កយបត្រស្វ័យប្រវត្តិ'
+                            : isKo
+                            ? '🇰🇷 한국 계좌이체 & 이체확인증 자동 인증'
+                            : '🇰🇷 Korea Bank Transfer & Auto Receipt Verification'}
+                        </h4>
+                        <p className="text-[11px] text-emerald-800">
+                          {isKm
+                            ? 'ផ្ទេរប្រាក់ ₩15,000 រួច Upload រូប Screenshot វិក្កយបត្រ ដើម្បីទទួលកូដដោះសោភ្លាមៗ (Auto-Unlock)'
+                            : 'Transfer ₩15,000 and upload your transfer screenshot to receive an automatic unlock code.'}
+                        </p>
+                      </div>
+                    </div>
+                    <span className="text-sm font-black text-emerald-800 tabular-nums shrink-0">
+                      ₩{(krConfig?.amountKrw || 15000).toLocaleString()}
+                    </span>
+                  </div>
+
+                  {krConfig?.accountNumber ? (
+                    <div className="p-3 bg-white rounded-xl border border-emerald-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                      <div className="space-y-0.5">
+                        <p className="text-slate-500 text-[11px]">
+                          {isKm ? 'ធនាគារ (Bank):' : 'Bank:'}{' '}
+                          <strong className="text-slate-900">{krConfig.bankName || 'Korean Bank'}</strong>
+                          {krConfig.accountHolder ? ` · ${krConfig.accountHolder}` : ''}
+                        </p>
+                        <p className="font-mono font-black text-sm text-emerald-800 tracking-wide">
+                          {krConfig.accountNumber}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText(krConfig.accountNumber);
+                          setCopiedKrAccount(true);
+                          setTimeout(() => setCopiedKrAccount(false), 2000);
+                        }}
+                        className="px-3 py-1.5 rounded-lg bg-emerald-100 hover:bg-emerald-200 text-emerald-900 font-bold text-xs flex items-center gap-1.5 cursor-pointer self-start sm:self-center"
+                      >
+                        {copiedKrAccount ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                        <span>{copiedKrAccount ? (isKm ? 'បានចម្លង' : 'Copied') : (isKm ? 'ចម្លងលេខគណនី' : 'Copy Account')}</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="p-3 bg-white/80 rounded-xl border border-amber-200 text-[11px] text-amber-900">
+                      {isKm
+                        ? 'ℹ️ Admin មិនទាន់បានកំណត់លេខគណនីធនាគារកូរ៉េក្នុង Settings → Secrets (KR_BANK_NAME, KR_BANK_ACCOUNT, KR_BANK_HOLDER) នៅឡើយទេ។ ប៉ុន្តែអ្នកអាច Upload Screenshot វិក្កយបត្រដើម្បីផ្ទៀងផ្ទាត់ស្វ័យប្រវត្តិខាងក្រោមបាន។'
+                        : 'ℹ️ Korean bank account details (KR_BANK_NAME, KR_BANK_ACCOUNT, KR_BANK_HOLDER) are not set in Secrets yet. You can still upload a Korean bank transfer screenshot below for automatic verification.'}
+                    </div>
+                  )}
+                </div>
+
+                {/* Upload Transfer Screenshot Zone */}
+                <div className="p-4 rounded-2xl border-2 border-dashed border-slate-300 bg-slate-50/70 space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                      <Camera className="w-4 h-4 text-emerald-600" />
+                      {isKm
+                        ? 'ជំហានទី ២: Upload រូប Screenshot វិក្កយបត្រផ្ទេរប្រាក់ (KakaoBank / Toss / KB / Shinhan / Woori / NH...)'
+                        : 'Step 2: Upload Bank Transfer Screenshot (KakaoBank / Toss / KB / Shinhan / NH...)'}
+                    </span>
+                  </div>
+
+                  <label className="block w-full p-4 bg-white hover:bg-emerald-50/40 rounded-xl border border-slate-200 text-center cursor-pointer transition-colors">
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={handleKrReceiptFileChange}
+                      className="hidden"
+                    />
+                    {receiptPreview ? (
+                      <div className="space-y-2">
+                        <img
+                          src={receiptPreview}
+                          alt="Transfer receipt preview"
+                          className="max-h-48 mx-auto rounded-lg border border-slate-200 object-contain"
+                        />
+                        <p className="text-[11px] text-emerald-700 font-bold">
+                          {isKm ? 'ចុចដើម្បីប្ដូររូប Screenshot ផ្សេង' : 'Click to replace screenshot'}
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="py-4 flex flex-col items-center gap-1.5 text-slate-500">
+                        <Upload className="w-6 h-6 text-emerald-600" />
+                        <span className="text-xs font-bold text-slate-700">
+                          {isKm ? 'ចុចជ្រើសរើសរូប Screenshot វិក្កយបត្រ (PNG / JPG)' : 'Click to select receipt screenshot (PNG / JPG)'}
+                        </span>
+                        <span className="text-[10px] text-slate-400">
+                          {isKm ? 'រូបភាពត្រូវបានផ្ទៀងផ្ទាត់ភ្លាមៗក្នុង Memory ហើយមិនរក្សាទុកក្នុង Server ឡើយ' : 'Verified in-memory only — image is never stored on disk'}
+                        </span>
+                      </div>
+                    )}
+                  </label>
+
+                  {receiptError && (
+                    <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-start gap-2">
+                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                      <span>{receiptError}</span>
+                    </div>
+                  )}
+
+                  {issuedKrCode && (
+                    <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-300 text-emerald-900 text-xs space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-black flex items-center gap-1.5">
+                          <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                          {isKm
+                            ? `ផ្ទៀងផ្ទាត់ជោគជ័យ (${issuedKrCode.bankName} · ₩${issuedKrCode.verifiedAmount.toLocaleString()})!`
+                            : `Verified (${issuedKrCode.bankName} · ₩${issuedKrCode.verifiedAmount.toLocaleString()})!`}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            navigator.clipboard.writeText(issuedKrCode.code);
+                            setCopiedKrCode(true);
+                            setTimeout(() => setCopiedKrCode(false), 2000);
+                          }}
+                          className="px-2 py-0.5 rounded bg-emerald-200 text-emerald-950 font-mono font-bold text-[11px] flex items-center gap-1 cursor-pointer"
+                        >
+                          <span>{issuedKrCode.code}</span>
+                          {copiedKrCode ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                        </button>
+                      </div>
+                      <p className="text-[11px] text-emerald-800">
+                        {isKm ? 'កំពុងដោះសោ Clean PDF ជូនអ្នកដោយស្វ័យប្រវត្តិ...' : 'Automatically unlocking your Clean PDF...'}
+                      </p>
+                    </div>
+                  )}
+
+                  <button
+                    type="button"
+                    disabled={!receiptPreview || verifyingReceipt}
+                    onClick={handleVerifyKrReceipt}
+                    className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-black text-xs sm:text-sm shadow-lg flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                  >
+                    {verifyingReceipt ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        <span>{isKm ? 'កំពុងផ្ទៀងផ្ទាត់វិក្កយបត្រស្វ័យប្រវត្តិ...' : 'Verifying transfer receipt...'}</span>
+                      </>
+                    ) : (
+                      <>
+                        <ShieldCheck className="w-4 h-4" />
+                        <span>{isKm ? 'ផ្ទៀងផ្ទាត់វិក្កយបត្រ & ដោះសោស្វ័យប្រវត្តិ' : 'Verify Receipt & Auto-Unlock'}</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+
+                {/* Telegram Bot Auto-Unlock Alternative */}
+                <div className="p-3.5 rounded-2xl bg-sky-50 border border-sky-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="space-y-0.5">
+                    <p className="text-xs font-black text-sky-950 flex items-center gap-1.5">
+                      <Send className="w-3.5 h-3.5 text-sky-600" />
+                      {isKm ? 'ឬ ផ្ញើ Screenshot ទៅ Telegram Bot ដើម្បីទទួលកូដស្វ័យប្រវត្តិ' : 'Or send screenshot to Telegram Bot for an auto-code'}
+                    </p>
+                    <p className="text-[11px] text-sky-800">
+                      {isKm
+                        ? 'ផ្ញើរូបវិក្កយបត្រចូល Telegram Bot → Bot នឹងផ្ញើកូដដោះសោ KIIP-TG-XXXXXX ត្រឡប់មកវិញភ្លាមៗ រួចយកមកវាយក្នុងផ្ទាំង Redeem។'
+                        : 'Send your transfer screenshot to the Telegram Bot to receive a single-use KIIP-TG-XXXXXX code, then enter it in the Redeem tab.'}
+                    </p>
+                  </div>
+                  {krConfig?.telegramBotUsername ? (
+                    <a
+                      href={`https://t.me/${encodeURIComponent(krConfig.telegramBotUsername)}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs flex items-center gap-1.5 shrink-0 self-start sm:self-center"
+                    >
+                      <Send className="w-3.5 h-3.5" />
+                      <span>@{krConfig.telegramBotUsername}</span>
+                      <ExternalLink className="w-3 h-3" />
+                    </a>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setActiveTab('redeem')}
+                      className="px-3 py-2 rounded-xl bg-white border border-sky-300 text-sky-900 font-bold text-xs shrink-0 cursor-pointer self-start sm:self-center"
+                    >
+                      {isKm ? 'មានកូដហើយ? ទៅ Redeem' : 'Have a code? Redeem'}
+                    </button>
+                  )}
                 </div>
               </div>
             )}

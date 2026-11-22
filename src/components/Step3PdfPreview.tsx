@@ -16,6 +16,11 @@ import {
 } from '../data/sampleData';
 import { OfficialFormView } from './OfficialFormView';
 import { cleanVisaStatus } from '../utils/sanitizers';
+import {
+  recordGeneratedDocument,
+  recordPaymentTransaction,
+  verifyAndRedeemFirestorePromo,
+} from '../utils/firebase';
 import confetti from 'canvas-confetti';
 import { 
   Download, 
@@ -114,39 +119,60 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
       return;
     }
 
-    let isValid = raw === '199621147' || raw === 'KIIP-199621147' || raw === 'PROMO-199621147';
+    let isValid = false;
+    let matchedCenterId: string | undefined;
+    let errorReason: string | null = null;
 
+    // 1. Verify against backend API (Master Promo, single-use Korea Bank / Telegram codes, REDEEM_CODES)
+    try {
+      const resp = await fetch('/api/payments/verify-redeem', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ code: raw }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.ok && data?.success) {
+        isValid = true;
+      } else if (data?.error) {
+        errorReason = data.error;
+      }
+    } catch {
+      // Fall through to Firestore promo check
+    }
+
+    // 2. Verify against Admin-managed Firestore /promoCodes/{CODE}
     if (!isValid) {
-      try {
-        const resp = await fetch('/api/payments/verify-redeem', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ code: raw }),
-        });
-        if (resp.ok) {
-          const data = await resp.json();
-          if (data?.success) isValid = true;
-        }
-      } catch {
-        // Fallback when running static/offline
+      const fsCheck = await verifyAndRedeemFirestorePromo(raw);
+      if (fsCheck.valid) {
+        isValid = true;
+        matchedCenterId = fsCheck.centerId;
+      } else if (fsCheck.reason) {
+        errorReason = fsCheck.reason;
       }
     }
 
     if (isValid) {
       try {
         localStorage.setItem('kiip_doc_paid_v3', 'true');
-        localStorage.setItem('kiip_promo_199621147', 'true');
-      } catch (e) {}
+      } catch {}
       if (setIsPaid) setIsPaid(true);
+      recordPaymentTransaction({
+        userEmail: '',
+        amount: 0,
+        currency: 'KRW',
+        method: 'Promo / Unlock Code',
+        promoCodeUsed: raw,
+        centerId: matchedCenterId,
+      }).catch(() => {});
       confetti({ particleCount: 160, spread: 90, origin: { y: 0.5 } });
       setPromoCodeMsg({
         type: 'success',
-        text: '✓ កូដ Promo Code ត្រឹមត្រូវ! បានដោះសោទាញយក Clean PDF ឥតគិតថ្លៃ 100% មិនបាច់បាញ់លុយ!',
+        text: '✓ កូដ Promo Code ត្រឹមត្រូវ! បានដោះសោទាញយក Clean PDF ដោយជោគជ័យ!',
       });
     } else {
       setPromoCodeMsg({
         type: 'error',
-        text: 'កូដមិនត្រឹមត្រូវ! សូមពិនិត្យលេខកូដ Promo Code របស់អ្នកម្តងទៀត។',
+        text: errorReason || 'កូដមិនត្រឹមត្រូវ ឬផុតសុពលភាព! សូមពិនិត្យលេខកូដរបស់អ្នកម្តងទៀត។',
       });
     }
   };
@@ -233,6 +259,13 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
           } catch {}
         }, 10000);
       }
+
+      // Record real PDF generation metadata (never stores Socinet passwords or ID images)
+      recordGeneratedDocument({
+        applicantName: formData.name || 'Applicant',
+        pageCount: actualPages,
+        isPaid: Boolean(isPaid),
+      }).catch(() => {});
 
       confetti({
         particleCount: 90,

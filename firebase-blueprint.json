@@ -1,61 +1,279 @@
 {
-  "version": "1.0",
   "entities": {
     "User": {
-      "uid": "string",
-      "email": "string",
-      "role": "string",
-      "createdAt": "timestamp"
+      "title": "User",
+      "description": "Registered user profile for KIIP-TOPIK portal. Never stores Socinet passwords or ID images.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "maxLength": 254
+        },
+        "displayName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "role": {
+          "type": "string",
+          "enum": ["user", "center_manager", "admin"]
+        },
+        "provider": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "lastLoginAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "role", "createdAt"]
     },
-    "Document": {
-      "id": "string",
-      "userId": "string",
-      "applicantName": "string",
-      "createdAt": "timestamp",
-      "isPaid": "boolean"
+    "DocumentRecord": {
+      "title": "DocumentRecord",
+      "description": "Generated KIIP-TOPIK PDF document record. Stores only non-sensitive metadata (no passport/ARC images or Socinet passwords).",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "applicantName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "pageCount": {
+          "type": "number"
+        },
+        "isPaid": {
+          "type": "boolean"
+        },
+        "centerId": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "userId", "applicantName", "isPaid", "createdAt"]
     },
-    "Payment": {
-      "id": "string",
-      "userId": "string",
-      "amount": "number",
-      "currency": "string",
-      "method": "string",
-      "status": "string",
-      "createdAt": "timestamp",
-      "promoCodeUsed": "string"
+    "PaymentRecord": {
+      "title": "PaymentRecord",
+      "description": "Verified payment or promo code redemption transaction record.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "userEmail": {
+          "type": "string",
+          "maxLength": 254
+        },
+        "amount": {
+          "type": "number"
+        },
+        "currency": {
+          "type": "string",
+          "enum": ["KRW", "USD"]
+        },
+        "method": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "completed", "failed", "refunded"]
+        },
+        "promoCodeUsed": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "centerId": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "userId", "userEmail", "amount", "currency", "method", "status", "createdAt"]
     },
     "PromoCode": {
-      "id": "string",
-      "code": "string",
-      "centerId": "string",
-      "usageLimit": "number",
-      "usageCount": "number",
-      "expiresAt": "string",
-      "createdAt": "timestamp"
+      "title": "PromoCode",
+      "description": "Monthly promotion code assigned to a foreigner support center with usage limit and expiry.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "code": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 64,
+          "pattern": "^[A-Z0-9_\\-]+$"
+        },
+        "centerId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "monthLabel": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "usageLimit": {
+          "type": "number"
+        },
+        "usageCount": {
+          "type": "number"
+        },
+        "expiresAt": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "isActive": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "code", "centerId", "usageLimit", "usageCount", "expiresAt", "isActive", "createdAt"]
     },
-    "Center": {
-      "id": "string",
-      "centerName": "string",
-      "region": "string",
-      "contactPhone": "string",
-      "managerEmail": "string"
+    "SupportCenter": {
+      "title": "SupportCenter",
+      "description": "Foreigner support center registered for monthly KIIP promo code allocation.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "centerName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "region": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "contactPhone": {
+          "type": "string",
+          "maxLength": 32
+        },
+        "managerEmail": {
+          "type": "string",
+          "maxLength": 254
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "centerName", "region", "contactPhone", "managerEmail", "createdAt"]
+    },
+    "LiveVisitor": {
+      "title": "LiveVisitor",
+      "description": "Privacy-masked live visitor geolocation record (stores masked IP and city only, never raw IP).",
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "maskedIp": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "city": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "region": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "country": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "countryCode": {
+          "type": "string",
+          "maxLength": 8
+        },
+        "lastSeen": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["sessionId", "maskedIp", "city", "country", "lastSeen"]
     }
   },
   "firestore": {
-    "users/{uid}": {
-      "schema": "User"
+    "/users/{uid}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "Registered user accounts with owner/admin PII isolation."
     },
-    "documents/{docId}": {
-      "schema": "Document"
+    "/documents/{docId}": {
+      "schema": { "$ref": "#/entities/DocumentRecord" },
+      "description": "Generated KIIP-TOPIK PDF document logs."
     },
-    "payments/{payId}": {
-      "schema": "Payment"
+    "/payments/{payId}": {
+      "schema": { "$ref": "#/entities/PaymentRecord" },
+      "description": "Payment history and revenue tracking records."
     },
-    "promoCodes/{codeId}": {
-      "schema": "PromoCode"
+    "/promoCodes/{codeId}": {
+      "schema": { "$ref": "#/entities/PromoCode" },
+      "description": "Center-specific monthly promotion codes with usage limits and expiry."
     },
-    "centers/{centerId}": {
-      "schema": "Center"
+    "/centers/{centerId}": {
+      "schema": { "$ref": "#/entities/SupportCenter" },
+      "description": "Registered foreigner support centers in Korea."
+    },
+    "/visitors/{sessionId}": {
+      "schema": { "$ref": "#/entities/LiveVisitor" },
+      "description": "Privacy-masked visitor sessions for real-time city marquee and analytics."
     }
   }
 }
