@@ -4,13 +4,27 @@ import crypto from 'crypto';
 import { execSync } from 'child_process';
 import express from 'express';
 import dotenv from 'dotenv';
-import nodemailer from 'nodemailer';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import {
+  getRedeemDb,
+  getRedeemCodeStats,
+  listRedeemCodes,
+  generateUnusedRedeemCodes,
+  addCustomRedeemCodes,
+  verifyAndBurnRedeemCode,
+  reserveUnusedRedeemCode,
+  updateRedeemCodeStatus,
+  deleteRedeemCode,
+  syncRedeemCodesFromGoogleSheet,
+  type RedeemCodeStatus,
+} from './src/server/redeemDb.ts';
 
 dotenv.config();
 dns.setDefaultResultOrder('ipv4first');
+// Initialize persistent SQLite Redeem Code database with pre-seeded 'Unused' codes
+getRedeemDb();
 
 function getCliArg(flag: string): string | undefined {
   const idx = process.argv.indexOf(flag);
@@ -868,8 +882,8 @@ app.post('/api/payments/aba-session', (req, res) => {
   const timeSeq = String(now).slice(-5);
   const txId = `KIIP-${timeSeq}-${randomHex}`;
   const expiresAt = now + ABA_QR_TTL_MS;
-  const paywayUrl = process.env.ABA_PAYWAY_LINK_URL || DEFAULT_ABA_PAYWAY_LINK;
-  const hasMerchantApi = Boolean(process.env.ABA_PAYWAY_MERCHANT_ID && process.env.ABA_PAYWAY_API_KEY);
+  const paywayUrl = DEFAULT_ABA_PAYWAY_LINK;
+  const hasMerchantApi = false;
 
   const session: AbaPaymentSession = {
     txId,
@@ -920,49 +934,12 @@ app.get('/api/payments/aba-status/:txId', (req, res) => {
   });
 });
 
-// Official ABA PayWay Callback / Webhook receiver
-app.post('/api/payments/aba-callback', (req, res) => {
-  try {
-    const body = req.body || {};
-    const tranId = String(body.tran_id || body.txId || '').trim();
-    const rawStatus = body.status;
-
-    if (!tranId) {
-      return res.status(400).json({ success: false, error: 'Missing tran_id' });
-    }
-
-    // Optional HMAC verification if merchant API key is configured
-    const apiKey = process.env.ABA_PAYWAY_API_KEY;
-    if (apiKey && body.hash && body.req_time && process.env.ABA_PAYWAY_MERCHANT_ID) {
-      const payload = `${body.req_time}${process.env.ABA_PAYWAY_MERCHANT_ID}${tranId}${body.amount || ''}`;
-      const expected = crypto.createHmac('sha512', apiKey).update(payload).digest('base64');
-      if (expected !== body.hash) {
-        return res.status(403).json({ success: false, error: 'Invalid ABA PayWay signature' });
-      }
-    }
-
-    const session = abaSessions.get(tranId);
-    if (!session) {
-      return res.status(404).json({ success: false, error: 'Unknown transaction session' });
-    }
-
-    // ABA PayWay status 0 / "0" indicates Approved
-    if (rawStatus === 0 || rawStatus === '0' || String(rawStatus).toLowerCase() === 'approved') {
-      session.status = 'paid';
-      session.paidAt = Date.now();
-      return res.json({ success: true, status: 'paid', txId: tranId });
-    }
-
-    return res.json({ success: true, status: session.status, txId: tranId });
-  } catch (err: any) {
-    return res.status(500).json({ success: false, error: err?.message || 'Callback error' });
-  }
-});
+// ABA PayWay Merchant API callback disabled (Merchant API env vars removed)
 
 app.post('/api/payments/aba-confirm', (req, res) => {
   const txId = String(req.body?.txId || '').trim();
   const referenceNote = String(req.body?.referenceNote || '').trim();
-  const hasMerchantApi = Boolean(process.env.ABA_PAYWAY_MERCHANT_ID && process.env.ABA_PAYWAY_API_KEY);
+  const hasMerchantApi = false;
 
   const session = abaSessions.get(txId);
   if (!session) {
@@ -1030,6 +1007,7 @@ const issuedUnlockCodes = new Map<string, IssuedUnlockCode>();
 
 app.post('/api/payments/verify-redeem', (req, res) => {
   const rawCode = String(req.body?.code || '').trim().toUpperCase();
+  const userEmail = String(req.body?.userEmail || '').trim().slice(0, 160);
   if (!rawCode) {
     return res.status(400).json({
       success: false,
@@ -1041,7 +1019,33 @@ app.post('/api/payments/verify-redeem', (req, res) => {
     return res.json({ success: true, type: 'promo' });
   }
 
-  // Check auto-generated single-use Korean Bank Receipt / Telegram unlock codes
+  // 1. Atomic lookup & burn in persistent SQLite Redeem Codes Database ('Unused' -> 'Used')
+  try {
+    const dbCheck = verifyAndBurnRedeemCode(rawCode, userEmail || 'web_user');
+    if (dbCheck.ok && dbCheck.record) {
+      const issued = issuedUnlockCodes.get(rawCode);
+      if (issued) {
+        issued.used = true;
+        issued.usedAt = Date.now();
+      }
+      return res.json({
+        success: true,
+        type: dbCheck.record.source || 'redeem',
+        code: dbCheck.record.code,
+        status: 'Used',
+      });
+    }
+    if (dbCheck.statusCode === 409 || dbCheck.statusCode === 403) {
+      return res.status(dbCheck.statusCode).json({
+        success: false,
+        error: dbCheck.error,
+      });
+    }
+  } catch (err) {
+    console.error('[RedeemDB] Verification error:', err);
+  }
+
+  // 2. Fallback check in-memory issued unlock codes
   const issued = issuedUnlockCodes.get(rawCode);
   if (issued) {
     if (issued.used) {
@@ -1053,22 +1057,6 @@ app.post('/api/payments/verify-redeem', (req, res) => {
     issued.used = true;
     issued.usedAt = Date.now();
     return res.json({ success: true, type: issued.source });
-  }
-
-  const envCodes = (process.env.REDEEM_CODES || '')
-    .split(',')
-    .map((c) => c.trim().toUpperCase())
-    .filter(Boolean);
-
-  if (envCodes.includes(rawCode)) {
-    if (usedDynamicRedeemCodes.has(rawCode)) {
-      return res.status(409).json({
-        success: false,
-        error: 'លេខកូដនេះត្រូវបានប្រើប្រាស់រួចហើយ!',
-      });
-    }
-    usedDynamicRedeemCodes.add(rawCode);
-    return res.json({ success: true, type: 'redeem' });
   }
 
   return res.status(400).json({
@@ -1657,7 +1645,6 @@ app.get('/api/admin/analytics', requireAdminAuth, (_req, res) => {
     integrations: {
       krBankConfigured: Boolean(process.env.KR_BANK_ACCOUNT),
       telegramConfigured: Boolean(process.env.TELEGRAM_BOT_TOKEN),
-      zohoMailConfigured: Boolean(process.env.ZOHO_MAIL_USER && process.env.ZOHO_MAIL_PASSWORD),
     },
   });
 });
@@ -1877,7 +1864,13 @@ app.post('/api/payments/verify-kr-receipt', async (req, res) => {
       });
     }
 
-    const unlockCode = `KIIP-KR-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+    const reserved = reserveUnusedRedeemCode({
+      source: 'kr_receipt',
+      assignedTo: userEmail,
+      note: `Korea Bank (${analysis.bankName}) ₩${analysis.amountKrw.toLocaleString()}`,
+      fallbackPrefix: 'KIIP-KR',
+    });
+    const unlockCode = reserved.code;
     issuedUnlockCodes.set(unlockCode, {
       code: unlockCode,
       source: 'kr_receipt',
@@ -1976,7 +1969,17 @@ app.post('/api/telegram/webhook', async (req, res) => {
       return res.json({ ok: true });
     }
 
-    const unlockCode = `KIIP-TG-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
+    const senderLabel = message?.from?.username
+      ? `@${message.from.username}`
+      : `tg_${chatId}`;
+
+    const reserved = reserveUnusedRedeemCode({
+      source: 'telegram_bot',
+      assignedTo: `${senderLabel}@telegram`,
+      note: `Telegram Receipt (${analysis.bankName}) ₩${analysis.amountKrw.toLocaleString()}`,
+      fallbackPrefix: 'KIIP-TG',
+    });
+    const unlockCode = reserved.code;
     issuedUnlockCodes.set(unlockCode, {
       code: unlockCode,
       source: 'telegram_bot',
@@ -1985,10 +1988,6 @@ app.post('/api/telegram/webhook', async (req, res) => {
       verifiedAmount: analysis.amountKrw,
       bankName: analysis.bankName,
     });
-
-    const senderLabel = message?.from?.username
-      ? `@${message.from.username}`
-      : `tg_${chatId}`;
 
     serverPaymentsLog.unshift({
       id: `pay_tg_${Date.now()}`,
@@ -2019,56 +2018,141 @@ app.post('/api/telegram/webhook', async (req, res) => {
   }
 });
 
+// ============================================================================
+// ADMIN-PROTECTED REDEEM CODE DATABASE & GOOGLE SHEETS READER API
+// ============================================================================
+app.get('/api/admin/redeem-codes', requireAdminAuth, (req, res) => {
+  try {
+    const rawStatus = String(req.query?.status || 'all');
+    const filter: 'Unused' | 'Used' | 'Revoked' | 'all' =
+      rawStatus === 'Unused' || rawStatus === 'Used' || rawStatus === 'Revoked'
+        ? rawStatus
+        : 'all';
+    const codes = listRedeemCodes(filter, 500);
+    const stats = getRedeemCodeStats();
+    return res.json({
+      success: true,
+      stats,
+      codes,
+    });
+  } catch (err) {
+    console.error('[Admin RedeemDB] Read failed:', err);
+    return res.status(500).json({ success: false, error: 'Failed to read redeem codes database' });
+  }
+});
+
+app.post('/api/admin/redeem-codes/generate', requireAdminAuth, (req, res) => {
+  try {
+    const count = Math.min(100, Math.max(1, Number(req.body?.count) || 10));
+    const prefix = String(req.body?.prefix || 'KIIP-26').trim();
+    const note = String(req.body?.note || 'Admin Generated Batch').trim();
+    const created = generateUnusedRedeemCodes(count, prefix, note);
+    const stats = getRedeemCodeStats();
+    return res.json({
+      success: true,
+      createdCount: created.length,
+      created,
+      stats,
+    });
+  } catch (err) {
+    console.error('[Admin RedeemDB] Generate failed:', err);
+    return res.status(500).json({ success: false, error: 'Failed to generate redeem codes' });
+  }
+});
+
+app.post('/api/admin/redeem-codes/add', requireAdminAuth, (req, res) => {
+  try {
+    const rawList = Array.isArray(req.body?.codes)
+      ? req.body.codes.map((c: unknown) => String(c || ''))
+      : String(req.body?.codesText || '')
+          .split(/[\n,;]+/)
+          .map((c) => c.trim())
+          .filter(Boolean);
+
+    if (rawList.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: 'សូមបញ្ចូលយ៉ាងតិច ១ លេខកូដ (យ៉ាងតិច ៤ តួអក្សរ)។',
+      });
+    }
+
+    const note = String(req.body?.note || 'Manual Import').trim();
+    const result = addCustomRedeemCodes(rawList, note, 'admin');
+    const stats = getRedeemCodeStats();
+    return res.json({
+      success: true,
+      ...result,
+      stats,
+    });
+  } catch (err) {
+    console.error('[Admin RedeemDB] Add failed:', err);
+    return res.status(500).json({ success: false, error: 'Failed to add redeem codes' });
+  }
+});
+
+app.post('/api/admin/redeem-codes/sync-sheets', requireAdminAuth, async (req, res) => {
+  try {
+    const sheetId = String(req.body?.sheetId || '').trim() || undefined;
+    const sheetName = String(req.body?.sheetName || '').trim() || undefined;
+    const result = await syncRedeemCodesFromGoogleSheet({ sheetId, sheetName });
+    const stats = getRedeemCodeStats();
+    if (!result.success) {
+      return res.status(400).json({ ...result, stats });
+    }
+    return res.json({ ...result, stats });
+  } catch (err) {
+    console.error('[Admin RedeemDB] Google Sheets sync failed:', err);
+    return res.status(500).json({ success: false, error: 'Google Sheets sync failed' });
+  }
+});
+
+app.patch('/api/admin/redeem-codes/:code/status', requireAdminAuth, (req, res) => {
+  try {
+    const code = String(req.params.code || '');
+    const status = String(req.body?.status || '') as RedeemCodeStatus;
+    if (status !== 'Unused' && status !== 'Used' && status !== 'Revoked') {
+      return res.status(400).json({ success: false, error: 'Invalid status. Must be Unused, Used, or Revoked.' });
+    }
+    const updated = updateRedeemCodeStatus(code, status);
+    if (!updated) {
+      return res.status(404).json({ success: false, error: 'Redeem code not found' });
+    }
+    return res.json({ success: true, stats: getRedeemCodeStats() });
+  } catch (err) {
+    console.error('[Admin RedeemDB] Update status failed:', err);
+    return res.status(500).json({ success: false, error: 'Failed to update status' });
+  }
+});
+
+app.delete('/api/admin/redeem-codes/:code', requireAdminAuth, (req, res) => {
+  try {
+    const code = String(req.params.code || '');
+    const deleted = deleteRedeemCode(code);
+    if (!deleted) {
+      return res.status(404).json({ success: false, error: 'Redeem code not found' });
+    }
+    return res.json({ success: true, stats: getRedeemCodeStats() });
+  } catch (err) {
+    console.error('[Admin RedeemDB] Delete failed:', err);
+    return res.status(500).json({ success: false, error: 'Failed to delete redeem code' });
+  }
+});
+
 app.post('/api/mail/send-receipt', async (req, res) => {
   try {
-    const { recipientEmail, applicantName, officeEmail, subject, body, pdfBase64 } = req.body;
+    const { recipientEmail, officeEmail } = req.body;
     if (!recipientEmail && !officeEmail) {
       return res.status(400).json({ success: false, error: 'Recipient email required' });
     }
 
-    const zohoUser = process.env.ZOHO_MAIL_USER;
-    const zohoPass = process.env.ZOHO_MAIL_PASSWORD;
-
-    if (zohoUser && zohoPass) {
-      const transporter = nodemailer.createTransport({
-        host: 'smtp.zoho.com',
-        port: 465,
-        secure: true,
-        auth: {
-          user: zohoUser,
-          pass: zohoPass,
-        },
-      });
-
-      const mailOptions: any = {
-        from: `"KIIP TOPIK Portal" <${zohoUser}>`,
-        to: recipientEmail || officeEmail,
-        cc: officeEmail && recipientEmail !== officeEmail ? officeEmail : undefined,
-        subject: subject || `사회통합프로그램 연계 신청 서류 — ${applicantName}`,
-        text: body || `사회통합프로그램 연계 신청 완료.`,
-      };
-
-      if (pdfBase64) {
-        mailOptions.attachments = [
-          {
-            filename: `사회통합프로그램_연계신청서_통합서류_${applicantName || 'Applicant'}.pdf`,
-            content: Buffer.from(pdfBase64.split(',')[1] || pdfBase64, 'base64'),
-          },
-        ];
-      }
-
-      await transporter.sendMail(mailOptions);
-      return res.json({ success: true, message: 'Email sent successfully via Zoho Mail SMTP' });
-    } else {
-      return res.json({
-        success: true,
-        simulated: true,
-        message: 'Email simulated successfully (Configure ZOHO_MAIL_USER and ZOHO_MAIL_PASSWORD in environment variables to send via Zoho SMTP)',
-      });
-    }
+    return res.json({
+      success: true,
+      simulated: true,
+      message: 'Please send the attached PDF directly using your preferred email client (Gmail / Naver / Daum / Mail app).',
+    });
   } catch (err: any) {
-    console.error('Zoho Mail sending error:', err);
-    return res.status(500).json({ success: false, error: err.message || 'Failed to send email' });
+    console.error('Mail endpoint error:', err);
+    return res.status(500).json({ success: false, error: err.message || 'Failed to process email request' });
   }
 });
 

@@ -38,6 +38,7 @@ import {
   Timestamp,
 } from 'firebase/firestore';
 import { LiveVisitorsMarquee, LiveVisitorsPayload } from './LiveVisitorsMarquee';
+import { RedeemDatabasePanel } from './RedeemDatabasePanel';
 
 interface AdminDashboardProps {
   isOpen: boolean;
@@ -124,7 +125,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'overview' | 'live' | 'promos' | 'centers' | 'payments'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'live' | 'redeemdb' | 'promos' | 'centers' | 'payments'>('overview');
 
   // Real Data State (initialized strictly empty / 0 — zero fake or mock data)
   const [loadingData, setLoadingData] = useState(false);
@@ -140,7 +141,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [integrations, setIntegrations] = useState({
     krBankConfigured: false,
     telegramConfigured: false,
-    zohoMailConfigured: false,
   });
   const [liveVisitorSummary, setLiveVisitorSummary] = useState<LiveVisitorsPayload>({
     liveCount: 0,
@@ -708,6 +708,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     >
                       {liveVisitorSummary.liveCount}
                     </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('redeemdb')}
+                    className={`flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all text-left cursor-pointer whitespace-nowrap ${
+                      activeTab === 'redeemdb' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-200/60'
+                    }`}
+                  >
+                    <Database className="w-4 h-4 shrink-0" />
+                    <span>{isKm ? 'Redeem DB & Sheets' : 'Redeem DB & Sheets'}</span>
                   </button>
 
                   <button
@@ -1330,6 +1341,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       )}
                     </div>
                   </div>
+                )}
+                {/* TAB: REDEEM CODE DATABASE & GOOGLE SHEETS */}
+                {activeTab === 'redeemdb' && (
+                  <RedeemDatabasePanel adminToken={adminToken} lang={lang} />
                 )}
               </div>
             </div>

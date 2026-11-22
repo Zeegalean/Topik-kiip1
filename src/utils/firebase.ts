@@ -1,7 +1,8 @@
-import { initializeApp } from 'firebase/app';
+import { initializeApp, getApps, getApp } from 'firebase/app';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
 import {
   getFirestore,
+  initializeFirestore,
   doc,
   getDoc,
   getDocFromServer,
@@ -9,11 +10,31 @@ import {
   updateDoc,
   serverTimestamp,
   increment,
+  type Firestore,
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
-const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app, (firebaseConfig as any).firestoreDatabaseId);
+const app = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+const databaseId = (firebaseConfig as { firestoreDatabaseId?: string }).firestoreDatabaseId;
+
+function createFirestoreClient(): Firestore {
+  try {
+    // Force long-polling in browser environments so proxies/iframes/mobile networks
+    // never buffer WebChannel streaming responses and trigger 10-second timeouts.
+    return initializeFirestore(
+      app,
+      {
+        experimentalForceLongPolling: true,
+        ignoreUndefinedProperties: true,
+      },
+      databaseId
+    );
+  } catch {
+    return databaseId ? getFirestore(app, databaseId) : getFirestore(app);
+  }
+}
+
+export const db = createFirestoreClient();
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 
@@ -70,20 +91,35 @@ export function handleFirestoreError(
 }
 
 export async function testConnection(): Promise<boolean> {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return false;
+  }
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
     return true;
   } catch (error) {
     if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error('Please check your Firebase configuration.');
-      return false;
+      // Retry once after a brief delay in case the browser network stack was waking up
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      try {
+        await getDocFromServer(doc(db, 'test', 'connection'));
+        return true;
+      } catch (retryError) {
+        if (retryError instanceof Error && retryError.message.includes('the client is offline')) {
+          console.warn('Firestore backend temporarily unreachable; operating in offline fallback mode.');
+          return false;
+        }
+        return true;
+      }
     }
     return true;
   }
 }
 
-// Run startup connectivity validation
-testConnection();
+// Run startup connectivity validation in browser environments
+if (typeof window !== 'undefined') {
+  testConnection();
+}
 
 function sanitizeDocId(raw: string): string {
   const cleaned = raw.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 120);
