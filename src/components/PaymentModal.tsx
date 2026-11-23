@@ -1,9 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import QRCode from 'qrcode';
 import {
   CreditCard,
   ShieldCheck,
-  Lock,
   CheckCircle2,
   Sparkles,
   X,
@@ -18,11 +16,12 @@ import {
   ExternalLink,
   Clock,
   ArrowRight,
-  Info,
   Upload,
   Send,
   Landmark,
   Camera,
+  MessageCircle,
+  Ban,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { ApplicationFormData, Language } from '../types';
@@ -40,15 +39,23 @@ interface PaymentModalProps {
 
 export type PaymentMethod = 'khqr' | 'krbank' | 'redeem' | 'card' | 'playstore' | 'appstore' | 'paypal';
 
-const DEFAULT_PAYWAY_URL = 'https://link.payway.com.kh/ABAPAYzz552103m';
-const QR_TTL_SECONDS = 15 * 60; // 15 minutes
+const ABA_QR_IMAGE_PATH = '/assets/aistudio/0449fea2-443c-4ed7-85cb-ecef094a216e_17842712.jfif';
+const ABA_ACCOUNT_HOLDER = 'EANG VEASNA';
+const ABA_ACCOUNT_NUMBER = '000 375 987';
+const ABA_ACCOUNT_RAW = '000375987';
+const ABA_MID = '121092113090045';
+const FACEBOOK_PAGE_URL = 'https://www.facebook.com/eang.veasna.667/';
+const KAKAOTALK_ID = '9111veasna';
 
-function formatCountdown(totalSeconds: number): string {
-  const clamped = Math.max(0, Math.floor(totalSeconds));
-  const mins = Math.floor(clamped / 60);
-  const secs = clamped % 60;
-  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
-}
+const DEFAULT_KR_CONFIG = {
+  bankName: 'KOOKMIN BANK (KB 국민은행)',
+  accountNumber: '893801-00-097236',
+  accountHolder: 'EANG VEASNA',
+  telegramBotUsername: '',
+  amountKrw: 35000,
+  autoReceiptVerifyEnabled: true,
+  telegramBotEnabled: false,
+};
 
 export const PaymentModal: React.FC<PaymentModalProps> = ({
   isOpen,
@@ -58,46 +65,32 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   userEmail,
 }) => {
   const t = getTranslation(lang);
-  const [activeTab, setActiveTab] = useState<PaymentMethod>('khqr');
+  const [activeTab, setActiveTab] = useState<'khqr' | 'krbank' | 'redeem'>('krbank');
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingStep, setProcessingStep] = useState<string>('');
   const [isSuccess, setIsSuccess] = useState(false);
 
   // Dedicated Redeem / Promo Code State
-  const [redeemPlatform, setRedeemPlatform] = useState<'promo' | 'voucher'>('promo');
+  const [redeemPlatform, setRedeemPlatform] = useState<'voucher' | 'promo'>('voucher');
   const [redeemCode, setRedeemCode] = useState('');
   const [redeemError, setRedeemError] = useState<string | null>(null);
 
-  // Quick VIP Promo Code State
+  // Quick Redeem / Promo Code State (top bar)
   const [promoCodeInput, setPromoCodeInput] = useState('');
   const [promoCodeError, setPromoCodeError] = useState<string | null>(null);
   const [promoCodeSuccess, setPromoCodeSuccess] = useState(false);
 
-  // Dynamic ABA PayWay 15-Minute KHQR State
-  const [qrCodeDataUrl, setQrCodeDataUrl] = useState<string>('');
-  const [transactionId, setTransactionId] = useState<string>('');
-  const [paywayUrl, setPaywayUrl] = useState<string>(DEFAULT_PAYWAY_URL);
-  const [qrGeneratedAt, setQrGeneratedAt] = useState<Date>(new Date());
-  const [qrExpiresAt, setQrExpiresAt] = useState<number>(0);
-  const [qrSecondsLeft, setQrSecondsLeft] = useState<number>(QR_TTL_SECONDS);
-  const [abaHasMerchantApi, setAbaHasMerchantApi] = useState<boolean>(false);
-  const [abaReferenceNote, setAbaReferenceNote] = useState<string>('');
-  const [abaConfirmError, setAbaConfirmError] = useState<string | null>(null);
-  const [isGeneratingQr, setIsGeneratingQr] = useState<boolean>(false);
-  const [copiedTxId, setCopiedTxId] = useState(false);
-  const [qrPayCount, setQrPayCount] = useState<number>(0);
-
-  // Korea Bank Transfer Receipt Auto-Verification & Telegram Bot State
-  const [krConfig, setKrConfig] = useState<{
-    bankName: string;
-    accountNumber: string;
-    accountHolder: string;
-    telegramBotUsername: string;
-    amountKrw: number;
-    autoReceiptVerifyEnabled: boolean;
-    telegramBotEnabled: boolean;
-  } | null>(null);
+  // Copy states
+  const [copiedAbaAccount, setCopiedAbaAccount] = useState(false);
   const [copiedKrAccount, setCopiedKrAccount] = useState(false);
+  const [copiedKakao, setCopiedKakao] = useState(false);
+  const [copiedKrCode, setCopiedKrCode] = useState(false);
+
+  // Korea Bank Transfer & Telegram Bot Config (always pre-populated with user's Kookmin Bank account)
+  const [krConfig, setKrConfig] = useState(DEFAULT_KR_CONFIG);
+  const [krConfigLoaded, setKrConfigLoaded] = useState(false);
+
+  // Korea Bank Screenshot Auto-Verify State
   const [receiptPreview, setReceiptPreview] = useState<string | null>(null);
   const [verifyingReceipt, setVerifyingReceipt] = useState(false);
   const [receiptError, setReceiptError] = useState<string | null>(null);
@@ -106,7 +99,6 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     bankName: string;
     verifiedAmount: number;
   } | null>(null);
-  const [copiedKrCode, setCopiedKrCode] = useState(false);
 
   const isKm = lang === 'km';
   const isKo = lang === 'ko';
@@ -148,134 +140,47 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     return () => window.clearInterval(timer);
   }, [isOpen, isSuccess, onPaymentSuccess]);
 
-  // Create fresh 15-minute ABA PayWay QR session
-  const generateNewKhqr = useCallback(async () => {
-    setIsGeneratingQr(true);
-    setAbaConfirmError(null);
-
-    const now = Date.now();
-    let nextTxId = `KIIP-${String(now).slice(-5)}-${Math.random().toString(36).substring(2, 7).toUpperCase()}`;
-    let nextExpiresAt = now + QR_TTL_SECONDS * 1000;
-    let nextUrl = DEFAULT_PAYWAY_URL;
-    let merchantApiEnabled = false;
-
-    try {
-      const resp = await fetch('/api/payments/aba-session', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-      });
-      if (resp.ok) {
-        const data = await resp.json();
-        if (data?.success && data.txId) {
-          nextTxId = data.txId;
-          nextExpiresAt = Number(data.expiresAt) || nextExpiresAt;
-          nextUrl = data.paywayUrl || DEFAULT_PAYWAY_URL;
-          merchantApiEnabled = Boolean(data.hasMerchantApi);
-        }
-      }
-    } catch {
-      // Graceful fallback when running without backend server
-    }
-
-    try {
-      const dataUrl = await QRCode.toDataURL(nextUrl, {
-        width: 340,
-        margin: 1,
-        color: {
-          dark: '#004f80',
-          light: '#ffffff',
-        },
-        errorCorrectionLevel: 'M',
-      });
-      setQrCodeDataUrl(dataUrl);
-      setTransactionId(nextTxId);
-      setPaywayUrl(nextUrl);
-      setQrGeneratedAt(new Date(now));
-      setQrExpiresAt(nextExpiresAt);
-      setQrSecondsLeft(Math.max(0, Math.ceil((nextExpiresAt - Date.now()) / 1000)));
-      setAbaHasMerchantApi(merchantApiEnabled);
-    } catch (err) {
-      console.error('Failed to generate ABA PayWay QR:', err);
-    } finally {
-      setIsGeneratingQr(false);
-    }
-  }, []);
-
-  // Generate QR on open when KHQR tab is active and no QR exists yet
+  // Fetch server Korea Bank & Telegram Bot configuration (merges cleanly over defaults)
   useEffect(() => {
-    if (isOpen && activeTab === 'khqr' && !qrCodeDataUrl) {
-      generateNewKhqr();
-    }
-  }, [isOpen, activeTab, qrCodeDataUrl, generateNewKhqr]);
-
-  // Fetch Korea Bank & Telegram Bot configuration when modal opens
-  useEffect(() => {
-    if (!isOpen || krConfig) return;
+    if (!isOpen || krConfigLoaded) return;
     let mounted = true;
     fetch('/api/payments/kr-config')
       .then((r) => r.json())
       .then((data) => {
         if (mounted && data?.success) {
           setKrConfig({
-            bankName: String(data.bankName || ''),
-            accountNumber: String(data.accountNumber || ''),
-            accountHolder: String(data.accountHolder || ''),
+            bankName: String(data.bankName || DEFAULT_KR_CONFIG.bankName),
+            accountNumber: String(data.accountNumber || DEFAULT_KR_CONFIG.accountNumber),
+            accountHolder: String(data.accountHolder || DEFAULT_KR_CONFIG.accountHolder),
             telegramBotUsername: String(data.telegramBotUsername || ''),
             amountKrw: Number(data.amountKrw) || 35000,
             autoReceiptVerifyEnabled: Boolean(data.autoReceiptVerifyEnabled),
             telegramBotEnabled: Boolean(data.telegramBotEnabled),
           });
+          setKrConfigLoaded(true);
         }
       })
-      .catch(() => {});
+      .catch(() => {
+        if (mounted) setKrConfigLoaded(true);
+      });
     return () => {
       mounted = false;
     };
-  }, [isOpen, krConfig]);
-
-  // Live 1-second countdown timer for the 15-minute ABA QR window
-  useEffect(() => {
-    if (!isOpen || !qrExpiresAt) return;
-
-    const updateTimer = () => {
-      const remaining = Math.max(0, Math.ceil((qrExpiresAt - Date.now()) / 1000));
-      setQrSecondsLeft(remaining);
-    };
-
-    updateTimer();
-    const timer = window.setInterval(updateTimer, 1000);
-    return () => window.clearInterval(timer);
-  }, [isOpen, qrExpiresAt]);
-
-  // Auto-poll server status when ABA PayWay Merchant API + Webhook is enabled
-  useEffect(() => {
-    if (!isOpen || activeTab !== 'khqr' || !abaHasMerchantApi || !transactionId || qrSecondsLeft <= 0 || isSuccess) {
-      return;
-    }
-
-    const poller = window.setInterval(async () => {
-      try {
-        const resp = await fetch(`/api/payments/aba-status/${encodeURIComponent(transactionId)}`);
-        if (!resp.ok) return;
-        const data = await resp.json();
-        if (data?.status === 'paid') {
-          setQrPayCount((prev) => prev + 1);
-          completeUnlock();
-        }
-      } catch {
-        // ignore transient polling error
-      }
-    }, 5000);
-
-    return () => window.clearInterval(poller);
-  }, [isOpen, activeTab, abaHasMerchantApi, transactionId, qrSecondsLeft, isSuccess, completeUnlock]);
+  }, [isOpen, krConfigLoaded]);
 
   if (!isOpen) return null;
 
-  const isQrExpired = qrExpiresAt > 0 && qrSecondsLeft <= 0;
-  const isQrWarning = qrSecondsLeft > 0 && qrSecondsLeft <= 180;
+  const copyText = (text: string, setter: (v: boolean) => void) => {
+    try {
+      navigator.clipboard.writeText(text);
+      setter(true);
+      setTimeout(() => setter(false), 2000);
+    } catch {
+      // ignore clipboard errors
+    }
+  };
 
-  // Strict Promo / Redeem Code verification (Server API + Firestore /promoCodes/{CODE})
+  // Strict Promo / Redeem Code verification (Server SQLite DB + Firestore /promoCodes/{CODE})
   const verifyCodeAndUnlock = async (rawInput: string, source: 'promo' | 'redeem') => {
     const trimmed = rawInput.trim().toUpperCase();
     const setErr = source === 'promo' ? setPromoCodeError : setRedeemError;
@@ -283,10 +188,10 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     if (!trimmed) {
       setErr(
         isKm
-          ? 'សូមបញ្ចូលលេខកូដ Promo / Redeem Code!'
+          ? 'សូមបញ្ចូលលេខកូដ Redeem Code / Promo Code!'
           : isKo
-          ? '코드를 입력해 주세요.'
-          : 'Please enter a valid code!'
+          ? '리딤 코드를 입력해 주세요.'
+          : 'Please enter a valid Redeem / Promo Code!'
       );
       return;
     }
@@ -306,7 +211,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     let matchedType = source === 'promo' ? 'Promo Code' : 'Redeem Code';
     let serverErrorMsg: string | null = null;
 
-    // 1. Strict server verification (covers Master Promo, Korea Bank/Telegram single-use codes, REDEEM_CODES)
+    // 1. Strict server verification (SQLite Redeem DB, Master Promo, Korea Bank/Telegram codes)
     try {
       const resp = await fetch('/api/payments/verify-redeem', {
         method: 'POST',
@@ -366,10 +271,10 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       setErr(
         serverErrorMsg ||
           (isKm
-            ? 'លេខកូដមិនត្រឹមត្រូវ ឬផុតកំណត់! សូមពិនិត្យម្តងទៀត ឬបង់ប្រាក់តាម ABA PayWay / Korea Bank។'
+            ? 'លេខកូដមិនត្រឹមត្រូវ ឬត្រូវបានប្រើរួចហើយ! សូមពិនិត្យម្តងទៀត ឬផ្ញើ Screenshot ការបង់ប្រាក់ទៅ Facebook / Telegram Bot។'
             : isKo
-            ? '유효하지 않은 코드입니다. 다시 확인하거나 결제 후 이용해 주세요.'
-            : 'Invalid or expired code! Please check your code or pay via ABA PayWay / Korea Bank.')
+            ? '유효하지 않거나 이미 사용된 코드입니다. 다시 확인하거나 결제 후 코드를 발급받아 주세요.'
+            : 'Invalid or already used code! Please check your code or send your payment screenshot to Telegram Bot / Facebook.')
       );
     }
   };
@@ -423,8 +328,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         setReceiptError(
           data?.error ||
             (isKm
-              ? 'មិនអាចផ្ទៀងផ្ទាត់វិក្កយបត្របានទេ។ សូមថត Screenshot ឱ្យច្បាស់លាស់ (បង្ហាញទឹកប្រាក់ ≥ ₩35,000 និងស្ថានភាពជោគជ័យ)។'
-              : 'Could not verify receipt. Please upload a clear transfer confirmation screenshot showing ≥ ₩35,000.')
+              ? 'មិនអាចផ្ទៀងផ្ទាត់វិក្កយបត្រស្វ័យប្រវត្តិបានទេ។ សូមផ្ញើរូប Screenshot ទៅ Facebook Page ឬ Telegram Bot ខាងក្រោមដើម្បីទទួលលេខកូដដោះសោ!'
+              : 'Could not auto-verify receipt. Please send your screenshot to Facebook Page or Telegram Bot below to get your unlock code.')
         );
         return;
       }
@@ -448,106 +353,107 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     } catch {
       setReceiptError(
         isKm
-          ? 'មានបញ្ហាតភ្ជាប់ទៅប្រព័ន្ធផ្ទៀងផ្ទាត់។ សូមព្យាយាមម្ដងទៀត!'
-          : 'Network error while verifying receipt. Please try again.'
+          ? 'មានបញ្ហាតភ្ជាប់ទៅប្រព័ន្ធផ្ទៀងផ្ទាត់។ សូមផ្ញើ Screenshot ទៅ Facebook Page ឬ Telegram Bot ខាងក្រោម!'
+          : 'Network error while verifying receipt. Please send your screenshot to Facebook or Telegram Bot below.'
       );
     } finally {
       setVerifyingReceipt(false);
     }
   };
 
-  // Handle ABA PayWay confirmation inside the 15-minute QR window
-  const handleConfirmAbaPayment = async () => {
-    if (isQrExpired) {
-      setAbaConfirmError(
-        isKm
-          ? 'QR Code ផុតសុពលភាព ១៥ នាទីហើយ! សូមចុច "🔄 បង្កើត QR ថ្មី" មុនពេលបង់ប្រាក់។'
-          : isKo
-          ? 'QR 코드 유효시간(15분)이 만료되었습니다. 새 QR을 생성해 주세요.'
-          : 'This QR code expired after 15 minutes. Please generate a new QR code.'
-      );
-      return;
-    }
+  const renderScreenshotDeliveryBox = (variant: 'krbank' | 'khqr') => (
+    <div className="p-4 rounded-2xl bg-gradient-to-br from-sky-50 via-blue-50 to-indigo-50 border border-sky-200 space-y-3 text-left">
+      <div className="space-y-0.5">
+        <p className="text-xs sm:text-sm font-black text-slate-900 flex items-center gap-1.5">
+          <Send className="w-4 h-4 text-sky-600 shrink-0" />
+          <span>
+            {isKm
+              ? 'ផ្ញើរូបភាព Screenshot ការបង់ប្រាក់ ដើម្បីទទួលលេខកូដដោះសោ (Redeem Code)'
+              : isKo
+              ? '결제 스크린샷을 보내고 잠금 해제 코드(Redeem Code) 받기'
+              : 'Send Payment Screenshot to Receive Your Unlock Code'}
+          </span>
+        </p>
+        <p className="text-[11px] text-slate-600 leading-relaxed">
+          {variant === 'krbank'
+            ? isKm
+              ? 'បន្ទាប់ពីផ្ទេរប្រាក់ ₩35,000 ចូលធនាគារកូរ៉េរួច អ្នកអាចផ្ញើ Screenshot ទៅ Telegram Bot ឬ Facebook Page របស់យើង ដើម្បីទទួលបានលេខកូដដោះសោឯកសារត្រឡប់ទៅវិញយ៉ាងរហ័ស និងមានសុវត្ថិភាព!'
+              : 'After transferring ₩35,000 to our Korean bank account, send your screenshot via Telegram Bot or our Facebook Page to receive your single-use Redeem Code.'
+            : isKm
+            ? 'បន្ទាប់ពីស្កេនបង់ប្រាក់តាម ABA PAY / KHQR ($25.00 / ₩35,000) រួច សូមផ្ញើរូបភាព Screenshot ទៅ Facebook Page ឬ Telegram Bot ដើម្បីទទួលបានលេខកូដដោះសោ (Redeem Code) ត្រឡប់ទៅវិញភ្លាមៗ!'
+            : 'After scanning and paying via ABA PAY / KHQR ($25.00 / ₩35,000), send your screenshot via Facebook Page or Telegram Bot to receive your Redeem Code.'}
+        </p>
+      </div>
 
-    const ref = abaReferenceNote.trim();
-    if (!abaHasMerchantApi && ref.length < 3) {
-      setAbaConfirmError(
-        isKm
-          ? 'សូមបញ្ចូលឈ្មោះគណនីដែលបានបាញ់ប្រាក់ ឬលេខយោងវិក្កយបត្រ ABA (យ៉ាងតិច ៣ តួអក្សរ) មុននឹងចុចបញ្ជាក់។'
-          : isKo
-          ? '송금자명 또는 ABA 거래 참조번호(3자 이상)를 입력해 주세요.'
-          : 'Please enter your ABA sender name or transfer reference (min 3 characters).'
-      );
-      return;
-    }
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+        {/* Option 1: Telegram Bot */}
+        {krConfig.telegramBotUsername ? (
+          <a
+            href={`https://t.me/${encodeURIComponent(krConfig.telegramBotUsername)}`}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="py-2.5 px-3.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-xs transition-colors"
+          >
+            <Send className="w-4 h-4 shrink-0" />
+            <span>
+              {isKm ? `ផ្ញើតាម Telegram Bot (@${krConfig.telegramBotUsername})` : `Telegram Bot (@${krConfig.telegramBotUsername})`}
+            </span>
+            <ExternalLink className="w-3.5 h-3.5 shrink-0 opacity-80" />
+          </a>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setActiveTab('redeem')}
+            className="py-2.5 px-3.5 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs flex items-center justify-center gap-2 shadow-xs transition-colors cursor-pointer"
+          >
+            <Send className="w-4 h-4 shrink-0" />
+            <span>
+              {isKm ? 'ផ្ញើតាម Telegram Bot → វាយកូដដោះសោ' : 'Telegram Bot → Enter Redeem Code'}
+            </span>
+          </button>
+        )}
 
-    setAbaConfirmError(null);
-    setIsProcessing(true);
-    setProcessingStep(
-      isKm
-        ? `កំពុងផ្ទៀងផ្ទាត់ប្រតិបត្តិការ #${transactionId}...`
-        : isKo
-        ? `결제 세션 확인 중 (#${transactionId})...`
-        : `Verifying transaction #${transactionId}...`
-    );
+        {/* Option 2: Facebook Page */}
+        <a
+          href={FACEBOOK_PAGE_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="py-2.5 px-3.5 rounded-xl bg-[#1877F2] hover:bg-[#1464cc] text-white font-bold text-xs flex items-center justify-center gap-2 shadow-xs transition-colors"
+        >
+          <MessageCircle className="w-4 h-4 shrink-0" />
+          <span>{isKm ? 'ផ្ញើ Screenshot តាម Facebook Page' : 'Send Screenshot via Facebook'}</span>
+          <ExternalLink className="w-3.5 h-3.5 shrink-0 opacity-80" />
+        </a>
+      </div>
 
-    try {
-      const resp = await fetch('/api/payments/aba-confirm', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          txId: transactionId,
-          referenceNote: ref,
-        }),
-      });
-      const data = await resp.json().catch(() => ({}));
+      {/* KakaoTalk ID + Quick Jump to Redeem Tab */}
+      <div className="pt-1 flex flex-wrap items-center justify-between gap-2 border-t border-sky-200/70">
+        <div className="flex items-center gap-2 text-[11px] text-slate-700">
+          <span className="font-bold text-amber-900 bg-amber-100 border border-amber-200 px-2 py-0.5 rounded-md">
+            KakaoTalk ID: <span className="font-mono font-black">{KAKAOTALK_ID}</span>
+          </span>
+          <button
+            type="button"
+            onClick={() => copyText(KAKAOTALK_ID, setCopiedKakao)}
+            className="px-2 py-0.5 rounded-md bg-white border border-slate-200 hover:bg-slate-100 text-slate-700 font-bold text-[10.5px] inline-flex items-center gap-1 cursor-pointer"
+          >
+            {copiedKakao ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+            <span>{copiedKakao ? (isKm ? 'បានចម្លង' : 'Copied') : (isKm ? 'ចម្លង' : 'Copy')}</span>
+          </button>
+        </div>
 
-      if (!resp.ok || !data?.success) {
-        if (data?.code === 'QR_EXPIRED') {
-          setQrSecondsLeft(0);
-          setQrExpiresAt(Date.now() - 1000);
-        }
-        setIsProcessing(false);
-        setAbaConfirmError(
-          data?.error ||
-            (isKm
-              ? 'មិនទាន់អាចបញ្ជាក់ការបង់ប្រាក់បានទេ។ សូមពិនិត្យម្តងទៀត!'
-              : 'Unable to confirm payment yet. Please try again.')
-        );
-        return;
-      }
-    } catch {
-      // Static fallback still enforces non-expired 15-min timer & reference note
-      if (Date.now() >= qrExpiresAt) {
-        setIsProcessing(false);
-        setQrSecondsLeft(0);
-        setAbaConfirmError(
-          isKm
-            ? 'QR Code ផុតសុពលភាព ១៥ នាទីហើយ! សូមចុច "🔄 បង្កើត QR ថ្មី"។'
-            : 'QR code expired after 15 minutes.'
-        );
-        return;
-      }
-    }
-
-    setProcessingStep(
-      isKm
-        ? '✓ បានបញ្ជាក់ការបង់ប្រាក់ ABA PayWay! កំពុងដោះសោ Clean PDF...'
-        : isKo
-        ? '✓ ABA 결제 확인 완료! Clean PDF 잠금 해제 중...'
-        : '✓ Payment confirmed! Unlocking Clean PDF...'
-    );
-    recordPaymentTransaction({
-      userEmail: userEmail || '',
-      amount: 35000,
-      currency: 'KRW',
-      method: 'ABA PayWay QR',
-      promoCodeUsed: '-',
-    }).catch(() => {});
-    await new Promise((r) => setTimeout(r, 600));
-    setQrPayCount((prev) => prev + 1);
-    completeUnlock();
-  };
+        <button
+          type="button"
+          onClick={() => setActiveTab('redeem')}
+          className="text-[11px] font-black text-purple-700 hover:text-purple-900 inline-flex items-center gap-1 cursor-pointer"
+        >
+          <Ticket className="w-3.5 h-3.5" />
+          <span>{isKm ? 'ទទួលបានកូដហើយ? ចុចវាយ Redeem Code' : 'Got your code? Enter Redeem Code'}</span>
+          <ArrowRight className="w-3 h-3" />
+        </button>
+      </div>
+    </div>
+  );
 
   return (
     <div className="fixed inset-0 z-[100000] bg-slate-950/75 backdrop-blur-sm flex items-center justify-center p-3 sm:p-4">
@@ -561,7 +467,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
             </span>
             <span className="text-emerald-300 text-[11px] font-medium flex items-center gap-1">
               <ShieldCheck className="w-3.5 h-3.5" />
-              <span>ABA PayWay · Redeem Code</span>
+              <span>Korea Bank · ABA PAY · Redeem Code</span>
             </span>
           </div>
 
@@ -589,7 +495,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               <CheckCircle2 className="w-9 h-9" />
             </div>
             <h4 className="text-2xl font-black text-slate-900">
-              {isKm ? 'ទូទាត់ ឬ វាយលេខកូដជោគជ័យ!' : t.successTitle}
+              {isKm ? 'ដោះសោឯកសារជោគជ័យ 100%!' : t.successTitle}
             </h4>
             <p className="text-sm text-slate-600 max-w-md mx-auto leading-relaxed">
               {isKm
@@ -642,26 +548,26 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               </div>
             </div>
 
-            {/* VIP Promo Code Direct Unlock Section (Masked Password Field) */}
+            {/* Quick Redeem / Promo Code Unlock Box (Always Ready!) */}
             <div className="p-4 bg-gradient-to-r from-purple-50 via-indigo-50 to-pink-50 border-2 border-purple-300 rounded-2xl space-y-2.5 shadow-xs">
               <div className="flex items-center gap-2">
                 <span className="p-1.5 rounded-lg bg-purple-600 text-white shadow-2xs">
-                  <Gift className="w-4 h-4" />
+                  <Ticket className="w-4 h-4" />
                 </span>
                 <div>
                   <span className="text-xs font-black text-purple-950 block">
                     {isKm
-                      ? 'បញ្ចូល Promo Code ដើម្បីទាញយកដោយមិនបាច់បាញ់លុយ (100% Free)'
+                      ? 'មានលេខកូដដោះសោ (Redeem Code) ហើយមែនទេ? វាយបញ្ចូលទីនេះ!'
                       : isKo
-                      ? '프로모션 코드로 100% 무료 잠금 해제'
-                      : 'Enter Promo Code for 100% Free Download'}
+                      ? '발급받은 리딤 코드(Redeem Code) 입력하여 즉시 잠금 해제'
+                      : 'Have a Redeem Code? Enter it below to unlock immediately'}
                   </span>
                   <span className="text-[10.5px] text-purple-700">
                     {isKm
-                      ? 'ប្រសិនបើមានលេខកូដ Promo Code សូមវាយបញ្ចូលខាងក្រោមដើម្បីដោះសោភ្លាមៗ'
+                      ? 'ប្រើលេខកូដដែលទទួលបានពី Telegram Bot, Facebook Page ឬ Admin ដើម្បីដោះសោ PDF ភ្លាមៗ'
                       : isKo
-                      ? '보유하신 프로모션 코드를 입력하여 즉시 잠금 해제하세요'
-                      : 'Enter your VIP promo code to unlock clean PDF'}
+                      ? '텔레그램 봇 또는 페이스북에서 받은 코드를 입력해 Clean PDF를 다운로드하세요'
+                      : 'Enter the unlock code received from Telegram Bot, Facebook Page, or Admin'}
                   </span>
                 </div>
               </div>
@@ -670,11 +576,11 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                 <div className="relative flex-1">
                   <Ticket className="w-4 h-4 text-purple-500 absolute left-3 top-3" />
                   <input
-                    type="password"
+                    type="text"
                     autoComplete="off"
                     value={promoCodeInput}
                     onChange={(e) => {
-                      setPromoCodeInput(e.target.value);
+                      setPromoCodeInput(e.target.value.toUpperCase());
                       setPromoCodeError(null);
                     }}
                     onKeyDown={(e) => {
@@ -683,8 +589,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                         verifyCodeAndUnlock(promoCodeInput, 'promo');
                       }
                     }}
-                    placeholder="••••••••"
-                    className="w-full pl-9 pr-3 py-2.5 bg-white border border-purple-300 rounded-xl text-xs sm:text-sm font-mono font-bold tracking-wider text-purple-950 focus:outline-none focus:ring-2 focus:ring-purple-400 placeholder:font-sans placeholder:font-normal placeholder:text-slate-400"
+                    placeholder={isKm ? 'ឧ. KIIP-26-XXXXXX' : 'e.g. KIIP-26-XXXXXX'}
+                    className="w-full pl-9 pr-3 py-2.5 bg-white border border-purple-300 rounded-xl text-xs sm:text-sm font-mono font-bold tracking-wider uppercase text-purple-950 focus:outline-none focus:ring-2 focus:ring-purple-400 placeholder:font-sans placeholder:font-normal placeholder:text-slate-400"
                   />
                 </div>
                 <button
@@ -694,7 +600,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                   className="px-4 py-2.5 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 active:scale-95 text-white text-xs font-black rounded-xl shadow-md flex items-center gap-1.5 cursor-pointer shrink-0 transition-transform disabled:opacity-50"
                 >
                   <Zap className="w-3.5 h-3.5 text-amber-300" />
-                  <span>{isKm ? 'ដោះសោឥតគិតថ្លៃ' : isKo ? '무료 해제' : 'Apply Free'}</span>
+                  <span>{isKm ? 'ដោះសោភ្លាមៗ' : isKo ? '잠금 해제' : 'Unlock Now'}</span>
                 </button>
               </div>
 
@@ -708,459 +614,197 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               {promoCodeSuccess && (
                 <div className="p-2 rounded-xl bg-emerald-50 border border-emerald-300 text-emerald-800 text-xs flex items-center gap-2 font-bold">
                   <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                  <span>✓ កូដ Promo Code ត្រឹមត្រូវ! កំពុងដោះសោ Clean PDF...</span>
+                  <span>✓ លេខកូដត្រឹមត្រូវ! កំពុងដោះសោ Clean PDF...</span>
                 </div>
               )}
             </div>
 
-            {/* Payment Method Selector Tabs */}
-            <div>
-              <label className="text-xs font-bold text-slate-700 uppercase tracking-wider block mb-2.5">
-                {t.paymentModalSubtitle}
-              </label>
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                {/* 1. ABA PayWay (KHQR 15-min & Cards) */}
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('khqr')}
-                  className={`p-2.5 rounded-2xl border text-center transition-all cursor-pointer flex flex-col items-center justify-center gap-1 relative ${
-                    activeTab === 'khqr'
-                      ? 'border-[#004f80] bg-sky-50 text-[#004f80] ring-2 ring-[#004f80]/20 font-bold shadow-xs'
-                      : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
-                  }`}
-                >
-                  <QrCode className="w-5 h-5 text-[#004f80]" />
-                  <span className="text-[11px] font-bold">ABA PayWay</span>
-                  <span className="text-[9px] text-[#004f80] font-bold">KHQR · 15m</span>
-                </button>
+            {/* Payment Method Selector: ONLY 2 Active Payment Methods + Redeem Code; All Others Unavailable */}
+            <div className="space-y-2.5">
+              <div className="flex items-center justify-between gap-2">
+                <label className="text-xs font-bold text-slate-700 uppercase tracking-wider">
+                  {isKm ? 'ជ្រើសរើសវិធីបង់ប្រាក់ (មាន ២ វិធី + Redeem Code)' : 'Select Payment Method (2 Active + Redeem Code)'}
+                </label>
+              </div>
 
-                {/* 1b. Korea Bank Transfer + Auto Receipt / Telegram Bot */}
+              {/* Active Row: 2 Payment Methods + Redeem Code */}
+              <div className="grid grid-cols-3 gap-2">
+                {/* 1. Korea Bank Transfer (Active) */}
                 <button
                   type="button"
                   onClick={() => setActiveTab('krbank')}
-                  className={`p-2.5 rounded-2xl border text-center transition-all cursor-pointer flex flex-col items-center justify-center gap-1 relative ${
+                  className={`p-3 rounded-2xl border text-center transition-all cursor-pointer flex flex-col items-center justify-center gap-1 relative ${
                     activeTab === 'krbank'
-                      ? 'border-emerald-600 bg-emerald-50 text-emerald-900 ring-2 ring-emerald-500/20 font-bold shadow-xs'
+                      ? 'border-emerald-600 bg-emerald-50 text-emerald-950 ring-2 ring-emerald-500/25 font-bold shadow-xs'
                       : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
                   }`}
                 >
                   <Landmark className="w-5 h-5 text-emerald-600" />
-                  <span className="text-[11px] font-bold">🇰🇷 Korea Bank</span>
-                  <span className="text-[9px] text-emerald-700 font-bold">Slip · Telegram</span>
+                  <span className="text-[11px] sm:text-xs font-black">🇰🇷 ធនាគារកូរ៉េ</span>
+                  <span className="text-[9.5px] text-emerald-700 font-bold">KOOKMIN BANK</span>
                 </button>
 
-                {/* 2. Credit Card (Visa / Master via ABA PayWay) */}
+                {/* 2. ABA PayWay / KHQR (Active) */}
                 <button
                   type="button"
-                  onClick={() => setActiveTab('card')}
-                  className={`p-2.5 rounded-2xl border text-center transition-all cursor-pointer flex flex-col items-center justify-center gap-1 ${
-                    activeTab === 'card'
-                      ? 'border-blue-600 bg-blue-50/80 text-blue-900 ring-2 ring-blue-500/20 font-bold shadow-xs'
+                  onClick={() => setActiveTab('khqr')}
+                  className={`p-3 rounded-2xl border text-center transition-all cursor-pointer flex flex-col items-center justify-center gap-1 relative ${
+                    activeTab === 'khqr'
+                      ? 'border-[#004f80] bg-sky-50 text-[#004f80] ring-2 ring-[#004f80]/25 font-bold shadow-xs'
                       : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
                   }`}
                 >
-                  <CreditCard className="w-5 h-5 text-blue-600" />
-                  <span className="text-[11px] font-bold">Card</span>
-                  <span className="text-[9px] text-slate-500">Visa · Master</span>
+                  <QrCode className="w-5 h-5 text-[#004f80]" />
+                  <span className="text-[11px] sm:text-xs font-black">ABA PayWay</span>
+                  <span className="text-[9.5px] text-[#004f80] font-bold">ABA PAY · KHQR</span>
                 </button>
 
-                {/* 3. Redeem Code */}
+                {/* 3. Redeem Code (Active) */}
                 <button
                   type="button"
                   onClick={() => setActiveTab('redeem')}
-                  className={`p-2.5 rounded-2xl border text-center transition-all cursor-pointer flex flex-col items-center justify-center gap-1 ${
+                  className={`p-3 rounded-2xl border text-center transition-all cursor-pointer flex flex-col items-center justify-center gap-1 relative ${
                     activeTab === 'redeem'
-                      ? 'border-purple-600 bg-purple-50 text-purple-900 ring-2 ring-purple-500/20 font-bold shadow-xs'
+                      ? 'border-purple-600 bg-purple-50 text-purple-950 ring-2 ring-purple-500/25 font-bold shadow-xs'
                       : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
                   }`}
                 >
                   <Ticket className="w-5 h-5 text-purple-600" />
-                  <span className="text-[11px] font-bold">Redeem</span>
-                  <span className="text-[9px] text-purple-600 font-medium">Voucher Code</span>
+                  <span className="text-[11px] sm:text-xs font-black">Redeem Code</span>
+                  <span className="text-[9.5px] text-purple-700 font-bold">
+                    {isKm ? 'វាយលេខកូដដោះសោ' : 'Voucher Code'}
+                  </span>
                 </button>
+              </div>
 
-                {/* 4. Google Play Store */}
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('playstore')}
-                  className={`p-2.5 rounded-2xl border text-center transition-all cursor-pointer flex flex-col items-center justify-center gap-1 ${
-                    activeTab === 'playstore'
-                      ? 'border-emerald-600 bg-emerald-50/80 text-emerald-950 ring-2 ring-emerald-500/20 font-bold shadow-xs'
-                      : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
-                  }`}
-                >
-                  <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24">
-                    <path fill="#4285F4" d="M3.6 1.4L13.8 11.6 3.6 21.8C3.2 21.4 3 20.7 3 20V3.2C3 2.5 3.2 1.8 3.6 1.4z" />
-                    <path fill="#34A853" d="M17.3 8.1L13.8 11.6 3.6 1.4C4.1 1.1 4.7 1.1 5.3 1.5l12 6.6z" />
-                    <path fill="#EA4335" d="M17.3 15.1L5.3 21.7C4.7 22.1 4.1 22.1 3.6 21.8l10.2-10.2 3.5 3.5z" />
-                    <path fill="#FBBC04" d="M21.2 10.3l-3.9-2.2-3.5 3.5 3.5 3.5 3.9-2.2c1.1-.6 1.1-1.6 0-2.6z" />
-                  </svg>
-                  <span className="text-[11px] font-bold">Play Store</span>
-                  <span className="text-[9px] text-emerald-700 font-medium">Android App</span>
-                </button>
-
-                {/* 5. Apple App Store */}
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('appstore')}
-                  className={`p-2.5 rounded-2xl border text-center transition-all cursor-pointer flex flex-col items-center justify-center gap-1 ${
-                    activeTab === 'appstore'
-                      ? 'border-slate-900 bg-slate-900 text-white ring-2 ring-slate-900/20 font-bold shadow-xs'
-                      : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
-                  }`}
-                >
-                  <svg className="w-5 h-5 shrink-0 fill-current" viewBox="0 0 24 24">
-                    <path d="M18.71 19.5c-.83 1.24-1.71 2.45-3.05 2.47-1.34.03-1.77-.79-3.29-.79-1.53 0-2 .77-3.27.82-1.31.05-2.3-1.32-3.14-2.53C4.25 17 2.94 12.45 4.7 9.39c.87-1.52 2.43-2.48 4.12-2.51 1.28-.02 2.5.87 3.29.87.78 0 2.26-1.07 3.81-.91.65.03 2.47.26 3.64 1.98-.09.06-2.17 1.28-2.15 3.81.03 3.02 2.65 4.03 2.68 4.04-.03.07-.42 1.44-1.38 2.83M15.97 6.37c.61-.75 1.04-1.8 0.92-2.87-.9.04-2 .6-2.64 1.35-.57.65-1.06 1.73-.93 2.76 1.02.08 2.04-.49 2.65-1.24z" />
-                  </svg>
-                  <span className="text-[11px] font-bold">App Store</span>
-                  <span className={`text-[9px] ${activeTab === 'appstore' ? 'text-slate-300' : 'text-slate-500'}`}>iOS App</span>
-                </button>
-
-                {/* 6. PayPal / Direct Bank */}
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('paypal')}
-                  className={`p-2.5 rounded-2xl border text-center transition-all cursor-pointer flex flex-col items-center justify-center gap-1 ${
-                    activeTab === 'paypal'
-                      ? 'border-indigo-600 bg-indigo-50/80 text-indigo-900 ring-2 ring-indigo-500/20 font-bold shadow-xs'
-                      : 'border-slate-200 bg-white hover:bg-slate-50 text-slate-700'
-                  }`}
-                >
-                  <div className="w-5 h-5 rounded-full bg-amber-500 flex items-center justify-center text-[10px] font-black text-white">
-                    P
-                  </div>
-                  <span className="text-[11px] font-bold">PayPal</span>
-                  <span className="text-[9px] text-slate-500">International</span>
-                </button>
+              {/* Unavailable Methods Row (Clearly Disabled & Marked Unavailable) */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-0.5">
+                {[
+                  {
+                    id: 'card',
+                    label: 'Card (Visa/Master)',
+                    icon: <CreditCard className="w-4 h-4 text-slate-400" />,
+                  },
+                  {
+                    id: 'playstore',
+                    label: 'Play Store',
+                    icon: <Ban className="w-4 h-4 text-slate-400" />,
+                  },
+                  {
+                    id: 'appstore',
+                    label: 'App Store',
+                    icon: <Ban className="w-4 h-4 text-slate-400" />,
+                  },
+                  {
+                    id: 'paypal',
+                    label: 'PayPal',
+                    icon: <Ban className="w-4 h-4 text-slate-400" />,
+                  },
+                ].map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    disabled
+                    aria-disabled="true"
+                    className="p-2 rounded-xl border border-slate-200 bg-slate-100/80 text-slate-400 cursor-not-allowed flex flex-col items-center justify-center gap-0.5 opacity-75 select-none"
+                  >
+                    <div className="flex items-center gap-1">
+                      {item.icon}
+                      <span className="text-[10.5px] font-bold line-through">{item.label}</span>
+                    </div>
+                    <span className="text-[9px] font-black uppercase tracking-wider px-1.5 py-0.5 rounded bg-slate-200 text-slate-500">
+                      Unavailable
+                    </span>
+                  </button>
+                ))}
               </div>
             </div>
 
-            {/* TAB 1: ABA PAYWAY MERCHANT & 15-MINUTE DYNAMIC QR */}
-            {activeTab === 'khqr' && (
-              <div className="space-y-4 text-center">
-                {/* Header Info Banner with Live 15-Minute Countdown */}
-                <div className="p-3.5 bg-gradient-to-r from-sky-50 via-blue-50 to-indigo-50 rounded-2xl border border-sky-200 text-left flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-2xs">
-                  <div>
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="bg-[#004f80] text-white text-[10px] font-black px-2 py-0.5 rounded-md tracking-wider">
-                        ABA PayWay
-                      </span>
-                      <span className="text-xs text-[#003d63] font-bold">
-                        {isKm
-                          ? 'បង់ផ្ទាល់ចូល ABA Bank (សុពលភាព ១៥ នាទី)'
-                          : isKo
-                          ? 'ABA Bank 직접 결제 (유효시간 15분)'
-                          : 'Direct ABA Bank Payment (15-Min Session)'}
-                      </span>
-                    </div>
-                    <p className="text-[11px] text-slate-600 mt-1">
-                      {isKm
-                        ? 'គាំទ្រ ABA PAY, KHQR គ្រប់ធនាគារ និងកាត Visa, MasterCard, JCB, UnionPay ($25.00 / ~₩35,000)។'
-                        : isKo
-                        ? 'ABA PAY, KHQR 및 해외 카드(Visa, Master, UnionPay, JCB) 지원.'
-                        : 'Supports ABA PAY, KHQR, Visa, MasterCard, JCB, UnionPay.'}
-                    </p>
-                  </div>
-
-                  {/* Live 15:00 Countdown Pill */}
-                  <div
-                    className={`px-3 py-2 rounded-xl border shrink-0 flex items-center gap-2 tabular-nums ${
-                      isQrExpired
-                        ? 'bg-rose-50 border-rose-300 text-rose-800'
-                        : isQrWarning
-                        ? 'bg-amber-50 border-amber-300 text-amber-900'
-                        : 'bg-white border-sky-300 text-[#004f80]'
-                    }`}
-                  >
-                    <Clock className="w-4 h-4 shrink-0" />
-                    <div className="text-left">
-                      <span className="text-[10px] font-bold block leading-none opacity-80">
-                        {isQrExpired
-                          ? isKm
-                            ? 'ផុតសុពលភាព'
-                            : 'Expired'
-                          : isKm
-                          ? 'សុពលភាព QR'
-                          : isKo
-                          ? '남은 시간'
-                          : 'Expires in'}
-                      </span>
-                      <span className="font-mono font-black text-sm leading-tight">
-                        {formatCountdown(qrSecondsLeft)}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* 1-Click Direct Online Payment Link */}
-                <a
-                  href={paywayUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-[#004f80] via-[#005f99] to-[#0074b7] hover:from-[#003d63] hover:to-[#005f99] text-white font-extrabold text-sm shadow-lg shadow-sky-900/25 flex items-center justify-center gap-2.5 transition-all hover:scale-[1.01] border border-sky-400/30 cursor-pointer"
-                >
-                  <CreditCard className="w-4 h-4 text-sky-200 shrink-0" />
-                  <span>
-                    {isKm
-                      ? 'ចុចបង់ប្រាក់តាម ABA PayWay (បើកផ្ទាំងបង់ប្រាក់ផ្ទាល់)'
-                      : isKo
-                      ? 'ABA PayWay 온라인 결제 페이지 열기'
-                      : 'Open ABA PayWay Checkout'}
-                  </span>
-                  <ExternalLink className="w-4 h-4 text-sky-200 shrink-0" />
-                </a>
-
-                {/* Dynamic QR Card Frame with 15-Min Expiry Overlay */}
-                <div className="max-w-[300px] mx-auto bg-white p-4 rounded-3xl border-2 border-[#004f80]/40 shadow-xl relative overflow-hidden">
-                  <div className="bg-[#004f80] -mx-4 -mt-4 py-2 px-4 text-white flex items-center justify-between mb-3 shadow-xs">
-                    <span className="font-black text-xs tracking-wider">ABA PayWay</span>
-                    <span className="text-[10px] font-mono font-bold bg-white/20 px-2 py-0.5 rounded-full tabular-nums">
-                      $25.00 · {formatCountdown(qrSecondsLeft)}
-                    </span>
-                  </div>
-
-                  {/* QR Image Container */}
-                  <div className="relative p-2 bg-white rounded-2xl border border-slate-200 flex items-center justify-center overflow-hidden">
-                    {isGeneratingQr ? (
-                      <div className="w-52 h-52 flex flex-col items-center justify-center gap-2 text-slate-400">
-                        <RefreshCw className="w-8 h-8 animate-spin text-[#004f80]" />
-                        <span className="text-xs font-bold text-slate-600">
-                          {isKm ? 'កំពុងបង្កើត QR ថ្មី...' : 'Generating QR...'}
-                        </span>
-                      </div>
-                    ) : qrCodeDataUrl ? (
-                      <div className="relative">
-                        <img
-                          src={qrCodeDataUrl}
-                          alt="ABA PayWay Dynamic QR Code"
-                          className={`w-52 h-52 object-contain mx-auto transition-all ${
-                            isQrExpired ? 'blur-md opacity-30 grayscale' : ''
-                          }`}
-                        />
-                        {!isQrExpired && (
-                          <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                            <div className="w-9 h-9 rounded-full bg-[#004f80] shadow-md border-2 border-white flex items-center justify-center">
-                              <span className="text-[10px] font-black text-white">ABA</span>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    ) : (
-                      <div className="w-52 h-52 flex items-center justify-center">
-                        <QrCode className="w-32 h-32 text-slate-300" />
-                      </div>
-                    )}
-
-                    {/* Expired 15-min Overlay Lock */}
-                    {isQrExpired && !isGeneratingQr && (
-                      <div className="absolute inset-0 bg-slate-900/70 backdrop-blur-[2px] flex flex-col items-center justify-center p-4 text-white gap-2.5">
-                        <Clock className="w-8 h-8 text-rose-400" />
-                        <p className="text-xs font-black text-center leading-snug">
-                          {isKm
-                            ? 'QR ផុតសុពលភាពហើយ (ហួស ១៥ នាទី)'
-                            : isKo
-                            ? 'QR 코드가 만료되었습니다 (15분 초과)'
-                            : 'QR Code Expired (15 Minutes)'}
-                        </p>
-                        <button
-                          type="button"
-                          onClick={() => generateNewKhqr()}
-                          className="px-3.5 py-2 rounded-xl bg-white text-[#004f80] font-black text-xs flex items-center gap-1.5 shadow-md hover:bg-sky-50 cursor-pointer"
-                        >
-                          <RefreshCw className="w-3.5 h-3.5" />
-                          <span>{isKm ? 'បង្កើត QR ថ្មី (15:00)' : 'New QR (15:00)'}</span>
-                        </button>
-                      </div>
-                    )}
-                  </div>
-
-                  {/* Merchant & Transaction Details */}
-                  <div className="mt-3 pt-2 border-t border-dashed border-slate-200 text-left space-y-1">
-                    <div className="flex items-center justify-between text-[11px]">
-                      <span className="text-slate-500">អ្នកទទួល (Merchant):</span>
-                      <span className="font-black text-slate-900 tracking-wide">Delivery by V.EANG</span>
-                    </div>
-                    <div className="flex items-center justify-between text-[11px]">
-                      <span className="text-slate-500">ធនាគារ (Bank):</span>
-                      <span className="font-extrabold text-[#004f80] tabular-nums">ABA Bank (000 375 987)</span>
-                    </div>
-                    <div className="flex items-center justify-between text-[11px] pt-0.5">
-                      <span className="text-slate-500">លេខវិក្កយបត្រ (Tx ID):</span>
-                      <div className="flex items-center gap-1 font-mono font-bold text-[#004f80] text-[10.5px]">
-                        <span>{transactionId || 'KIIP-PENDING'}</span>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            navigator.clipboard.writeText(transactionId);
-                            setCopiedTxId(true);
-                            setTimeout(() => setCopiedTxId(false), 2000);
-                          }}
-                          className="p-0.5 rounded text-slate-400 hover:text-slate-700 cursor-pointer"
-                          title="Copy Transaction ID"
-                        >
-                          {copiedTxId ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
-                        </button>
-                      </div>
-                    </div>
-                    <div className="flex items-center justify-between text-[10px] text-slate-400 pt-0.5 tabular-nums">
-                      <span>បង្កើតម៉ោង: {qrGeneratedAt.toLocaleTimeString()}</span>
-                      <span className={`font-bold ${isQrExpired ? 'text-rose-600' : 'text-emerald-600'}`}>
-                        {isQrExpired ? '● ផុតកំណត់' : `● Active #${qrPayCount + 1}`}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Receipt Reference / Sender Name Input (required in Link mode within 15-min window) */}
-                {!abaHasMerchantApi && (
-                  <div className="max-w-md mx-auto text-left space-y-1.5">
-                    <label className="text-xs font-bold text-slate-700 block">
-                      {isKm
-                        ? 'ឈ្មោះគណនីដែលបានបាញ់ប្រាក់ ឬ លេខយោង ABA Slip (Ref):'
-                        : isKo
-                        ? '송금자명 또는 ABA 이체 참조번호:'
-                        : 'ABA Sender Name or Transfer Ref:'}
-                    </label>
-                    <input
-                      type="text"
-                      value={abaReferenceNote}
-                      onChange={(e) => {
-                        setAbaReferenceNote(e.target.value);
-                        setAbaConfirmError(null);
-                      }}
-                      placeholder={
-                        isKm
-                          ? 'ឧ. SOK SRORNG ឬ លេខយោងវិក្កយបត្រ ABA...'
-                          : 'e.g. Sender name or ABA receipt number...'
-                      }
-                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-xs sm:text-sm font-semibold text-slate-900 focus:border-[#004f80] focus:ring-2 focus:ring-sky-100 outline-none"
-                    />
-                  </div>
-                )}
-
-                {abaConfirmError && (
-                  <div className="max-w-md mx-auto p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center gap-2 text-left">
-                    <AlertCircle className="w-4 h-4 shrink-0" />
-                    <span>{abaConfirmError}</span>
-                  </div>
-                )}
-
-                {/* Quick Action Buttons */}
-                <div className="flex items-center justify-center gap-2 max-w-md mx-auto">
-                  <button
-                    type="button"
-                    onClick={() => generateNewKhqr()}
-                    disabled={isGeneratingQr || isProcessing}
-                    className="px-3.5 py-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs flex items-center gap-1.5 transition-all cursor-pointer border border-slate-300 shadow-2xs disabled:opacity-50 shrink-0"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 text-blue-600 ${isGeneratingQr ? 'animate-spin' : ''}`} />
-                    <span>{isKm ? 'បង្កើត QR ថ្មី' : 'New QR'}</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    disabled={isProcessing || isQrExpired}
-                    onClick={handleConfirmAbaPayment}
-                    className="flex-1 py-3 px-4 bg-gradient-to-r from-[#004f80] to-[#0074b7] hover:from-[#003d63] hover:to-[#005f99] text-white font-extrabold text-xs sm:text-sm rounded-xl shadow-md shadow-sky-900/20 flex items-center justify-center gap-2 transition-all cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {isProcessing ? (
-                      <>
-                        <RefreshCw className="w-4 h-4 animate-spin" />
-                        <span className="truncate">{processingStep}</span>
-                      </>
-                    ) : (
-                      <>
-                        <CheckCircle2 className="w-4 h-4 text-emerald-300 shrink-0" />
-                        <span>
-                          {abaHasMerchantApi
-                            ? isKm
-                              ? 'ពិនិត្យស្ថានភាពបង់ប្រាក់ ABA'
-                              : 'Verify ABA Payment'
-                            : isKm
-                            ? '✓ ខ្ញុំបានបង់ប្រាក់រួចហើយ'
-                            : isKo
-                            ? '결제 완료 및 잠금 해제'
-                            : 'I Have Completed Payment'}
-                        </span>
-                      </>
-                    )}
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* TAB 1B: KOREA BANK TRANSFER + AUTO RECEIPT VERIFICATION / TELEGRAM BOT */}
+            {/* TAB 1: KOREA BANK TRANSFER (KOOKMIN BANK) + TELEGRAM BOT & FACEBOOK SCREENSHOT */}
             {activeTab === 'krbank' && (
               <div className="space-y-4 text-left">
-                {/* Bank Transfer Info Box */}
-                <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-50 via-teal-50 to-sky-50 border border-emerald-200 space-y-2.5">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
-                      <span className="p-1.5 rounded-lg bg-emerald-600 text-white">
+                {/* Always-Visible Korean Bank Account Card */}
+                <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-50 via-teal-50 to-sky-50 border-2 border-emerald-300 space-y-3 shadow-xs">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex items-center gap-2.5">
+                      <span className="p-2 rounded-xl bg-emerald-600 text-white shrink-0">
                         <Landmark className="w-4 h-4" />
                       </span>
                       <div>
                         <h4 className="text-xs sm:text-sm font-black text-emerald-950">
                           {isKm
-                            ? '🇰🇷 ផ្ទេរប្រាក់តាមធនាគារកូរ៉េ & ផ្ទៀងផ្ទាត់វិក្កយបត្រស្វ័យប្រវត្តិ'
+                            ? '🇰🇷 បង់ប្រាក់តាមធនាគារកូរ៉េ (សម្រាប់អ្នកនៅកូរ៉េ)'
                             : isKo
-                            ? '🇰🇷 한국 계좌이체 & 이체확인증 자동 인증'
-                            : '🇰🇷 Korea Bank Transfer & Auto Receipt Verification'}
+                            ? '🇰🇷 한국 계좌이체 안내'
+                            : '🇰🇷 Korea Bank Transfer (For Users in Korea)'}
                         </h4>
                         <p className="text-[11px] text-emerald-800">
                           {isKm
-                            ? 'ផ្ទេរប្រាក់ ₩35,000 រួច Upload រូប Screenshot វិក្កយបត្រ ដើម្បីទទួលកូដដោះសោភ្លាមៗ (Auto-Unlock)'
-                            : 'Transfer ₩35,000 and upload your transfer screenshot to receive an automatic unlock code.'}
+                            ? 'ផ្ទេរប្រាក់ ₩35,000 ចូលលេខគណនីខាងក្រោម រួចផ្ញើរូប Screenshot'
+                            : 'Transfer ₩35,000 to the account below, then send your screenshot.'}
                         </p>
                       </div>
                     </div>
-                    <span className="text-sm font-black text-emerald-800 tabular-nums shrink-0">
-                      ₩{(krConfig?.amountKrw || 35000).toLocaleString()}
+                    <span className="text-base font-black text-emerald-800 tabular-nums shrink-0 bg-white px-2.5 py-1 rounded-xl border border-emerald-200">
+                      ₩{krConfig.amountKrw.toLocaleString()}
                     </span>
                   </div>
 
-                  {krConfig?.accountNumber ? (
-                    <div className="p-3 bg-white rounded-xl border border-emerald-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
-                      <div className="space-y-0.5">
-                        <p className="text-slate-500 text-[11px]">
-                          {isKm ? 'ធនាគារ (Bank):' : 'Bank:'}{' '}
-                          <strong className="text-slate-900">{krConfig.bankName || 'Korean Bank'}</strong>
-                          {krConfig.accountHolder ? ` · ${krConfig.accountHolder}` : ''}
-                        </p>
-                        <p className="font-mono font-black text-sm text-emerald-800 tracking-wide">
+                  {/* Bank Details Display */}
+                  <div className="p-3.5 bg-white rounded-xl border border-emerald-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="space-y-1">
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs">
+                        <span className="text-slate-500 font-semibold">
+                          {isKm ? 'ធនាគារ:' : 'Bank:'}
+                        </span>
+                        <span className="font-black text-slate-900">{krConfig.bankName}</span>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs">
+                        <span className="text-slate-500 font-semibold">
+                          {isKm ? 'ឈ្មោះគណនី:' : 'Holder:'}
+                        </span>
+                        <span className="font-black text-slate-900">{krConfig.accountHolder}</span>
+                      </div>
+                      <div className="pt-0.5">
+                        <span className="text-[10.5px] font-bold text-emerald-700 block">
+                          {isKm ? 'លេខគណនី (Account Number):' : 'Account Number:'}
+                        </span>
+                        <p className="font-mono font-black text-lg sm:text-xl text-emerald-800 tracking-wider tabular-nums">
                           {krConfig.accountNumber}
                         </p>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          navigator.clipboard.writeText(krConfig.accountNumber);
-                          setCopiedKrAccount(true);
-                          setTimeout(() => setCopiedKrAccount(false), 2000);
-                        }}
-                        className="px-3 py-1.5 rounded-lg bg-emerald-100 hover:bg-emerald-200 text-emerald-900 font-bold text-xs flex items-center gap-1.5 cursor-pointer self-start sm:self-center"
-                      >
-                        {copiedKrAccount ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-                        <span>{copiedKrAccount ? (isKm ? 'បានចម្លង' : 'Copied') : (isKm ? 'ចម្លងលេខគណនី' : 'Copy Account')}</span>
-                      </button>
                     </div>
-                  ) : (
-                    <div className="p-3 bg-white/80 rounded-xl border border-amber-200 text-[11px] text-amber-900">
-                      {isKm
-                        ? 'ℹ️ Admin មិនទាន់បានកំណត់លេខគណនីធនាគារកូរ៉េក្នុង Settings → Secrets (KR_BANK_NAME, KR_BANK_ACCOUNT, KR_BANK_HOLDER) នៅឡើយទេ។ ប៉ុន្តែអ្នកអាច Upload Screenshot វិក្កយបត្រដើម្បីផ្ទៀងផ្ទាត់ស្វ័យប្រវត្តិខាងក្រោមបាន។'
-                        : 'ℹ️ Korean bank account details (KR_BANK_NAME, KR_BANK_ACCOUNT, KR_BANK_HOLDER) are not set in Secrets yet. You can still upload a Korean bank transfer screenshot below for automatic verification.'}
-                    </div>
-                  )}
+
+                    <button
+                      type="button"
+                      onClick={() => copyText(krConfig.accountNumber, setCopiedKrAccount)}
+                      className="px-3.5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer shadow-xs shrink-0 self-start sm:self-center"
+                    >
+                      {copiedKrAccount ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                      <span>
+                        {copiedKrAccount
+                          ? isKm
+                            ? 'បានចម្លងរួច!'
+                            : 'Copied!'
+                          : isKm
+                          ? 'ចម្លងលេខគណនី'
+                          : 'Copy Account'}
+                      </span>
+                    </button>
+                  </div>
                 </div>
 
-                {/* Upload Transfer Screenshot Zone */}
+                {/* Screenshot Delivery via Telegram Bot OR Facebook Page */}
+                {renderScreenshotDeliveryBox('krbank')}
+
+                {/* Optional Direct In-Website Auto-Verify Receipt Upload */}
                 <div className="p-4 rounded-2xl border-2 border-dashed border-slate-300 bg-slate-50/70 space-y-3">
                   <div className="flex items-center justify-between gap-2">
                     <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
-                      <Camera className="w-4 h-4 text-emerald-600" />
+                      <Camera className="w-4 h-4 text-emerald-600 shrink-0" />
                       {isKm
-                        ? 'ជំហានទី ២: Upload រូប Screenshot វិក្កយបត្រផ្ទេរប្រាក់ (KakaoBank / Toss / KB / Shinhan / Woori / NH...)'
-                        : 'Step 2: Upload Bank Transfer Screenshot (KakaoBank / Toss / KB / Shinhan / NH...)'}
+                        ? 'ឬ Upload Screenshot ផ្ទាល់លើវេបសាយដើម្បីផ្ទៀងផ្ទាត់ស្វ័យប្រវត្តិ (Auto-Unlock)'
+                        : 'Or Upload Screenshot Here for Instant Auto-Verification'}
                     </span>
                   </div>
 
@@ -1183,8 +827,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                         </p>
                       </div>
                     ) : (
-                      <div className="py-4 flex flex-col items-center gap-1.5 text-slate-500">
-                        <Upload className="w-6 h-6 text-emerald-600" />
+                      <div className="py-3 flex flex-col items-center gap-1.5 text-slate-500">
+                        <Upload className="w-5 h-5 text-emerald-600" />
                         <span className="text-xs font-bold text-slate-700">
                           {isKm ? 'ចុចជ្រើសរើសរូប Screenshot វិក្កយបត្រ (PNG / JPG)' : 'Click to select receipt screenshot (PNG / JPG)'}
                         </span>
@@ -1213,11 +857,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                         </span>
                         <button
                           type="button"
-                          onClick={() => {
-                            navigator.clipboard.writeText(issuedKrCode.code);
-                            setCopiedKrCode(true);
-                            setTimeout(() => setCopiedKrCode(false), 2000);
-                          }}
+                          onClick={() => copyText(issuedKrCode.code, setCopiedKrCode)}
                           className="px-2 py-0.5 rounded bg-emerald-200 text-emerald-950 font-mono font-bold text-[11px] flex items-center gap-1 cursor-pointer"
                         >
                           <span>{issuedKrCode.code}</span>
@@ -1234,7 +874,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                     type="button"
                     disabled={!receiptPreview || verifyingReceipt}
                     onClick={handleVerifyKrReceipt}
-                    className="w-full py-3.5 px-4 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-black text-xs sm:text-sm shadow-lg flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                    className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-black text-xs sm:text-sm shadow-md flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
                   >
                     {verifyingReceipt ? (
                       <>
@@ -1249,82 +889,99 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                     )}
                   </button>
                 </div>
-
-                {/* Telegram Bot Auto-Unlock Alternative */}
-                <div className="p-3.5 rounded-2xl bg-sky-50 border border-sky-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <div className="space-y-0.5">
-                    <p className="text-xs font-black text-sky-950 flex items-center gap-1.5">
-                      <Send className="w-3.5 h-3.5 text-sky-600" />
-                      {isKm ? 'ឬ ផ្ញើ Screenshot ទៅ Telegram Bot ដើម្បីទទួលកូដស្វ័យប្រវត្តិ' : 'Or send screenshot to Telegram Bot for an auto-code'}
-                    </p>
-                    <p className="text-[11px] text-sky-800">
-                      {isKm
-                        ? 'ផ្ញើរូបវិក្កយបត្រចូល Telegram Bot → Bot នឹងផ្ញើកូដដោះសោ KIIP-TG-XXXXXX ត្រឡប់មកវិញភ្លាមៗ រួចយកមកវាយក្នុងផ្ទាំង Redeem។'
-                        : 'Send your transfer screenshot to the Telegram Bot to receive a single-use KIIP-TG-XXXXXX code, then enter it in the Redeem tab.'}
-                    </p>
-                  </div>
-                  {krConfig?.telegramBotUsername ? (
-                    <a
-                      href={`https://t.me/${encodeURIComponent(krConfig.telegramBotUsername)}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="px-3.5 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white font-bold text-xs flex items-center gap-1.5 shrink-0 self-start sm:self-center"
-                    >
-                      <Send className="w-3.5 h-3.5" />
-                      <span>@{krConfig.telegramBotUsername}</span>
-                      <ExternalLink className="w-3 h-3" />
-                    </a>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => setActiveTab('redeem')}
-                      className="px-3 py-2 rounded-xl bg-white border border-sky-300 text-sky-900 font-bold text-xs shrink-0 cursor-pointer self-start sm:self-center"
-                    >
-                      {isKm ? 'មានកូដហើយ? ទៅ Redeem' : 'Have a code? Redeem'}
-                    </button>
-                  )}
-                </div>
               </div>
             )}
 
-            {/* TAB 2: CREDIT CARD (VIA ABA PAYWAY INTERNATIONAL CARDS) */}
-            {activeTab === 'card' && (
-              <div className="space-y-4">
-                <div className="p-4 rounded-2xl bg-slate-900 text-white space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-sky-300 uppercase tracking-wider">
-                      ABA PayWay Card Gateway
-                    </span>
-                    <span className="text-xs font-bold text-white/80">Visa · Master · JCB · UnionPay</span>
+            {/* TAB 2: ABA PAYWAY / KHQR (USER'S OFFICIAL ABA QR IMAGE) */}
+            {activeTab === 'khqr' && (
+              <div className="space-y-4 text-center">
+                {/* Header Info Banner */}
+                <div className="p-3.5 bg-gradient-to-r from-sky-50 via-blue-50 to-indigo-50 rounded-2xl border border-sky-200 text-left flex flex-col sm:flex-row sm:items-center justify-between gap-2 shadow-2xs">
+                  <div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="bg-[#004f80] text-white text-[10px] font-black px-2 py-0.5 rounded-md tracking-wider">
+                        ABA PAY · KHQR
+                      </span>
+                      <span className="text-xs text-[#003d63] font-black">
+                        {isKm
+                          ? 'ស្កេន QR Code បង់ផ្ទាល់ចូល ABA Bank'
+                          : isKo
+                          ? 'ABA Bank 공식 KHQR 결제'
+                          : 'Scan Official ABA PAY / KHQR Code'}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-600 mt-1">
+                      {isKm
+                        ? 'គាំទ្រ ABA Mobile និងកម្មវិធីធនាគារ KHQR ទាំងអស់ ($25.00 / ₩35,000)។ បន្ទាប់ពីបង់រួច សូមផ្ញើ Screenshot ទៅ Facebook ឬ Telegram Bot ដើម្បីទទួលលេខកូដដោះសោ។'
+                        : 'Supports ABA Mobile & all KHQR banking apps ($25.00 / ₩35,000). After paying, send your screenshot via Facebook or Telegram Bot to receive your Redeem Code.'}
+                    </p>
                   </div>
-                  <p className="text-xs text-slate-300 leading-relaxed">
-                    {isKm
-                      ? 'ការបង់ប្រាក់តាមកាតធនាគារអន្តរជាតិ (Visa, MasterCard, UnionPay, JCB) ទាំងអស់ត្រូវបានដំណើរការដោយសុវត្ថិភាពតាមរយៈប្រព័ន្ធផ្លូវការ ABA PayWay ហើយប្រាក់នឹងចូលគណនី ABA Bank (Delivery by V.EANG) ដោយផ្ទាល់។'
-                      : isKo
-                      ? '해외 카드(Visa, MasterCard, JCB, UnionPay) 결제는 ABA PayWay 공식 보안 게이트웨이를 통해 안전하게 처리됩니다.'
-                      : 'International Visa, MasterCard, JCB, and UnionPay payments are processed securely through ABA PayWay directly to Delivery by V.EANG.'}
-                  </p>
+                  <span className="text-sm font-black text-[#004f80] tabular-nums shrink-0 bg-white px-2.5 py-1 rounded-xl border border-sky-200 self-start sm:self-center">
+                    $25.00 / ₩35,000
+                  </span>
                 </div>
 
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <a
-                    href={paywayUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="py-3.5 px-4 rounded-2xl bg-gradient-to-r from-[#004f80] to-[#0074b7] hover:from-[#003d63] hover:to-[#005f99] text-white font-extrabold text-xs sm:text-sm shadow-lg flex items-center justify-center gap-2 transition-all"
-                  >
-                    <CreditCard className="w-4 h-4 shrink-0" />
-                    <span>{isKm ? 'បង់តាមកាតលើ ABA PayWay' : 'Pay by Card on ABA PayWay'}</span>
-                    <ExternalLink className="w-3.5 h-3.5 shrink-0" />
-                  </a>
+                {/* User's Official Uploaded ABA PAY QR Code Card */}
+                <div className="max-w-[340px] mx-auto bg-white rounded-3xl border-2 border-[#004f80]/30 shadow-xl overflow-hidden">
+                  <img
+                    src={ABA_QR_IMAGE_PATH}
+                    alt="ABA PAY KHQR - EANG VEASNA (000 375 987)"
+                    className="w-full h-auto object-contain block"
+                  />
 
+                  {/* Copyable Account Info Strip */}
+                  <div className="p-3.5 bg-slate-50 border-t border-slate-200 text-left space-y-1.5">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-slate-500 font-semibold">
+                        {isKm ? 'ឈ្មោះគណនី:' : 'Account Name:'}
+                      </span>
+                      <span className="font-black text-slate-900">{ABA_ACCOUNT_HOLDER}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="text-slate-500 font-semibold">
+                        {isKm ? 'លេខគណនី ABA:' : 'ABA Account:'}
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <span className="font-mono font-black text-[#004f80] text-sm tabular-nums">
+                          {ABA_ACCOUNT_NUMBER}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => copyText(ABA_ACCOUNT_RAW, setCopiedAbaAccount)}
+                          className="px-2 py-0.5 rounded-md bg-sky-100 hover:bg-sky-200 text-[#004f80] font-bold text-[10.5px] inline-flex items-center gap-1 cursor-pointer"
+                          title="Copy ABA Account"
+                        >
+                          {copiedAbaAccount ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                          <span>{copiedAbaAccount ? (isKm ? 'បានចម្លង' : 'Copied') : (isKm ? 'ចម្លង' : 'Copy')}</span>
+                        </button>
+                      </div>
+                    </div>
+                    <div className="flex items-center justify-between text-[11px] text-slate-500">
+                      <span>MID:</span>
+                      <span className="font-mono font-bold text-slate-700">{ABA_MID}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Screenshot Delivery via Facebook / Telegram Bot */}
+                {renderScreenshotDeliveryBox('khqr')}
+
+                {/* Compact Korea Bank Account Reminder Strip */}
+                <div className="p-3 rounded-2xl bg-emerald-50 border border-emerald-200 flex flex-wrap items-center justify-between gap-2 text-left text-xs">
+                  <div>
+                    <span className="font-black text-emerald-950 block">
+                      🇰🇷 {isKm ? 'នៅកូរ៉េ? បង់តាមធនាគារកូរ៉េ:' : 'In Korea? Pay via Korean Bank:'}
+                    </span>
+                    <span className="text-[11px] text-emerald-800 font-mono font-bold">
+                      {krConfig.bankName} · {krConfig.accountNumber} ({krConfig.accountHolder})
+                    </span>
+                  </div>
                   <button
                     type="button"
-                    onClick={() => setActiveTab('khqr')}
-                    className="py-3.5 px-4 rounded-2xl bg-slate-100 hover:bg-slate-200 text-slate-900 font-bold text-xs sm:text-sm border border-slate-300 flex items-center justify-center gap-2 cursor-pointer transition-colors"
+                    onClick={() => setActiveTab('krbank')}
+                    className="px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] cursor-pointer shrink-0"
                   >
-                    <QrCode className="w-4 h-4 text-[#004f80]" />
-                    <span>{isKm ? 'បញ្ជាក់ការបង់ប្រាក់ & QR ១៥ នាទី' : 'Go to ABA Confirm & 15m QR'}</span>
+                    {isKm ? 'បើកផ្ទាំងធនាគារកូរ៉េ' : 'Open Korea Bank'}
                   </button>
                 </div>
               </div>
@@ -1340,14 +997,14 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                     </div>
                     <div>
                       <h4 className="text-xs sm:text-sm font-black text-purple-950">
-                        {isKm ? 'លេខកូដដោះសោ (Redeem / Voucher Code)' : 'Redeem / Voucher Code'}
+                        {isKm ? 'លេខកូដដោះសោឯកសារ (Redeem / Voucher Code)' : 'Redeem / Voucher Code'}
                       </h4>
                       <p className="text-[11px] text-purple-700">
                         {isKm
-                          ? 'សម្រាប់អតិថិជនដែលបានបាញ់ប្រាក់ជូន Admin (ABA / KakaoBank / ផ្ទាល់) ឬមានលេខកូដ VIP Promo'
+                          ? 'បញ្ចូលលេខកូដដែលទទួលបានពី Telegram Bot, Facebook Page ឬ Admin បន្ទាប់ពីបង់ប្រាក់តាមធនាគារកូរ៉េ ឬ ABA PAY'
                           : isKo
-                          ? '관리자에게 직접 결제 후 발급받은 일회용 코드 또는 프로모션 코드를 입력하세요'
-                          : 'Enter an admin-issued single-use voucher or VIP promo code'}
+                          ? '계좌이체 또는 ABA 결제 후 텔레그램 봇/페이스북에서 받은 일회용 코드를 입력하세요'
+                          : 'Enter the single-use code received from Telegram Bot, Facebook Page, or Admin'}
                       </p>
                     </div>
                   </div>
@@ -1355,6 +1012,22 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
 
                 {/* Type selector */}
                 <div className="grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRedeemPlatform('voucher');
+                      setRedeemError(null);
+                    }}
+                    className={`p-2.5 rounded-xl border text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                      redeemPlatform === 'voucher'
+                        ? 'border-indigo-600 bg-indigo-50 text-indigo-900 ring-2 ring-indigo-500/20'
+                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
+                    }`}
+                  >
+                    <Ticket className="w-4 h-4 text-indigo-600 shrink-0" />
+                    <span>1-Time Redeem Code</span>
+                  </button>
+
                   <button
                     type="button"
                     onClick={() => {
@@ -1370,22 +1043,6 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                     <Gift className="w-4 h-4 text-purple-600 shrink-0" />
                     <span>VIP Promo Code</span>
                   </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setRedeemPlatform('voucher');
-                      setRedeemError(null);
-                    }}
-                    className={`p-2.5 rounded-xl border text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
-                      redeemPlatform === 'voucher'
-                        ? 'border-indigo-600 bg-indigo-50 text-indigo-900 ring-2 ring-indigo-500/20'
-                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
-                    }`}
-                  >
-                    <Ticket className="w-4 h-4 text-indigo-600 shrink-0" />
-                    <span>1-Time Voucher</span>
-                  </button>
                 </div>
 
                 <div>
@@ -1395,14 +1052,20 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                   <div className="relative">
                     <Ticket className="w-4 h-4 text-purple-500 absolute left-3 top-3.5" />
                     <input
-                      type="password"
+                      type="text"
                       autoComplete="off"
                       value={redeemCode}
                       onChange={(e) => {
                         setRedeemCode(e.target.value.toUpperCase());
                         setRedeemError(null);
                       }}
-                      placeholder="••••••••"
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          verifyCodeAndUnlock(redeemCode, 'redeem');
+                        }
+                      }}
+                      placeholder={isKm ? 'ឧ. KIIP-26-XXXXXX' : 'e.g. KIIP-26-XXXXXX'}
                       className="w-full pl-9 pr-20 py-3 rounded-xl border border-slate-300 text-sm font-mono tracking-wider font-bold uppercase focus:border-purple-600 focus:ring-2 focus:ring-purple-100 outline-none"
                     />
                     {redeemCode && (
@@ -1446,104 +1109,18 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
 
                   <button
                     type="button"
-                    onClick={() => setActiveTab('khqr')}
-                    className="px-4 py-3.5 rounded-2xl bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs border border-slate-300 cursor-pointer"
+                    onClick={() => setActiveTab('krbank')}
+                    className="px-4 py-3.5 rounded-2xl bg-emerald-50 hover:bg-emerald-100 text-emerald-900 font-bold text-xs border border-emerald-200 cursor-pointer"
                   >
-                    {isKm ? 'គ្មានកូដ? បង់តាម ABA' : 'Pay via ABA'}
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* TAB 4 & 5: GOOGLE PLAY STORE / APPLE APP STORE NOTICE */}
-            {(activeTab === 'playstore' || activeTab === 'appstore') && (
-              <div className="space-y-4">
-                <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-2.5 text-left">
-                  <div className="flex items-start gap-2.5">
-                    <Info className="w-5 h-5 text-blue-600 shrink-0 mt-0.5" />
-                    <div className="space-y-1.5 text-xs text-slate-700 leading-relaxed">
-                      <p className="font-bold text-slate-900 text-sm">
-                        {activeTab === 'playstore'
-                          ? isKm
-                            ? 'ការទូទាត់តាម Google Play Store (សម្រាប់ Android App)'
-                            : 'Google Play Store In-App Billing'
-                          : isKm
-                          ? 'ការទូទាត់តាម Apple App Store (សម្រាប់ iOS App)'
-                          : 'Apple App Store In-App Purchase'}
-                      </p>
-                      <p>
-                        {activeTab === 'playstore'
-                          ? isKm
-                            ? 'ការទូទាត់តាម Google Play Store និង Google Play Gift Card ដំណើរការតែនៅក្នុងកម្មវិធី Android App ដែលបានបង្ហោះលើ Google Play Console ប៉ុណ្ណោះ (លុយនឹងផ្ទេរចូលគណនីធនាគារដែលភ្ជាប់ក្នុង Google Play Console)។ នៅលើ Website បច្ចុប្បន្ន សូមប្រើ ABA PayWay ឬលេខកូដ Redeem Code។'
-                            : 'Google Play In-App Billing & Gift Cards only process inside an Android app published via Google Play Console. On web, please use ABA PayWay or an issued Redeem Code.'
-                          : isKm
-                          ? 'ការទូទាត់តាម Apple App Store (Apple In-App Purchase) ដំណើរការតែនៅក្នុងកម្មវិធី iOS App ដែលបានបង្ហោះលើ App Store Connect ប៉ុណ្ណោះ (លុយនឹងផ្ទេរចូលគណនីធនាគារក្នុង App Store Connect)។ នៅលើ Website បច្ចុប្បន្ន សូមប្រើ ABA PayWay (គាំទ្រ Visa/MasterCard) ឬលេខកូដ Redeem Code។'
-                          : 'Apple App Store In-App Purchase only processes inside an iOS app published on App Store Connect. On web, please pay via ABA PayWay or Redeem Code.'}
-                      </p>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('khqr')}
-                    className="py-3.5 px-4 rounded-2xl bg-gradient-to-r from-[#004f80] to-[#0074b7] hover:from-[#003d63] hover:to-[#005f99] text-white font-extrabold text-xs sm:text-sm shadow-md flex items-center justify-center gap-2 cursor-pointer"
-                  >
-                    <QrCode className="w-4 h-4" />
-                    <span>{isKm ? 'បង់តាម ABA PayWay (១៥ នាទី)' : 'Pay via ABA PayWay (15m)'}</span>
+                    🇰🇷 {isKm ? 'បង់តាមធនាគារកូរ៉េ' : 'Korea Bank'}
                   </button>
 
                   <button
                     type="button"
-                    onClick={() => setActiveTab('redeem')}
-                    className="py-3.5 px-4 rounded-2xl bg-purple-50 hover:bg-purple-100 text-purple-900 font-bold text-xs sm:text-sm border border-purple-200 flex items-center justify-center gap-2 cursor-pointer"
-                  >
-                    <Ticket className="w-4 h-4 text-purple-600" />
-                    <span>{isKm ? 'បញ្ចូល Redeem / Promo Code' : 'Enter Redeem / Promo Code'}</span>
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* TAB 6: PAYPAL / INTERNATIONAL */}
-            {activeTab === 'paypal' && (
-              <div className="space-y-4">
-                <div className="p-4 rounded-2xl bg-amber-50 border border-amber-200 space-y-2 text-left">
-                  <div className="flex items-center gap-2">
-                    <span className="w-6 h-6 rounded-full bg-amber-500 text-white font-black text-xs flex items-center justify-center">
-                      P
-                    </span>
-                    <span className="text-xs font-bold text-amber-950">
-                      International Cards &amp; ABA PayWay ($25.00 USD)
-                    </span>
-                  </div>
-                  <p className="text-xs text-amber-900 leading-relaxed">
-                    {isKm
-                      ? 'សម្រាប់ការទូទាត់អន្តរជាតិ (ក្រៅប្រទេសឬនៅកូរ៉េ) អ្នកអាចបង់ជាប្រាក់ដុល្លារ ($25.00) តាមរយៈ ABA PayWay ដែលទទួលស្គាល់កាត Visa, MasterCard, JCB, UnionPay គ្រប់ប្រទេស ដោយលុយចូលគណនី ABA Bank របស់ម្ចាស់កម្មវិធីផ្ទាល់។'
-                      : 'International payments ($25.00 USD) are supported directly via ABA PayWay with Visa, MasterCard, JCB, and UnionPay.'}
-                  </p>
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                  <a
-                    href={paywayUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="py-3.5 px-4 rounded-2xl bg-[#004f80] hover:bg-[#003d63] text-white font-extrabold text-xs sm:text-sm shadow-md flex items-center justify-center gap-2"
-                  >
-                    <CreditCard className="w-4 h-4" />
-                    <span>{isKm ? 'បើក ABA PayWay ($25.00)' : 'Open ABA PayWay ($25.00)'}</span>
-                    <ExternalLink className="w-3.5 h-3.5" />
-                  </a>
-
-                  <button
-                    type="button"
                     onClick={() => setActiveTab('khqr')}
-                    className="py-3.5 px-4 rounded-2xl bg-slate-100 hover:bg-slate-200 text-slate-900 font-bold text-xs sm:text-sm border border-slate-300 flex items-center justify-center gap-2 cursor-pointer"
+                    className="px-4 py-3.5 rounded-2xl bg-sky-50 hover:bg-sky-100 text-[#004f80] font-bold text-xs border border-sky-200 cursor-pointer"
                   >
-                    <QrCode className="w-4 h-4 text-[#004f80]" />
-                    <span>{isKm ? 'ស្កេន ABA QR (សុពលភាព ១៥ នាទី)' : 'Scan 15m ABA QR'}</span>
+                    {isKm ? 'បង់តាម ABA QR' : 'ABA QR'}
                   </button>
                 </div>
               </div>
