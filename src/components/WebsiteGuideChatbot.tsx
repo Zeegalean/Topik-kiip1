@@ -17,6 +17,7 @@ export type NavActionId =
   | 'step3'
   | 'step4'
   | 'guide'
+  | 'about'
   | 'socinet'
   | 'payment'
   | 'language'
@@ -31,7 +32,7 @@ interface ChatMessage {
 
 interface WebsiteGuideChatbotProps {
   lang: Language;
-  activeTab: 'flow' | 'guide';
+  activeTab: 'flow' | 'guide' | 'about';
   currentStep: number;
   isStep1Ready: boolean;
   missingStep1Items: string[];
@@ -45,6 +46,7 @@ const VALID_NAV_ACTIONS = new Set<NavActionId>([
   'step3',
   'step4',
   'guide',
+  'about',
   'socinet',
   'payment',
   'language',
@@ -99,6 +101,7 @@ function getUiCopy(lang: Language) {
         step3: 'ទៅជំហានទី ៣ (មើល PDF)',
         step4: 'ទៅជំហានទី ៤ (ផ្ញើអ៊ីមែល)',
         guide: 'បើកមគ្គុទ្ទេសក៍ TOPIK → KIIP',
+        about: 'មើលទំព័រ About Me & ទំនាក់ទំនង',
         socinet: 'មើលសេចក្តីណែនាំ Socinet',
         payment: 'បើកផ្ទាំងដោះសោ / Redeem Code',
         language: 'ប្តូរភាសា (៥០+ ភាសា)',
@@ -134,6 +137,7 @@ function getUiCopy(lang: Language) {
         step3: '3단계로 이동 (PDF 미리보기)',
         step4: '4단계로 이동 (이메일 제출)',
         guide: 'TOPIK → KIIP 가이드 열기',
+        about: 'About Me / 연락처 보기',
         socinet: '사회통합정보망 안내 보기',
         payment: '잠금해제 / 코드 입력 열기',
         language: '언어 변경 (50+ 언어)',
@@ -168,6 +172,7 @@ function getUiCopy(lang: Language) {
       step3: 'Go to Step 3 (PDF Preview)',
       step4: 'Go to Step 4 (Send Email)',
       guide: 'Open TOPIK → KIIP Guide',
+      about: 'Open About Me & Contact',
       socinet: 'View Socinet Notice',
       payment: 'Open Unlock / Redeem Code',
       language: 'Switch Language (50+)',
@@ -430,7 +435,13 @@ export const WebsiteGuideChatbot: React.FC<WebsiteGuideChatbotProps> = ({
   };
 
   const statusLine =
-    activeTab === 'guide'
+    activeTab === 'about'
+      ? lang === 'km'
+        ? 'កំពុងមើលទំព័រ About Me'
+        : lang === 'ko'
+        ? 'About Me / 연락처 보는 중'
+        : 'Viewing About Me'
+      : activeTab === 'guide'
       ? copy.subtitleGuide
       : copy.subtitleStep(currentStep, missingStep1Items.length);
 

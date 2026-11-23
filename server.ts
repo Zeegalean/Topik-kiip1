@@ -2422,7 +2422,7 @@ function buildWebsiteGuideSystemInstruction(ctx: {
     '- Keep responses concise, structured, friendly, and directly actionable (short paragraphs or crisp bullet points).',
     '',
     'LIVE USER SESSION CONTEXT:',
-    `- Current View: ${ctx.activeTab === 'guide' ? 'TOPIK-to-KIIP Official Guide tab' : `Application Workflow — Step ${ctx.currentStep} of 4`}`,
+    `- Current View: ${ctx.activeTab === 'about' ? 'About Me & Contact page' : ctx.activeTab === 'guide' ? 'TOPIK-to-KIIP Official Guide tab' : `Application Workflow — Step ${ctx.currentStep} of 4`}`,
     `- Step 1 Mandatory Checklist Ready: ${ctx.isStep1Ready ? 'Yes (Steps 2 & 3 unlocked)' : 'No'}`,
     `- Missing Step 1 Items: ${missingSummary}`,
     `- PDF/Step 4 Unlock Status: ${ctx.isPaid ? 'Unlocked (Watermark removed & Step 4 enabled)' : 'Locked (Requires Korea Bank transfer receipt, Telegram bot code, or Redeem/Promo code in Step 3)'}`,
@@ -2443,7 +2443,8 @@ function buildWebsiteGuideSystemInstruction(ctx: {
     '   - Use the Telegram bot auto-unlock receipt flow, or',
     '   - Enter a valid Redeem Code / Center Promo Code.',
     '5. Step 4 — Immigration Center Email Submission: Matches the applicant region/address to the jurisdiction Immigration / KIIP Operation Center email (출입국·외국인청 / 사회통합운영기관) and prepares the email with ready-to-paste subject & body so the user can attach their merged PDF and send.',
-    '6. Extra Portal Tools: 50+ Language Selector in the top bar, Socinet Account Notice popup, Background Wallpaper Settings, and automatic draft saving.',
+    '6. About Me & Contact Page: Introduces the portal creator (Eang Veasna), explains the 1-minute private PDF workflow, and provides direct channels to send payment screenshots for fast Unlock / Redeem Code delivery: Facebook Page (https://www.facebook.com/eang.veasna.667/) and KakaoTalk ID: 9111veasna.',
+    '7. Extra Portal Tools: 50+ Language Selector in the top bar, Socinet Account Notice popup, Background Wallpaper Settings, and automatic draft saving.',
     '',
     'INTERACTIVE NAVIGATION SHORTCUTS:',
     'When guiding the user to open a specific step or dialog on this website, you may append up to 2 action tags on a new line at the very end of your reply using ONLY these exact tokens:',
@@ -2452,6 +2453,7 @@ function buildWebsiteGuideSystemInstruction(ctx: {
     '  [[NAV:step3]] — Jump to Step 3 (PDF Preview & Download)',
     '  [[NAV:step4]] — Jump to Step 4 (Send Email to Immigration)',
     '  [[NAV:guide]] — Open TOPIK → KIIP Official Guide tab',
+    '  [[NAV:about]] — Open About Me & Contact page (Facebook / KakaoTalk)',
     '  [[NAV:socinet]] — Open Socinet ID/Password Notice',
     '  [[NAV:payment]] — Open Unlock / Redeem Code dialog',
     '  [[NAV:language]] — Open 50+ Language Selector',
@@ -2500,7 +2502,7 @@ app.post('/api/chat-guide', async (req, res) => {
   const rawCtx = req.body?.context && typeof req.body.context === 'object' ? req.body.context : {};
   const ctx = {
     lang: String(rawCtx.lang || 'km').slice(0, 12),
-    activeTab: rawCtx.activeTab === 'guide' ? 'guide' : 'flow',
+    activeTab: rawCtx.activeTab === 'about' ? 'about' : rawCtx.activeTab === 'guide' ? 'guide' : 'flow',
     currentStep: Math.min(4, Math.max(1, Number(rawCtx.currentStep) || 1)),
     isStep1Ready: Boolean(rawCtx.isStep1Ready),
     missingItems: Array.isArray(rawCtx.missingItems)

@@ -22,6 +22,7 @@ import { AdminAuthModal } from './components/AdminAuthModal';
 import { AdminDashboard } from './components/AdminDashboard';
 import { VisitorStatsCounter } from './components/VisitorStatsCounter';
 import { WebsiteGuideChatbot, NavActionId } from './components/WebsiteGuideChatbot';
+import { AboutMePage } from './components/AboutMePage';
 import { getTranslation } from './utils/translations';
 import { saveFormDraft, isFormDataWorthSaving } from './utils/draftStorage';
 import { auth } from './utils/firebase';
@@ -118,7 +119,7 @@ export default function App() {
 
   // Workflow navigation
   const [currentStep, setCurrentStep] = useState<number>(1);
-  const [activeTab, setActiveTab] = useState<'flow' | 'guide'>('flow');
+  const [activeTab, setActiveTab] = useState<'flow' | 'guide' | 'about'>('flow');
 
   // Background Wallpaper State (Always defaults to the user's provided background image)
   const [bgImage, setBgImage] = useState<string | null>(DEFAULT_BG_URL);
@@ -283,6 +284,10 @@ export default function App() {
 
   const handleGuideNavAction = (action: NavActionId) => {
     switch (action) {
+      case 'about':
+        setActiveTab('about');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        break;
       case 'guide':
         setActiveTab('guide');
         window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -393,7 +398,16 @@ export default function App() {
 
       {/* Main Container */}
       <main className="flex-1 max-w-4xl w-full mx-auto px-3 sm:px-6 py-4 sm:py-6 relative z-10 print-main-container">
-        {activeTab === 'guide' ? (
+        {activeTab === 'about' ? (
+          <AboutMePage
+            lang={lang}
+            onStartApplication={() => {
+              setActiveTab('flow');
+              setCurrentStep(1);
+            }}
+            onOpenPayment={() => setIsPaymentModalOpen(true)}
+          />
+        ) : activeTab === 'guide' ? (
           <TopikKiipGuide
             lang={lang}
             onStartApplication={() => {
@@ -574,6 +588,17 @@ export default function App() {
             <VisitorStatsCounter lang={lang} />
           </div>
           <div className="flex items-center gap-3 text-slate-400 text-[11px]">
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('about');
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
+              className="text-slate-600 hover:text-indigo-600 font-medium transition-colors cursor-pointer"
+            >
+              {lang === 'km' ? 'អំពីខ្ញុំ (About Me)' : lang === 'ko' ? '소개 (About Me)' : 'About Me'}
+            </button>
+            <span>·</span>
             <span>{t.footerIntegration}</span>
             <span>·</span>
             <span>{t.footerSupport}</span>

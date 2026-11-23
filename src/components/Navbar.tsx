@@ -16,6 +16,7 @@ import {
   LogIn, 
   LogOut,
   UserCheck,
+  User,
   Image as ImageIcon,
   Lock,
   CheckCircle
@@ -32,8 +33,8 @@ interface NavbarProps {
   onLoadSample: () => void;
   onTestDownload?: () => void;
   onOpenBgSettings?: () => void;
-  activeTab: 'flow' | 'guide';
-  setActiveTab: (tab: 'flow' | 'guide') => void;
+  activeTab: 'flow' | 'guide' | 'about';
+  setActiveTab: (tab: 'flow' | 'guide' | 'about') => void;
   isPaid?: boolean;
   onOpenPayment?: () => void;
   onOpenSocinetNotice?: () => void;
@@ -104,7 +105,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             {/* Guide Toggle */}
             <button
               onClick={() => setActiveTab(activeTab === 'guide' ? 'flow' : 'guide')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-colors ${
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                 activeTab === 'guide'
                   ? 'bg-amber-100 text-amber-900 border border-amber-300'
                   : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
@@ -113,6 +114,20 @@ export const Navbar: React.FC<NavbarProps> = ({
               <BookOpen className="w-4 h-4 text-amber-600" />
               <span className="hidden sm:inline">{t.topikKiipGuide}</span>
               <span className="sm:hidden">Guide</span>
+            </button>
+
+            {/* About Me Toggle */}
+            <button
+              onClick={() => setActiveTab(activeTab === 'about' ? 'flow' : 'about')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+                activeTab === 'about'
+                  ? 'bg-indigo-100 text-indigo-900 border border-indigo-300'
+                  : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+              }`}
+            >
+              <User className="w-4 h-4 text-indigo-600" />
+              <span className="hidden sm:inline">{lang === 'km' ? 'អំពីខ្ញុំ' : lang === 'ko' ? '소개' : 'About Me'}</span>
+              <span className="sm:hidden">{lang === 'km' ? 'អំពីខ្ញុំ' : 'About'}</span>
             </button>
 
             {/* Socinet Notice Button */}
