@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from "react";
 import { Shield, Lock, User, X, AlertCircle, CheckCircle2, RefreshCw } from "lucide-react";
 import { Language } from "../types";
+import { auth, googleProvider } from "../utils/firebase";
+import { signInWithPopup } from "firebase/auth";
 
 interface AdminAuthModalProps {
   isOpen: boolean;
@@ -22,6 +24,7 @@ export const AdminAuthModal: React.FC<AdminAuthModalProps> = ({
   const [needsSetup, setNeedsSetup] = useState<boolean>(false);
   const [checkingStatus, setCheckingStatus] = useState<boolean>(false);
   const [submitting, setSubmitting] = useState<boolean>(false);
+  const [googleSubmitting, setGoogleSubmitting] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   useEffect(() => {
@@ -98,6 +101,42 @@ export const AdminAuthModal: React.FC<AdminAuthModalProps> = ({
       setErrorMsg(isKm ? "មិនអាចភ្ជាប់ទៅម៉ាស៊ីនមេផ្ទៀងផ្ទាត់បានទេ។" : "Cannot connect to authentication server.");
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const handleGoogleAdminLogin = async () => {
+    setErrorMsg(null);
+    setGoogleSubmitting(true);
+    try {
+      const cred = await signInWithPopup(auth, googleProvider);
+      const idToken = await cred.user.getIdToken(true);
+      const resp = await fetch("/api/admin/login-google", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idToken }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.ok && data?.success && data?.token) {
+        onSuccess({ token: data.token, username: data.username || cred.user.email || "Admin" });
+        onClose();
+      } else {
+        setErrorMsg(
+          data?.error ||
+            (isKm
+              ? "គណនី Google នេះមិនមែនជា Admin ទេ! សូមប្រើ zeekhmerads@gmail.com"
+              : "This Google account is not authorized as root admin.")
+        );
+      }
+    } catch (err: any) {
+      if (err?.code !== "auth/popup-closed-by-user") {
+        setErrorMsg(
+          isKm
+            ? "មិនអាចចូលដោយ Google Admin បានទេ។ សូមអនុញ្ញាត Popup ហើយព្យាយាមម្តងទៀត។"
+            : err?.message || "Google Admin sign-in failed."
+        );
+      }
+    } finally {
+      setGoogleSubmitting(false);
     }
   };
 
@@ -241,7 +280,7 @@ export const AdminAuthModal: React.FC<AdminAuthModalProps> = ({
                 </button>
                 <button
                   type="submit"
-                  disabled={submitting}
+                  disabled={submitting || googleSubmitting}
                   className="px-5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold shadow-md transition-all cursor-pointer disabled:opacity-50 inline-flex items-center gap-1.5"
                 >
                   {submitting && <RefreshCw className="w-3.5 h-3.5 animate-spin" />}
@@ -253,6 +292,33 @@ export const AdminAuthModal: React.FC<AdminAuthModalProps> = ({
                       : isKm
                       ? "ចូល Admin Dashboard"
                       : "Sign In"}
+                  </span>
+                </button>
+              </div>
+
+              {/* Google Root Admin Sign-In / Forgot Password Recovery */}
+              <div className="pt-3 border-t border-slate-100 space-y-2">
+                <p className="text-[11px] text-slate-500 text-center">
+                  {isKm ? "ភ្លេចពាក្យសម្ងាត់? ចូលភ្លាមៗដោយគណនី Google Admin" : "Forgot password? Sign in with Google Admin"}
+                </p>
+                <button
+                  type="button"
+                  disabled={submitting || googleSubmitting}
+                  onClick={handleGoogleAdminLogin}
+                  className="w-full py-2.5 px-3 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-800 font-bold text-xs flex items-center justify-center gap-2 transition-colors cursor-pointer disabled:opacity-50"
+                >
+                  {googleSubmitting ? (
+                    <RefreshCw className="w-4 h-4 animate-spin text-indigo-600" />
+                  ) : (
+                    <svg className="w-4 h-4" viewBox="0 0 24 24">
+                      <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" />
+                      <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" />
+                      <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z" />
+                      <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z" />
+                    </svg>
+                  )}
+                  <span>
+                    {isKm ? "ចូលដោយ Google Admin (zeekhmerads@gmail.com)" : "Sign in with Google Admin"}
                   </span>
                 </button>
               </div>

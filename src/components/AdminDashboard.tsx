@@ -18,6 +18,7 @@ import {
   CheckCircle2,
   Database,
   Send,
+  KeyRound,
 } from 'lucide-react';
 import { Language } from '../types';
 import {
@@ -39,6 +40,7 @@ import {
 } from 'firebase/firestore';
 import { LiveVisitorsMarquee, LiveVisitorsPayload } from './LiveVisitorsMarquee';
 import { RedeemDatabasePanel } from './RedeemDatabasePanel';
+import { AdminAccountsPanel } from './AdminAccountsPanel';
 
 interface AdminDashboardProps {
   isOpen: boolean;
@@ -125,7 +127,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'overview' | 'live' | 'redeemdb' | 'promos' | 'centers' | 'payments'>('overview');
+  const [activeTab, setActiveTab] = useState<'overview' | 'live' | 'redeemdb' | 'accounts' | 'promos' | 'centers' | 'payments'>('overview');
 
   // Real Data State (initialized strictly empty / 0 — zero fake or mock data)
   const [loadingData, setLoadingData] = useState(false);
@@ -719,6 +721,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   >
                     <Database className="w-4 h-4 shrink-0" />
                     <span>{isKm ? 'Redeem DB & Sheets' : 'Redeem DB & Sheets'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('accounts')}
+                    className={`flex items-center gap-2.5 px-3.5 py-2.5 rounded-xl text-xs sm:text-sm font-bold transition-all text-left cursor-pointer whitespace-nowrap ${
+                      activeTab === 'accounts' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-600 hover:bg-slate-200/60'
+                    }`}
+                  >
+                    <KeyRound className="w-4 h-4 shrink-0" />
+                    <span>{isKm ? 'គណនី Admin & បុគ្គលិក' : 'Admin & Staff'}</span>
                   </button>
 
                   <button
@@ -1345,6 +1358,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 {/* TAB: REDEEM CODE DATABASE & GOOGLE SHEETS */}
                 {activeTab === 'redeemdb' && (
                   <RedeemDatabasePanel adminToken={adminToken} lang={lang} />
+                )}
+
+                {/* TAB: ADMIN & STAFF ACCOUNTS (ROOT ADMIN ONLY) */}
+                {activeTab === 'accounts' && (
+                  <AdminAccountsPanel adminToken={adminToken} lang={lang} />
                 )}
               </div>
             </div>

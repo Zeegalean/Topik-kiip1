@@ -18,7 +18,14 @@ import {
   updateRedeemCodeStatus,
   deleteRedeemCode,
   syncRedeemCodesFromGoogleSheet,
+  listAdminAccounts,
+  createOrUpdateAdminAccount,
+  verifyDbAdminLogin,
+  setAdminAccountActive,
+  updateAdminAccountPassword,
+  deleteAdminAccount,
   type RedeemCodeStatus,
+  type AdminAccountRole,
 } from './src/server/redeemDb.ts';
 
 dotenv.config();
@@ -1093,11 +1100,11 @@ function safeEqualStrings(a: string, b: string): boolean {
   return crypto.timingSafeEqual(bufA, bufB);
 }
 
-function issueAdminBearerToken(username: string): string {
+function issueAdminBearerToken(username: string, role: AdminAccountRole = 'root_admin'): string {
   const payload = Buffer.from(
     JSON.stringify({
       sub: username,
-      role: 'admin',
+      role,
       iat: Date.now(),
       exp: Date.now() + ADMIN_SESSION_TTL_MS,
       nonce: crypto.randomBytes(12).toString('hex'),
@@ -1110,7 +1117,7 @@ function issueAdminBearerToken(username: string): string {
   return `${payload}.${sig}`;
 }
 
-function verifyAdminBearerToken(token: string): { sub: string; role: string } | null {
+function verifyAdminBearerToken(token: string): { sub: string; role: AdminAccountRole } | null {
   if (!token || revokedAdminTokens.has(token)) return null;
   const parts = token.split('.');
   if (parts.length !== 2) return null;
@@ -1122,10 +1129,15 @@ function verifyAdminBearerToken(token: string): { sub: string; role: string } | 
   if (!safeEqualStrings(sig, expectedSig)) return null;
   try {
     const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
-    if (!parsed || parsed.role !== 'admin' || typeof parsed.exp !== 'number' || Date.now() > parsed.exp) {
+    if (!parsed || typeof parsed.exp !== 'number' || Date.now() > parsed.exp) {
       return null;
     }
-    return { sub: String(parsed.sub || 'Admin'), role: 'admin' };
+    const rawRole = String(parsed.role || '');
+    if (rawRole !== 'root_admin' && rawRole !== 'manager' && rawRole !== 'admin') {
+      return null;
+    }
+    const normalizedRole: AdminAccountRole = rawRole === 'manager' ? 'manager' : 'root_admin';
+    return { sub: String(parsed.sub || 'Admin'), role: normalizedRole };
   } catch {
     return null;
   }
@@ -1142,24 +1154,43 @@ function requireAdminAuth(req: express.Request, res: express.Response, next: exp
   next();
 }
 
+function requireRootAdminAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+  const authHeader = String(req.headers.authorization || '');
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  const verified = verifyAdminBearerToken(token);
+  if (!verified) {
+    return res.status(401).json({ success: false, error: 'Unauthorized admin session' });
+  }
+  if (verified.role !== 'root_admin') {
+    return res.status(403).json({
+      success: false,
+      error: 'សិទ្ធិត្រូវបានបដិសេធ! មានតែ Root Admin ប៉ុណ្ណោះដែលអាចគ្រប់គ្រងគណនី Admin/Staff បាន។',
+    });
+  }
+  (req as any).adminSession = verified;
+  next();
+}
+
 app.get('/api/admin/auth-status', (req, res) => {
   const hasEnvCredentials = Boolean(process.env.ADMIN_PASSWORD && process.env.ADMIN_PASSWORD.trim().length > 0);
+  const hasDbAccounts = listAdminAccounts().length > 0;
   const authHeader = String(req.headers.authorization || '');
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
   const session = verifyAdminBearerToken(token);
   return res.json({
     success: true,
-    needsSetup: !hasEnvCredentials && !claimedAdmin,
+    needsSetup: !hasEnvCredentials && !claimedAdmin && !hasDbAccounts,
     configuredViaEnv: hasEnvCredentials,
     authenticated: Boolean(session),
     username: session?.sub || null,
+    role: session?.role || null,
   });
 });
 
-// One-time first-run admin setup (locked once claimed or whenever ADMIN_PASSWORD env var is set)
+// One-time first-run admin setup (locked once claimed, DB accounts exist, or ADMIN_PASSWORD env var is set)
 app.post('/api/admin/bootstrap', (req, res) => {
   const hasEnvCredentials = Boolean(process.env.ADMIN_PASSWORD && process.env.ADMIN_PASSWORD.trim().length > 0);
-  if (hasEnvCredentials || claimedAdmin) {
+  if (hasEnvCredentials || claimedAdmin || listAdminAccounts().length > 0) {
     return res.status(403).json({
       success: false,
       error: 'Admin credentials are already configured.',
@@ -1190,11 +1221,12 @@ app.post('/api/admin/bootstrap', (req, res) => {
     claimedAt: Date.now(),
   };
 
-  const token = issueAdminBearerToken(username);
+  const token = issueAdminBearerToken(username, 'root_admin');
   return res.json({
     success: true,
     token,
     username,
+    role: 'root_admin',
   });
 });
 
@@ -1209,22 +1241,46 @@ app.post('/api/admin/login', (req, res) => {
     });
   }
 
+  // 1. Check persistent SQLite admin & delegated staff/manager accounts first
+  const dbAuth = verifyDbAdminLogin(username, password);
+  if (dbAuth.ok && dbAuth.username) {
+    const role: AdminAccountRole = dbAuth.role === 'root_admin' ? 'root_admin' : 'manager';
+    const token = issueAdminBearerToken(dbAuth.username, role);
+    return res.json({ success: true, token, username: dbAuth.username, role });
+  }
+
+  // 2. Check configured environment secret (ADMIN_USERNAME / ADMIN_PASSWORD)
   const envPass = process.env.ADMIN_PASSWORD?.trim();
   if (envPass) {
     const envUser = (process.env.ADMIN_USERNAME || 'Admin').trim();
     const userMatch = safeEqualStrings(username.toLowerCase(), envUser.toLowerCase());
     const passMatch = safeEqualStrings(password, envPass);
-    if (!userMatch || !passMatch) {
-      return res.status(401).json({
-        success: false,
-        error: 'Admin ID ឬ Password មិនត្រឹមត្រូវ!',
-      });
+    if (userMatch && passMatch) {
+      const token = issueAdminBearerToken(envUser, 'root_admin');
+      return res.json({ success: true, token, username: envUser, role: 'root_admin' });
     }
-    const token = issueAdminBearerToken(envUser);
-    return res.json({ success: true, token, username: envUser });
+    return res.status(401).json({
+      success: false,
+      error: 'Admin ID ឬ Password មិនត្រឹមត្រូវ!',
+    });
   }
 
-  if (!claimedAdmin) {
+  // 3. Check in-memory first-run claimed admin (if any)
+  if (claimedAdmin) {
+    const userMatch = safeEqualStrings(username.toLowerCase(), claimedAdmin.username.toLowerCase());
+    const candidateHash = hashPasswordScrypt(password, claimedAdmin.salt);
+    const passMatch = safeEqualStrings(candidateHash, claimedAdmin.passwordHash);
+    if (userMatch && passMatch) {
+      const token = issueAdminBearerToken(claimedAdmin.username, 'root_admin');
+      return res.json({ success: true, token, username: claimedAdmin.username, role: 'root_admin' });
+    }
+    return res.status(401).json({
+      success: false,
+      error: 'Admin ID ឬ Password មិនត្រឹមត្រូវ!',
+    });
+  }
+
+  if (listAdminAccounts().length === 0) {
     return res.status(409).json({
       success: false,
       needsSetup: true,
@@ -1232,19 +1288,10 @@ app.post('/api/admin/login', (req, res) => {
     });
   }
 
-  const userMatch = safeEqualStrings(username.toLowerCase(), claimedAdmin.username.toLowerCase());
-  const candidateHash = hashPasswordScrypt(password, claimedAdmin.salt);
-  const passMatch = safeEqualStrings(candidateHash, claimedAdmin.passwordHash);
-
-  if (!userMatch || !passMatch) {
-    return res.status(401).json({
-      success: false,
-      error: 'Admin ID ឬ Password មិនត្រឹមត្រូវ!',
-    });
-  }
-
-  const token = issueAdminBearerToken(claimedAdmin.username);
-  return res.json({ success: true, token, username: claimedAdmin.username });
+  return res.status(401).json({
+    success: false,
+    error: 'Admin ID ឬ Password មិនត្រឹមត្រូវ!',
+  });
 });
 
 app.post('/api/admin/logout', (req, res) => {
@@ -1252,6 +1299,196 @@ app.post('/api/admin/logout', (req, res) => {
   const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
   if (token) {
     revokedAdminTokens.add(token);
+  }
+  return res.json({ success: true });
+});
+
+// Root Admin Google Sign-In Verification (Verifies Firebase ID Token RS256 signature via Google JWKS)
+const ROOT_ADMIN_EMAIL = 'zeekhmerads@gmail.com';
+const FIREBASE_PROJECT_ID = (() => {
+  try {
+    const raw = fs.readFileSync(path.join(__dirname, 'firebase-applet-config.json'), 'utf8');
+    return String(JSON.parse(raw)?.projectId || '').trim();
+  } catch {
+    return '';
+  }
+})();
+
+let cachedGoogleJwks: { keys: any[]; fetchedAt: number } | null = null;
+
+async function fetchGoogleSecureTokenJwk(kid: string): Promise<any | null> {
+  const now = Date.now();
+  if (!cachedGoogleJwks || now - cachedGoogleJwks.fetchedAt > 60 * 60 * 1000) {
+    const resp = await fetch(
+      'https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com',
+      { signal: AbortSignal.timeout(8000) }
+    );
+    if (!resp.ok) return null;
+    const json = (await resp.json()) as { keys?: any[] };
+    cachedGoogleJwks = { keys: Array.isArray(json.keys) ? json.keys : [], fetchedAt: now };
+  }
+  let match = cachedGoogleJwks.keys.find((k) => k?.kid === kid);
+  if (!match) {
+    // Refresh once on key rotation miss
+    const resp = await fetch(
+      'https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com',
+      { signal: AbortSignal.timeout(8000) }
+    );
+    if (resp.ok) {
+      const json = (await resp.json()) as { keys?: any[] };
+      cachedGoogleJwks = { keys: Array.isArray(json.keys) ? json.keys : [], fetchedAt: Date.now() };
+      match = cachedGoogleJwks.keys.find((k) => k?.kid === kid);
+    }
+  }
+  return match || null;
+}
+
+async function verifyFirebaseAdminIdToken(
+  idToken: string
+): Promise<{ email: string; uid: string } | null> {
+  if (!FIREBASE_PROJECT_ID || typeof idToken !== 'string') return null;
+  const parts = idToken.split('.');
+  if (parts.length !== 3) return null;
+
+  const [headerB64, payloadB64, sigB64] = parts;
+  let header: any;
+  let payload: any;
+  try {
+    header = JSON.parse(Buffer.from(headerB64, 'base64url').toString('utf8'));
+    payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8'));
+  } catch {
+    return null;
+  }
+
+  if (header?.alg !== 'RS256' || typeof header?.kid !== 'string' || !header.kid) {
+    return null;
+  }
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (
+    payload?.aud !== FIREBASE_PROJECT_ID ||
+    payload?.iss !== `https://securetoken.google.com/${FIREBASE_PROJECT_ID}` ||
+    typeof payload?.sub !== 'string' ||
+    !payload.sub ||
+    typeof payload?.exp !== 'number' ||
+    payload.exp <= nowSec ||
+    typeof payload?.iat !== 'number' ||
+    payload.iat > nowSec + 300 ||
+    payload?.email_verified !== true ||
+    typeof payload?.email !== 'string' ||
+    payload.email.toLowerCase() !== ROOT_ADMIN_EMAIL
+  ) {
+    return null;
+  }
+
+  const jwk = await fetchGoogleSecureTokenJwk(header.kid);
+  if (!jwk) return null;
+
+  const pubKey = crypto.createPublicKey({ key: jwk, format: 'jwk' });
+  const verified = crypto.verify(
+    'RSA-SHA256',
+    Buffer.from(`${headerB64}.${payloadB64}`, 'utf8'),
+    pubKey,
+    Buffer.from(sigB64, 'base64url')
+  );
+  if (!verified) return null;
+
+  return { email: payload.email.toLowerCase(), uid: payload.sub };
+}
+
+app.post('/api/admin/login-google', async (req, res) => {
+  try {
+    const idToken = String(req.body?.idToken || '').trim();
+    if (!idToken || idToken.length > 8192) {
+      return res.status(400).json({ success: false, error: 'Missing Firebase ID token.' });
+    }
+    const verified = await verifyFirebaseAdminIdToken(idToken);
+    if (!verified) {
+      return res.status(403).json({
+        success: false,
+        error: `សិទ្ធិត្រូវបានបដិសេធ! មានតែគណនី Google Admin (${ROOT_ADMIN_EMAIL}) ប៉ុណ្ណោះដែលអាចចូលបាន។`,
+      });
+    }
+    const token = issueAdminBearerToken(verified.email, 'root_admin');
+    return res.json({
+      success: true,
+      token,
+      username: verified.email,
+      role: 'root_admin',
+    });
+  } catch (err) {
+    console.error('[Admin Google Login] Verification error:', err);
+    return res.status(500).json({
+      success: false,
+      error: 'មានបញ្ហាផ្ទៀងផ្ទាត់គណនី Google Admin។ សូមព្យាយាមម្តងទៀត។',
+    });
+  }
+});
+
+// ============================================================================
+// ROOT-ADMIN-ONLY DELEGATED ADMIN & STAFF ACCOUNT MANAGEMENT
+// ============================================================================
+app.get('/api/admin/accounts', requireRootAdminAuth, (_req, res) => {
+  return res.json({
+    success: true,
+    accounts: listAdminAccounts(),
+  });
+});
+
+app.post('/api/admin/accounts', requireRootAdminAuth, (req, res) => {
+  const session = (req as any).adminSession as { sub: string; role: AdminAccountRole };
+  const username = String(req.body?.username || '').trim();
+  const displayName = String(req.body?.displayName || '').trim();
+  const password = String(req.body?.password || '');
+  const role: AdminAccountRole = req.body?.role === 'root_admin' ? 'root_admin' : 'manager';
+
+  const result = createOrUpdateAdminAccount({
+    username,
+    displayName,
+    password,
+    role,
+    createdBy: session?.sub || ROOT_ADMIN_EMAIL,
+  });
+
+  if (!result.ok) {
+    return res.status(400).json({ success: false, error: result.error || 'Invalid account data' });
+  }
+  return res.json({ success: true, account: result.account });
+});
+
+app.patch('/api/admin/accounts/:id/status', requireRootAdminAuth, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({ success: false, error: 'Invalid account ID' });
+  }
+  const updated = setAdminAccountActive(id, Boolean(req.body?.isActive));
+  if (!updated) {
+    return res.status(404).json({ success: false, error: 'Account not found' });
+  }
+  return res.json({ success: true });
+});
+
+app.patch('/api/admin/accounts/:id/password', requireRootAdminAuth, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({ success: false, error: 'Invalid account ID' });
+  }
+  const password = String(req.body?.password || '');
+  const result = updateAdminAccountPassword(id, password);
+  if (!result.ok) {
+    return res.status(400).json({ success: false, error: result.error || 'Failed to update password' });
+  }
+  return res.json({ success: true });
+});
+
+app.delete('/api/admin/accounts/:id', requireRootAdminAuth, (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({ success: false, error: 'Invalid account ID' });
+  }
+  const deleted = deleteAdminAccount(id);
+  if (!deleted) {
+    return res.status(404).json({ success: false, error: 'Account not found' });
   }
   return res.json({ success: true });
 });

@@ -77,6 +77,20 @@ export function getRedeemDb(): DatabaseSync {
     );
     CREATE INDEX IF NOT EXISTS idx_redeem_codes_status ON redeem_codes(status);
     CREATE INDEX IF NOT EXISTS idx_redeem_codes_code ON redeem_codes(code);
+
+    CREATE TABLE IF NOT EXISTS admin_accounts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      display_name TEXT NOT NULL DEFAULT '',
+      role TEXT NOT NULL DEFAULT 'manager' CHECK (role IN ('root_admin', 'manager')),
+      salt TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_by TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      last_login_at TEXT DEFAULT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_admin_accounts_username ON admin_accounts(username);
   `);
 
   dbInstance = db;
@@ -634,3 +648,195 @@ export async function syncRedeemCodesFromGoogleSheet(params?: {
     skipped,
   };
 }
+
+// ============================================================================
+// PERSISTENT ADMIN & STAFF ACCOUNTS (scrypt-hashed in SQLite)
+// ============================================================================
+export type AdminAccountRole = 'root_admin' | 'manager';
+
+export interface AdminAccountPublic {
+  id: number;
+  username: string;
+  display_name: string;
+  role: AdminAccountRole;
+  is_active: boolean;
+  created_by: string;
+  created_at: string;
+  last_login_at: string | null;
+}
+
+interface AdminAccountRow {
+  id: number;
+  username: string;
+  display_name: string;
+  role: AdminAccountRole;
+  salt: string;
+  password_hash: string;
+  is_active: number;
+  created_by: string;
+  created_at: string;
+  last_login_at: string | null;
+}
+
+function hashAdminPassword(password: string, salt: string): string {
+  return crypto.scryptSync(password, salt, 64).toString('hex');
+}
+
+function timingSafeHexEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a, 'utf8');
+  const bufB = Buffer.from(b, 'utf8');
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+export function listAdminAccounts(): AdminAccountPublic[] {
+  const db = getRedeemDb();
+  const rows = db
+    .prepare(
+      `SELECT id, username, display_name, role, is_active, created_by, created_at, last_login_at
+       FROM admin_accounts
+       ORDER BY id DESC`
+    )
+    .all() as unknown as Array<Omit<AdminAccountRow, 'salt' | 'password_hash'>>;
+
+  return rows.map((r) => ({
+    id: Number(r.id),
+    username: String(r.username),
+    display_name: String(r.display_name || ''),
+    role: r.role === 'root_admin' ? 'root_admin' : 'manager',
+    is_active: Boolean(r.is_active),
+    created_by: String(r.created_by || ''),
+    created_at: String(r.created_at || ''),
+    last_login_at: r.last_login_at ? String(r.last_login_at) : null,
+  }));
+}
+
+export function createOrUpdateAdminAccount(params: {
+  username: string;
+  password: string;
+  displayName?: string;
+  role?: AdminAccountRole;
+  createdBy: string;
+}): { ok: boolean; error?: string; account?: AdminAccountPublic } {
+  const username = String(params.username || '').trim();
+  const password = String(params.password || '');
+  const displayName = String(params.displayName || username).trim().slice(0, 80);
+  const role: AdminAccountRole = params.role === 'root_admin' ? 'root_admin' : 'manager';
+  const createdBy = String(params.createdBy || 'root_admin').trim().slice(0, 120);
+
+  if (username.length < 3 || username.length > 64 || !/^[a-zA-Z0-9._@-]+$/.test(username)) {
+    return { ok: false, error: 'Admin ID ត្រូវមាន 3–64 តួអក្សរ (អក្សរ លេខ . _ @ -)!' };
+  }
+  if (password.length < 6 || password.length > 128) {
+    return { ok: false, error: 'ពាក្យសម្ងាត់ត្រូវមានយ៉ាងតិច 6 តួអក្សរ!' };
+  }
+
+  const db = getRedeemDb();
+  const salt = crypto.randomBytes(16).toString('hex');
+  const passwordHash = hashAdminPassword(password, salt);
+  const nowIso = new Date().toISOString();
+
+  const existing = db
+    .prepare('SELECT id FROM admin_accounts WHERE username = ? COLLATE NOCASE')
+    .get(username) as { id: number } | undefined;
+
+  if (existing) {
+    db.prepare(
+      `UPDATE admin_accounts
+       SET display_name = ?, role = ?, salt = ?, password_hash = ?, is_active = 1
+       WHERE id = ?`
+    ).run(displayName, role, salt, passwordHash, existing.id);
+  } else {
+    db.prepare(
+      `INSERT INTO admin_accounts (username, display_name, role, salt, password_hash, is_active, created_by, created_at)
+       VALUES (?, ?, ?, ?, ?, 1, ?, ?)`
+    ).run(username, displayName, role, salt, passwordHash, createdBy, nowIso);
+  }
+
+  const row = db
+    .prepare(
+      `SELECT id, username, display_name, role, is_active, created_by, created_at, last_login_at
+       FROM admin_accounts WHERE username = ? COLLATE NOCASE`
+    )
+    .get(username) as unknown as Omit<AdminAccountRow, 'salt' | 'password_hash'>;
+
+  return {
+    ok: true,
+    account: {
+      id: Number(row.id),
+      username: String(row.username),
+      display_name: String(row.display_name || ''),
+      role: row.role === 'root_admin' ? 'root_admin' : 'manager',
+      is_active: Boolean(row.is_active),
+      created_by: String(row.created_by || ''),
+      created_at: String(row.created_at || ''),
+      last_login_at: row.last_login_at ? String(row.last_login_at) : null,
+    },
+  };
+}
+
+export function verifyDbAdminLogin(
+  username: string,
+  password: string
+): { ok: boolean; username?: string; role?: AdminAccountRole } {
+  const cleanUser = String(username || '').trim();
+  const cleanPass = String(password || '');
+  if (!cleanUser || !cleanPass) return { ok: false };
+
+  const db = getRedeemDb();
+  const row = db
+    .prepare(
+      `SELECT id, username, display_name, role, salt, password_hash, is_active
+       FROM admin_accounts WHERE username = ? COLLATE NOCASE`
+    )
+    .get(cleanUser) as unknown as AdminAccountRow | undefined;
+
+  if (!row || !row.is_active) return { ok: false };
+
+  const candidateHash = hashAdminPassword(cleanPass, row.salt);
+  if (!timingSafeHexEqual(candidateHash, row.password_hash)) {
+    return { ok: false };
+  }
+
+  db.prepare('UPDATE admin_accounts SET last_login_at = ? WHERE id = ?').run(
+    new Date().toISOString(),
+    row.id
+  );
+
+  return {
+    ok: true,
+    username: row.username,
+    role: row.role === 'root_admin' ? 'root_admin' : 'manager',
+  };
+}
+
+export function setAdminAccountActive(id: number, isActive: boolean): boolean {
+  const db = getRedeemDb();
+  const info = db
+    .prepare('UPDATE admin_accounts SET is_active = ? WHERE id = ?')
+    .run(isActive ? 1 : 0, Math.floor(id));
+  return Number(info.changes) > 0;
+}
+
+export function updateAdminAccountPassword(id: number, newPassword: string): { ok: boolean; error?: string } {
+  if (newPassword.length < 6 || newPassword.length > 128) {
+    return { ok: false, error: 'ពាក្យសម្ងាត់ថ្មីត្រូវមានយ៉ាងតិច 6 តួអក្សរ!' };
+  }
+  const db = getRedeemDb();
+  const salt = crypto.randomBytes(16).toString('hex');
+  const passwordHash = hashAdminPassword(newPassword, salt);
+  const info = db
+    .prepare('UPDATE admin_accounts SET salt = ?, password_hash = ? WHERE id = ?')
+    .run(salt, passwordHash, Math.floor(id));
+  if (Number(info.changes) === 0) {
+    return { ok: false, error: 'រកមិនឃើញគណនី Admin នេះទេ!' };
+  }
+  return { ok: true };
+}
+
+export function deleteAdminAccount(id: number): boolean {
+  const db = getRedeemDb();
+  const info = db.prepare('DELETE FROM admin_accounts WHERE id = ?').run(Math.floor(id));
+  return Number(info.changes) > 0;
+}
+
