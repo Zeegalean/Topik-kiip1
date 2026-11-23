@@ -10,7 +10,7 @@ import { fileURLToPath } from 'url';
 import {
   getRedeemDb,
   getRedeemCodeStats,
-  listRedeemCodes,
+  queryRedeemCodes,
   generateUnusedRedeemCodes,
   addCustomRedeemCodes,
   verifyAndBurnRedeemCode,
@@ -2277,12 +2277,27 @@ app.get('/api/admin/redeem-codes', requireAdminAuth, (req, res) => {
       rawStatus === 'Unused' || rawStatus === 'Used' || rawStatus === 'Revoked'
         ? rawStatus
         : 'all';
-    const codes = listRedeemCodes(filter, 500);
+    const search = String(req.query?.search || '').trim();
+    const page = Math.max(1, Number(req.query?.page) || 1);
+    const pageSize = Math.min(500, Math.max(10, Number(req.query?.pageSize) || 100));
+
+    const result = queryRedeemCodes({
+      statusFilter: filter,
+      search,
+      page,
+      pageSize,
+    });
     const stats = getRedeemCodeStats();
     return res.json({
       success: true,
       stats,
-      codes,
+      codes: result.codes,
+      pagination: {
+        page: result.page,
+        pageSize: result.pageSize,
+        totalMatched: result.totalMatched,
+        totalPages: result.totalPages,
+      },
     });
   } catch (err) {
     console.error('[Admin RedeemDB] Read failed:', err);
@@ -2292,7 +2307,7 @@ app.get('/api/admin/redeem-codes', requireAdminAuth, (req, res) => {
 
 app.post('/api/admin/redeem-codes/generate', requireAdminAuth, (req, res) => {
   try {
-    const count = Math.min(100, Math.max(1, Number(req.body?.count) || 10));
+    const count = Math.min(500, Math.max(1, Number(req.body?.count) || 10));
     const prefix = String(req.body?.prefix || 'KIIP-26').trim();
     const note = String(req.body?.note || 'Admin Generated Batch').trim();
     const created = generateUnusedRedeemCodes(count, prefix, note);

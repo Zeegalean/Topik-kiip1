@@ -12,8 +12,129 @@ import {
   KeyRound,
   Ban,
   RotateCcw,
+  Upload,
+  Search,
+  ChevronLeft,
+  ChevronRight,
+  X,
 } from 'lucide-react';
 import { Language } from '../types';
+
+function parseCsvRowsClient(csvText: string): string[][] {
+  // Detect delimiter from first non-empty line (comma, semicolon, or tab)
+  const firstLine = csvText.split(/\r?\n/).find((l) => l.trim().length > 0) || '';
+  const delimiter =
+    firstLine.includes(',')
+      ? ','
+      : firstLine.includes('\t')
+      ? '\t'
+      : firstLine.includes(';')
+      ? ';'
+      : ',';
+
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < csvText.length; i++) {
+    const ch = csvText[i];
+    const next = csvText[i + 1];
+
+    if (inQuotes) {
+      if (ch === '"' && next === '"') {
+        cell += '"';
+        i++;
+      } else if (ch === '"') {
+        inQuotes = false;
+      } else {
+        cell += ch;
+      }
+    } else {
+      if (ch === '"') {
+        inQuotes = true;
+      } else if (ch === delimiter) {
+        row.push(cell.trim());
+        cell = '';
+      } else if (ch === '\r' && next === '\n') {
+        row.push(cell.trim());
+        rows.push(row);
+        row = [];
+        cell = '';
+        i++;
+      } else if (ch === '\n' || ch === '\r') {
+        row.push(cell.trim());
+        rows.push(row);
+        row = [];
+        cell = '';
+      } else {
+        cell += ch;
+      }
+    }
+  }
+  if (cell.length > 0 || row.length > 0) {
+    row.push(cell.trim());
+    rows.push(row);
+  }
+  return rows.filter((r) => r.some((v) => v.length > 0));
+}
+
+function extractCodesFromCsvText(rawText: string): string[] {
+  const cleanText = rawText.replace(/^\uFEFF/, '');
+  const parsedRows = parseCsvRowsClient(cleanText);
+  if (parsedRows.length === 0) return [];
+
+  const firstRowLower = parsedRows[0].map((c) => c.trim().toLowerCase());
+  const isCodeHeader = (c: string) =>
+    c.includes('code') ||
+    c.includes('redeem') ||
+    c.includes('voucher') ||
+    c.includes('កូដ') ||
+    c.includes('코드');
+  const isNonCodeHeader = (c: string) =>
+    c === 'no' ||
+    c === 'no.' ||
+    c === '#' ||
+    c === 'id' ||
+    c.includes('status') ||
+    c.includes('note') ||
+    c.includes('ស្ថានភាព') ||
+    c.includes('ល.រ');
+
+  const hasHeader = firstRowLower.some((c) => isCodeHeader(c) || isNonCodeHeader(c));
+  let codeCol = 0;
+
+  if (hasHeader) {
+    const foundCode = firstRowLower.findIndex(isCodeHeader);
+    if (foundCode >= 0) {
+      codeCol = foundCode;
+    } else if (parsedRows.length > 1 && parsedRows[1].length >= 2) {
+      const c0 = (parsedRows[1][0] || '').replace(/[^A-Za-z0-9_-]/g, '');
+      const c1 = (parsedRows[1][1] || '').replace(/[^A-Za-z0-9_-]/g, '');
+      if ((c0.length < 4 || /^\d+$/.test(c0)) && c1.length >= 4) {
+        codeCol = 1;
+      }
+    }
+  } else if (parsedRows[0].length >= 2) {
+    // Auto-detect if Col A is sequential row index (1, 2, 3...) and Col B holds the Redeem Codes
+    const c0 = (parsedRows[0][0] || '').replace(/[^A-Za-z0-9_-]/g, '');
+    const c1 = (parsedRows[0][1] || '').replace(/[^A-Za-z0-9_-]/g, '');
+    if ((c0.length < 4 || /^\d+$/.test(c0)) && c1.length >= 4) {
+      codeCol = 1;
+    }
+  }
+
+  const dataRows = hasHeader ? parsedRows.slice(1) : parsedRows;
+  const extracted: string[] = [];
+  for (const r of dataRows) {
+    const rawVal = (r[codeCol] || '').trim();
+    const cleaned = rawVal.toUpperCase().replace(/[^A-Z0-9_-]/g, '');
+    if (cleaned.length >= 4) {
+      extracted.push(cleaned);
+    }
+  }
+  return extracted;
+}
 
 interface RedeemCodeRow {
   id: number;
@@ -55,6 +176,16 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
     googleSheetConfigured: false,
   });
   const [statusFilter, setStatusFilter] = useState<'all' | 'Unused' | 'Used' | 'Revoked'>('all');
+  const [searchInput, setSearchInput] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(100);
+  const [pagination, setPagination] = useState({
+    page: 1,
+    pageSize: 100,
+    totalMatched: 0,
+    totalPages: 1,
+  });
   const [loading, setLoading] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
@@ -69,22 +200,42 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
   const [manualText, setManualText] = useState('');
   const [addingManual, setAddingManual] = useState(false);
 
-  // Google Sheets Sync Form
+  // Google Sheets Sync Form (accepts full URL or Sheet ID; Tab Name is optional)
   const [sheetId, setSheetId] = useState('');
-  const [sheetName, setSheetName] = useState('RedeemCodes');
+  const [sheetName, setSheetName] = useState('');
   const [syncingSheets, setSyncingSheets] = useState(false);
+
+  // Debounce search input
+  useEffect(() => {
+    const t = setTimeout(() => {
+      setDebouncedSearch(searchInput.trim());
+      setPage(1);
+    }, 250);
+    return () => clearTimeout(t);
+  }, [searchInput]);
 
   const fetchRedeemDb = useCallback(async () => {
     if (!adminToken) return;
     setLoading(true);
     try {
-      const resp = await fetch(`/api/admin/redeem-codes?status=${encodeURIComponent(statusFilter)}`, {
+      const qs = new URLSearchParams({
+        status: statusFilter,
+        page: String(page),
+        pageSize: String(pageSize),
+      });
+      if (debouncedSearch) {
+        qs.set('search', debouncedSearch);
+      }
+      const resp = await fetch(`/api/admin/redeem-codes?${qs.toString()}`, {
         headers: { Authorization: `Bearer ${adminToken}` },
       });
       const json = await resp.json();
       if (resp.ok && json?.success) {
         setRows(Array.isArray(json.codes) ? json.codes : []);
         if (json.stats) setStats(json.stats);
+        if (json.pagination) {
+          setPagination(json.pagination);
+        }
       } else {
         setFeedback({ type: 'error', text: json?.error || 'Failed to load redeem database' });
       }
@@ -93,7 +244,7 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
     } finally {
       setLoading(false);
     }
-  }, [adminToken, statusFilter, isKm]);
+  }, [adminToken, statusFilter, page, pageSize, debouncedSearch, isKm]);
 
   useEffect(() => {
     fetchRedeemDb();
@@ -180,7 +331,7 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
         },
         body: JSON.stringify({
           sheetId: sheetId.trim() || undefined,
-          sheetName: sheetName.trim() || 'RedeemCodes',
+          sheetName: sheetName.trim() || undefined,
         }),
       });
       const json = await resp.json();
@@ -189,7 +340,7 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
           type: 'success',
           text: isKm
             ? `✓ អានពី Google Sheets (${json.sheetName}) បាន ${json.rowsRead} ជួរ · បញ្ចូលថ្មី ${json.imported} កូដ · រំលង ${json.skipped}`
-            : `✓ Read ${json.rowsRead} rows from Google Sheet "${json.sheetName}" · Imported ${json.imported} new codes.`,
+            : `✓ Read ${json.rowsRead} rows from Google Sheet "${json.sheetName}" · Imported ${json.imported} new codes (skipped ${json.skipped}).`,
         });
         await fetchRedeemDb();
       } else {
@@ -197,6 +348,60 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
       }
     } catch {
       setFeedback({ type: 'error', text: 'Network error while reading Google Sheets' });
+    } finally {
+      setSyncingSheets(false);
+    }
+  };
+
+  const handleImportCsvFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || !adminToken) return;
+    setSyncingSheets(true);
+    setFeedback(null);
+    try {
+      const rawText = await file.text();
+      const codes = extractCodesFromCsvText(rawText);
+
+      if (codes.length === 0) {
+        setFeedback({
+          type: 'error',
+          text: isKm
+            ? 'មិនឃើញលេខកូដត្រឹមត្រូវក្នុងឯកសារ CSV ទេ (លេខកូដនីមួយៗត្រូវមានយ៉ាងតិច ៤ តួអក្សរ)។'
+            : 'No valid codes found in the uploaded CSV file (each code must be at least 4 characters).',
+        });
+        return;
+      }
+
+      const resp = await fetch('/api/admin/redeem-codes/add', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${adminToken}`,
+        },
+        body: JSON.stringify({
+          codes,
+          note: `CSV: ${file.name.slice(0, 60)}`,
+        }),
+      });
+      const json = await resp.json();
+      if (resp.ok && json?.success) {
+        const addedStr = Number(json.added || 0).toLocaleString();
+        const skippedStr = Number(json.skipped || 0).toLocaleString();
+        const parsedStr = codes.length.toLocaleString();
+        setFeedback({
+          type: 'success',
+          text: isKm
+            ? `✓ អានពី ${file.name} បាន ${parsedStr} ជួរ · បញ្ចូលថ្មី ${addedStr} កូដ (ស្ថានភាព 'Unused') · រំលងកូដជាន់គ្នា ${skippedStr}`
+            : `✓ Read ${parsedStr} codes from ${file.name} · Imported ${addedStr} new 'Unused' codes (skipped ${skippedStr} duplicates).`,
+        });
+        setPage(1);
+        await fetchRedeemDb();
+      } else {
+        setFeedback({ type: 'error', text: json?.error || 'CSV import failed' });
+      }
+    } catch {
+      setFeedback({ type: 'error', text: isKm ? 'មិនអាចអានឯកសារ CSV បានទេ។' : 'Failed to read CSV file.' });
     } finally {
       setSyncingSheets(false);
     }
@@ -254,7 +459,7 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
           <p className="text-[11px] font-bold text-slate-500 uppercase">
             {isKm ? 'លេខកូដសរុប (Total DB)' : 'Total Codes'}
           </p>
-          <p className="text-2xl font-black text-slate-900 mt-1 tabular-nums">{stats.total}</p>
+          <p className="text-2xl font-black text-slate-900 mt-1 tabular-nums">{stats.total.toLocaleString()}</p>
           <p className="text-[10px] text-slate-400 font-mono mt-0.5 truncate">{stats.databasePath}</p>
         </div>
 
@@ -262,7 +467,7 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
           <p className="text-[11px] font-bold text-emerald-700 uppercase">
             {isKm ? 'មិនទាន់ប្រើ (Unused)' : 'Unused (Available)'}
           </p>
-          <p className="text-2xl font-black text-emerald-800 mt-1 tabular-nums">{stats.unusedCount}</p>
+          <p className="text-2xl font-black text-emerald-800 mt-1 tabular-nums">{stats.unusedCount.toLocaleString()}</p>
           <p className="text-[10px] text-emerald-600 mt-0.5">
             {isKm ? 'រួចរាល់សម្រាប់ចែកជូនអ្នកប្រើ' : 'Ready for auto-unlock / users'}
           </p>
@@ -272,7 +477,7 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
           <p className="text-[11px] font-bold text-sky-700 uppercase">
             {isKm ? 'ប្រើរួចហើយ (Used)' : 'Used (Redeemed)'}
           </p>
-          <p className="text-2xl font-black text-sky-900 mt-1 tabular-nums">{stats.usedCount}</p>
+          <p className="text-2xl font-black text-sky-900 mt-1 tabular-nums">{stats.usedCount.toLocaleString()}</p>
           <p className="text-[10px] text-sky-600 mt-0.5">
             {isKm ? 'បានដោះសោ PDF រួចរាល់' : 'Claimed & burned'}
           </p>
@@ -282,9 +487,9 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
           <p className="text-[11px] font-bold text-rose-700 uppercase">
             {isKm ? 'បានផ្អាក (Revoked)' : 'Revoked'}
           </p>
-          <p className="text-2xl font-black text-rose-800 mt-1 tabular-nums">{stats.revokedCount}</p>
+          <p className="text-2xl font-black text-rose-800 mt-1 tabular-nums">{stats.revokedCount.toLocaleString()}</p>
           <p className="text-[10px] text-rose-600 mt-0.5">
-            {stats.googleSheetConfigured ? 'Google Sheet Env: Active' : 'SQLite + Sheet Sync Ready'}
+            {stats.googleSheetConfigured ? 'Google Sheet Env: Active' : 'SQLite + CSV (Up to 50,000)'}
           </p>
         </div>
       </div>
@@ -324,7 +529,7 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
               <input
                 type="number"
                 min={1}
-                max={100}
+                max={500}
                 value={genCount}
                 onChange={(e) => setGenCount(Number(e.target.value) || 1)}
                 className="w-full px-2.5 py-2 border border-slate-300 rounded-xl text-xs font-bold"
@@ -373,40 +578,60 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
             <div className="sm:col-span-2">
               <label className="text-[11px] font-bold text-slate-600 block mb-1">
-                Google Sheet ID {stats.googleSheetConfigured ? '(env ready)' : ''}
+                {isKm ? 'Link Google Sheet ឬ Sheet ID' : 'Google Sheet URL or ID'}{' '}
+                {stats.googleSheetConfigured ? '(env ready)' : ''}
               </label>
               <input
                 type="text"
                 value={sheetId}
                 onChange={(e) => setSheetId(e.target.value)}
-                placeholder={stats.googleSheetConfigured ? 'Using GOOGLE_SHEET_ID secret...' : '1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms'}
+                placeholder={
+                  stats.googleSheetConfigured
+                    ? 'Using GOOGLE_SHEET_ID secret...'
+                    : 'https://docs.google.com/spreadsheets/d/... ឬ Sheet ID'
+                }
                 className="w-full px-2.5 py-2 border border-slate-300 rounded-xl text-xs font-mono"
               />
             </div>
             <div>
-              <label className="text-[11px] font-bold text-slate-600 block mb-1">Tab Name</label>
+              <label className="text-[11px] font-bold text-slate-600 block mb-1">
+                {isKm ? 'ឈ្មោះ Tab (មិនបាច់ដាក់ក៏បាន)' : 'Tab Name (Optional)'}
+              </label>
               <input
                 type="text"
                 value={sheetName}
                 onChange={(e) => setSheetName(e.target.value)}
-                placeholder="RedeemCodes"
+                placeholder={isKm ? 'ស្វ័យប្រវត្តិ (Tab 1)' : 'Auto (First Tab)'}
                 className="w-full px-2.5 py-2 border border-slate-300 rounded-xl text-xs"
               />
             </div>
           </div>
           <p className="text-[10.5px] text-slate-500">
             {isKm
-              ? 'ទម្រង់តារាង Sheet៖ ជួរឈរ A = Code, B = Status (Unused), C = Note។ បើក Share → Anyone with link (Viewer) ឬដាក់ GOOGLE_SHEETS_API_KEY។'
-              : 'Sheet columns: Col A = Code, Col B = Status (Unused), Col C = Note. Set Share → Anyone with link (Viewer) or set GOOGLE_SHEETS_API_KEY.'}
+              ? 'អាច Paste Link Google Sheet ទាំងមូល ឬ Sheet ID។ សូមបើក Share → "Anyone with the link (Viewer)"។ ទុក Tab ទទេដើម្បីអាន Tab ទី ១ ដោយស្វ័យប្រវត្តិ។'
+              : 'Paste a full Google Sheet URL, Published URL, or Sheet ID. Set Share → "Anyone with the link (Viewer)". Leave Tab blank to auto-read the first tab.'}
           </p>
-          <button
-            type="submit"
-            disabled={syncingSheets}
-            className="w-full py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
-          >
-            {syncingSheets ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <FileSpreadsheet className="w-3.5 h-3.5" />}
-            <span>{isKm ? 'អាន & ទាញកូដពី Google Sheets' : 'Read & Import from Google Sheets'}</span>
-          </button>
+          <div className="flex flex-col sm:flex-row gap-2">
+            <button
+              type="submit"
+              disabled={syncingSheets}
+              className="flex-1 py-2.5 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+            >
+              {syncingSheets ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <FileSpreadsheet className="w-3.5 h-3.5" />}
+              <span>{isKm ? 'អាន & ទាញកូដពី Google Sheets' : 'Read & Import from Google Sheets'}</span>
+            </button>
+            <label className="py-2.5 px-3 rounded-xl bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-800 font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap">
+              <Upload className="w-3.5 h-3.5 text-slate-600" />
+              <span>{isKm ? 'Upload .CSV' : 'Upload .CSV'}</span>
+              <input
+                type="file"
+                accept=".csv,.txt,text/csv"
+                onChange={handleImportCsvFile}
+                disabled={syncingSheets}
+                className="hidden"
+              />
+            </label>
+          </div>
         </form>
       </div>
 
@@ -434,37 +659,67 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
 
       {/* Redeem Codes Table */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
-        <div className="p-3.5 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 bg-slate-50">
+        <div className="p-3.5 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2.5 bg-slate-50">
           <div className="flex items-center gap-2">
             <Database className="w-4 h-4 text-indigo-600" />
             <h4 className="text-xs sm:text-sm font-black text-slate-900">
               {isKm ? 'បញ្ជីលេខកូដ Redeem Codes ក្នុង Database' : 'Redeem Codes Database Table'}
             </h4>
+            <span className="text-[11px] font-bold text-slate-500 tabular-nums">
+              ({pagination.totalMatched.toLocaleString()})
+            </span>
           </div>
-          <div className="flex items-center gap-1.5">
-            {(['all', 'Unused', 'Used', 'Revoked'] as const).map((tab) => (
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Search Box */}
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="text"
+                value={searchInput}
+                onChange={(e) => setSearchInput(e.target.value)}
+                placeholder={isKm ? 'ស្វែងរកលេខកូដ...' : 'Search code / note...'}
+                className="pl-8 pr-7 py-1.5 w-44 sm:w-52 rounded-lg bg-white border border-slate-200 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-400"
+              />
+              {searchInput && (
+                <button
+                  type="button"
+                  onClick={() => setSearchInput('')}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 cursor-pointer"
+                  title="Clear search"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+
+            <div className="flex items-center gap-1">
+              {(['all', 'Unused', 'Used', 'Revoked'] as const).map((tab) => (
+                <button
+                  key={tab}
+                  type="button"
+                  onClick={() => {
+                    setStatusFilter(tab);
+                    setPage(1);
+                  }}
+                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold cursor-pointer transition-colors ${
+                    statusFilter === tab
+                      ? 'bg-indigo-600 text-white'
+                      : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
+                  }`}
+                >
+                  {tab === 'all' ? (isKm ? 'ទាំងអស់' : 'All') : tab}
+                </button>
+              ))}
               <button
-                key={tab}
                 type="button"
-                onClick={() => setStatusFilter(tab)}
-                className={`px-2.5 py-1 rounded-lg text-[11px] font-bold cursor-pointer transition-colors ${
-                  statusFilter === tab
-                    ? 'bg-indigo-600 text-white'
-                    : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
-                }`}
+                onClick={fetchRedeemDb}
+                disabled={loading}
+                className="p-1.5 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-100 cursor-pointer"
+                title="Refresh"
               >
-                {tab === 'all' ? (isKm ? 'ទាំងអស់' : 'All') : tab}
+                <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
               </button>
-            ))}
-            <button
-              type="button"
-              onClick={fetchRedeemDb}
-              disabled={loading}
-              className="p-1.5 rounded-lg bg-white border border-slate-200 text-slate-600 hover:bg-slate-100 cursor-pointer"
-              title="Refresh"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
-            </button>
+            </div>
           </div>
         </div>
 
@@ -574,6 +829,66 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
               )}
             </tbody>
           </table>
+        </div>
+
+        {/* Pagination Footer Bar */}
+        <div className="px-3.5 py-2.5 border-t border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="text-slate-600 font-semibold tabular-nums">
+            {pagination.totalMatched === 0 ? (
+              isKm ? 'គ្មានទិន្នន័យ (0 កូដ)' : 'Showing 0 codes'
+            ) : (
+              <>
+                {isKm ? 'បង្ហាញ' : 'Showing'}{' '}
+                <span className="font-black text-slate-900">
+                  {((pagination.page - 1) * pagination.pageSize + 1).toLocaleString()}–
+                  {Math.min(pagination.page * pagination.pageSize, pagination.totalMatched).toLocaleString()}
+                </span>{' '}
+                {isKm ? 'នៃ' : 'of'}{' '}
+                <span className="font-black text-slate-900">{pagination.totalMatched.toLocaleString()}</span>{' '}
+                {isKm ? 'កូដ' : 'codes'}
+              </>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2">
+            <select
+              value={pageSize}
+              onChange={(e) => {
+                setPageSize(Number(e.target.value) || 100);
+                setPage(1);
+              }}
+              className="px-2 py-1 rounded-lg bg-white border border-slate-200 text-[11px] font-bold text-slate-700 cursor-pointer"
+              aria-label="Rows per page"
+            >
+              <option value={100}>100 / {isKm ? 'ទំព័រ' : 'page'}</option>
+              <option value={250}>250 / {isKm ? 'ទំព័រ' : 'page'}</option>
+              <option value={500}>500 / {isKm ? 'ទំព័រ' : 'page'}</option>
+            </select>
+
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                onClick={() => setPage((p) => Math.max(1, p - 1))}
+                disabled={loading || pagination.page <= 1}
+                className="px-2 py-1 rounded-lg bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer flex items-center gap-0.5 font-bold text-[11px]"
+              >
+                <ChevronLeft className="w-3.5 h-3.5" />
+                <span>{isKm ? 'មុន' : 'Prev'}</span>
+              </button>
+              <span className="px-2.5 py-1 text-[11px] font-black text-slate-700 tabular-nums">
+                {isKm ? 'ទំព័រ' : 'Page'} {pagination.page.toLocaleString()} / {pagination.totalPages.toLocaleString()}
+              </span>
+              <button
+                type="button"
+                onClick={() => setPage((p) => Math.min(pagination.totalPages, p + 1))}
+                disabled={loading || pagination.page >= pagination.totalPages}
+                className="px-2 py-1 rounded-lg bg-white border border-slate-200 text-slate-700 hover:bg-slate-100 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer flex items-center gap-0.5 font-bold text-[11px]"
+              >
+                <span>{isKm ? 'បន្ទាប់' : 'Next'}</span>
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     </div>
