@@ -896,8 +896,8 @@ app.post('/api/payments/aba-session', (req, res) => {
     txId,
     createdAt: now,
     expiresAt,
-    amountUsd: 11.2,
-    amountKrw: 15000,
+    amountUsd: 25.0,
+    amountKrw: 35000,
     paywayUrl,
     status: 'pending',
   };
@@ -1920,7 +1920,7 @@ Inspect this uploaded screenshot of a South Korean bank transfer confirmation (e
 Extract strictly what is visible in the image:
 1. isBankTransferScreenshot: true ONLY if this is a genuine bank transfer / remittance confirmation screen.
 2. transferCompleted: true ONLY if the transfer status clearly indicates completion (e.g., 이체완료, 송금완료, 출금완료, 이체 성공, Completed, Sent).
-3. amountKrw: numeric integer amount transferred in KRW (e.g., 15000). Return 0 if not clearly visible.
+3. amountKrw: numeric integer amount transferred in KRW (e.g., 35000). Return 0 if not clearly visible.
 4. bankName: bank or app name (e.g., KakaoBank, Toss, KB Kookmin, Shinhan, NH, Woori, Hana).
 5. recipientName: recipient name or account label visible on the receipt.
 6. recipientAccountDigits: digits visible for the recipient account number (if any).
@@ -1983,14 +1983,14 @@ Return ONLY valid JSON matching the schema.`;
           reason: 'វិក្កយបត្រមិនទាន់បង្ហាញស្ថានភាពផ្ទេរប្រាក់ជោគជ័យ (이체완료 / 송금완료) ទេ។',
         };
       }
-      if (amountKrw < 15000) {
+      if (amountKrw < 35000) {
         return {
           isValidReceipt: false,
           amountKrw,
           bankName,
           recipientName,
           transferCompleted: true,
-          reason: `ទឹកប្រាក់លើវិក្កយបត្រ (₩${amountKrw.toLocaleString()}) តិចជាងតម្លៃសេវា ₩15,000។`,
+          reason: `ទឹកប្រាក់លើវិក្កយបត្រ (₩${amountKrw.toLocaleString()}) តិចជាងតម្លៃសេវា ₩35,000។`,
         };
       }
       if (expectedAccountTail && accountDigits && !accountDigits.endsWith(expectedAccountTail)) {
@@ -2064,7 +2064,7 @@ app.get('/api/payments/kr-config', (_req, res) => {
     accountNumber: process.env.KR_BANK_ACCOUNT || '',
     accountHolder: process.env.KR_BANK_HOLDER || '',
     telegramBotUsername: (process.env.TELEGRAM_BOT_USERNAME || '').replace(/^@/, ''),
-    amountKrw: 15000,
+    amountKrw: 35000,
     autoReceiptVerifyEnabled: Boolean(process.env.GEMINI_API_KEY),
     telegramBotEnabled: Boolean(process.env.TELEGRAM_BOT_TOKEN),
   });
@@ -2174,7 +2174,7 @@ app.post('/api/telegram/webhook', async (req, res) => {
     if (photos.length === 0) {
       await sendTelegramMessage(
         chatId,
-        'សួស្តី! សូមផ្ញើរូបភាព Screenshot វិក្កយបត្រផ្ទេរប្រាក់ (₩15,000) មកទីនេះ ដើម្បីទទួលបានលេខកូដដោះសោ KIIP-TOPIK PDF ដោយស្វ័យប្រវត្តិ។'
+        'សួស្តី! សូមផ្ញើរូបភាព Screenshot វិក្កយបត្រផ្ទេរប្រាក់ (₩35,000) មកទីនេះ ដើម្បីទទួលបានលេខកូដដោះសោ KIIP-TOPIK PDF ដោយស្វ័យប្រវត្តិ។'
       );
       return res.json({ ok: true });
     }

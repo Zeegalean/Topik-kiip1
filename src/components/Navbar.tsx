@@ -1,5 +1,5 @@
 import { PWAInstallButton } from './PWAInstallButton';
-import React from 'react';
+import React, { useState } from 'react';
 import { Language, UserAccount } from '../types';
 import { SUPPORTED_LANGUAGES, getLanguageInfo } from '../data/languages';
 import { getTranslation } from '../utils/translations';
@@ -64,6 +64,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   isAdmin = false,
 }) => {
   const t = getTranslation(lang);
+  const [aboutAvatarError, setAboutAvatarError] = useState(false);
 
   const steps = [
     { num: 1, label: t.step1Tab, icon: Upload },
@@ -119,13 +120,23 @@ export const Navbar: React.FC<NavbarProps> = ({
             {/* About Me Toggle */}
             <button
               onClick={() => setActiveTab(activeTab === 'about' ? 'flow' : 'about')}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs sm:text-sm font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
+              className={`flex items-center gap-2 pl-1.5 pr-3 py-1 rounded-lg text-xs sm:text-sm font-medium transition-colors cursor-pointer whitespace-nowrap shrink-0 ${
                 activeTab === 'about'
                   ? 'bg-indigo-100 text-indigo-900 border border-indigo-300'
                   : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
               }`}
             >
-              <User className="w-4 h-4 text-indigo-600" />
+              {!aboutAvatarError ? (
+                <img
+                  src="/assets/aistudio/b315a395-5f7a-45e1-8f72-2e787ca251fb_12dc3517.jfif"
+                  alt="Eang Veasna"
+                  referrerPolicy="no-referrer"
+                  onError={() => setAboutAvatarError(true)}
+                  className="w-6 h-6 rounded-full object-cover object-top border border-indigo-300 shadow-2xs shrink-0"
+                />
+              ) : (
+                <User className="w-4 h-4 text-indigo-600 shrink-0" />
+              )}
               <span className="hidden sm:inline">{lang === 'km' ? 'អំពីខ្ញុំ' : lang === 'ko' ? '소개' : 'About Me'}</span>
               <span className="sm:hidden">{lang === 'km' ? 'អំពីខ្ញុំ' : 'About'}</span>
             </button>
@@ -152,7 +163,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               >
                 <Lock className="w-3.5 h-3.5 text-red-600" />
                 <span className="hidden md:inline">{t.unlockCleanPdf}</span>
-                <span className="md:hidden">₩15,000</span>
+                <span className="md:hidden">₩35,000</span>
               </button>
             ) : isPaid ? (
               <span className="hidden sm:flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-black text-emerald-700 bg-emerald-50 border border-emerald-200 shadow-2xs">

@@ -221,7 +221,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
             accountNumber: String(data.accountNumber || ''),
             accountHolder: String(data.accountHolder || ''),
             telegramBotUsername: String(data.telegramBotUsername || ''),
-            amountKrw: Number(data.amountKrw) || 15000,
+            amountKrw: Number(data.amountKrw) || 35000,
             autoReceiptVerifyEnabled: Boolean(data.autoReceiptVerifyEnabled),
             telegramBotEnabled: Boolean(data.telegramBotEnabled),
           });
@@ -423,8 +423,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         setReceiptError(
           data?.error ||
             (isKm
-              ? 'មិនអាចផ្ទៀងផ្ទាត់វិក្កយបត្របានទេ។ សូមថត Screenshot ឱ្យច្បាស់លាស់ (បង្ហាញទឹកប្រាក់ ≥ ₩15,000 និងស្ថានភាពជោគជ័យ)។'
-              : 'Could not verify receipt. Please upload a clear transfer confirmation screenshot showing ≥ ₩15,000.')
+              ? 'មិនអាចផ្ទៀងផ្ទាត់វិក្កយបត្របានទេ។ សូមថត Screenshot ឱ្យច្បាស់លាស់ (បង្ហាញទឹកប្រាក់ ≥ ₩35,000 និងស្ថានភាពជោគជ័យ)។'
+              : 'Could not verify receipt. Please upload a clear transfer confirmation screenshot showing ≥ ₩35,000.')
         );
         return;
       }
@@ -432,7 +432,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       setIssuedKrCode({
         code: data.unlockCode,
         bankName: data.bankName || 'Korean Bank',
-        verifiedAmount: Number(data.verifiedAmount) || 15000,
+        verifiedAmount: Number(data.verifiedAmount) || 35000,
       });
 
       // Automatically burn the single-use code and unlock Clean PDF
@@ -539,7 +539,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     );
     recordPaymentTransaction({
       userEmail: userEmail || '',
-      amount: 15000,
+      amount: 35000,
       currency: 'KRW',
       method: 'ABA PayWay QR',
       promoCodeUsed: '-',
@@ -557,7 +557,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
           <div className="flex flex-wrap items-center justify-between gap-2 mb-2 pr-8">
             <span className="bg-amber-400/20 text-amber-300 border border-amber-400/40 text-[11px] font-black px-2.5 py-0.5 rounded-full inline-flex items-center gap-1">
               <Sparkles className="w-3 h-3 text-amber-300" />
-              <span>OFFICIAL UNLOCK · ₩15,000 (~$11.20)</span>
+              <span>OFFICIAL UNLOCK · ₩35,000 (~$25.00)</span>
             </span>
             <span className="text-emerald-300 text-[11px] font-medium flex items-center gap-1">
               <ShieldCheck className="w-3.5 h-3.5" />
@@ -637,9 +637,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               </div>
 
               <div className="flex items-baseline gap-2 sm:text-right shrink-0 tabular-nums">
-                <span className="text-xs text-slate-400 line-through">₩30,000</span>
-                <span className="text-2xl font-black text-blue-700">₩15,000</span>
-                <span className="text-[10px] font-bold text-slate-500">(~ $11.20)</span>
+                <span className="text-2xl font-black text-blue-700">₩35,000</span>
+                <span className="text-[10px] font-bold text-slate-500">(~ $25.00)</span>
               </div>
             </div>
 
@@ -856,7 +855,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                     </div>
                     <p className="text-[11px] text-slate-600 mt-1">
                       {isKm
-                        ? 'គាំទ្រ ABA PAY, KHQR គ្រប់ធនាគារ និងកាត Visa, MasterCard, JCB, UnionPay ($11.20 / ~₩15,000)។'
+                        ? 'គាំទ្រ ABA PAY, KHQR គ្រប់ធនាគារ និងកាត Visa, MasterCard, JCB, UnionPay ($25.00 / ~₩35,000)។'
                         : isKo
                         ? 'ABA PAY, KHQR 및 해외 카드(Visa, Master, UnionPay, JCB) 지원.'
                         : 'Supports ABA PAY, KHQR, Visa, MasterCard, JCB, UnionPay.'}
@@ -916,7 +915,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                   <div className="bg-[#004f80] -mx-4 -mt-4 py-2 px-4 text-white flex items-center justify-between mb-3 shadow-xs">
                     <span className="font-black text-xs tracking-wider">ABA PayWay</span>
                     <span className="text-[10px] font-mono font-bold bg-white/20 px-2 py-0.5 rounded-full tabular-nums">
-                      $11.20 · {formatCountdown(qrSecondsLeft)}
+                      $25.00 · {formatCountdown(qrSecondsLeft)}
                     </span>
                   </div>
 
@@ -1110,13 +1109,13 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                         </h4>
                         <p className="text-[11px] text-emerald-800">
                           {isKm
-                            ? 'ផ្ទេរប្រាក់ ₩15,000 រួច Upload រូប Screenshot វិក្កយបត្រ ដើម្បីទទួលកូដដោះសោភ្លាមៗ (Auto-Unlock)'
-                            : 'Transfer ₩15,000 and upload your transfer screenshot to receive an automatic unlock code.'}
+                            ? 'ផ្ទេរប្រាក់ ₩35,000 រួច Upload រូប Screenshot វិក្កយបត្រ ដើម្បីទទួលកូដដោះសោភ្លាមៗ (Auto-Unlock)'
+                            : 'Transfer ₩35,000 and upload your transfer screenshot to receive an automatic unlock code.'}
                         </p>
                       </div>
                     </div>
                     <span className="text-sm font-black text-emerald-800 tabular-nums shrink-0">
-                      ₩{(krConfig?.amountKrw || 15000).toLocaleString()}
+                      ₩{(krConfig?.amountKrw || 35000).toLocaleString()}
                     </span>
                   </div>
 
@@ -1516,13 +1515,13 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                       P
                     </span>
                     <span className="text-xs font-bold text-amber-950">
-                      International Cards &amp; ABA PayWay ($11.20 USD)
+                      International Cards &amp; ABA PayWay ($25.00 USD)
                     </span>
                   </div>
                   <p className="text-xs text-amber-900 leading-relaxed">
                     {isKm
-                      ? 'សម្រាប់ការទូទាត់អន្តរជាតិ (ក្រៅប្រទេសឬនៅកូរ៉េ) អ្នកអាចបង់ជាប្រាក់ដុល្លារ ($11.20) តាមរយៈ ABA PayWay ដែលទទួលស្គាល់កាត Visa, MasterCard, JCB, UnionPay គ្រប់ប្រទេស ដោយលុយចូលគណនី ABA Bank របស់ម្ចាស់កម្មវិធីផ្ទាល់។'
-                      : 'International payments ($11.20 USD) are supported directly via ABA PayWay with Visa, MasterCard, JCB, and UnionPay.'}
+                      ? 'សម្រាប់ការទូទាត់អន្តរជាតិ (ក្រៅប្រទេសឬនៅកូរ៉េ) អ្នកអាចបង់ជាប្រាក់ដុល្លារ ($25.00) តាមរយៈ ABA PayWay ដែលទទួលស្គាល់កាត Visa, MasterCard, JCB, UnionPay គ្រប់ប្រទេស ដោយលុយចូលគណនី ABA Bank របស់ម្ចាស់កម្មវិធីផ្ទាល់។'
+                      : 'International payments ($25.00 USD) are supported directly via ABA PayWay with Visa, MasterCard, JCB, and UnionPay.'}
                   </p>
                 </div>
 
@@ -1534,7 +1533,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                     className="py-3.5 px-4 rounded-2xl bg-[#004f80] hover:bg-[#003d63] text-white font-extrabold text-xs sm:text-sm shadow-md flex items-center justify-center gap-2"
                   >
                     <CreditCard className="w-4 h-4" />
-                    <span>{isKm ? 'បើក ABA PayWay ($11.20)' : 'Open ABA PayWay ($11.20)'}</span>
+                    <span>{isKm ? 'បើក ABA PayWay ($25.00)' : 'Open ABA PayWay ($25.00)'}</span>
                     <ExternalLink className="w-3.5 h-3.5" />
                   </a>
 
