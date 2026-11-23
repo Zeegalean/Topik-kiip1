@@ -20,7 +20,7 @@ import { SocinetNoticeModal } from './components/SocinetNoticeModal';
 import { LanguageSelectorModal } from './components/LanguageSelectorModal';
 import { AdminAuthModal } from './components/AdminAuthModal';
 import { AdminDashboard } from './components/AdminDashboard';
-import { VisitorStatsCounter } from './components/VisitorStatsCounter';
+import { RightAdsAndStatsSidebar } from './components/RightAdsAndStatsSidebar';
 import { WebsiteGuideChatbot, NavActionId } from './components/WebsiteGuideChatbot';
 import { AboutMePage } from './components/AboutMePage';
 import { getTranslation } from './utils/translations';
@@ -396,99 +396,107 @@ export default function App() {
         />
       </div>
 
-      {/* Main Container */}
-      <main className="flex-1 max-w-4xl w-full mx-auto px-3 sm:px-6 py-4 sm:py-6 relative z-10 print-main-container">
-        {activeTab === 'about' ? (
-          <AboutMePage
-            lang={lang}
-            onStartApplication={() => {
-              setActiveTab('flow');
-              setCurrentStep(1);
-            }}
-            onOpenPayment={() => setIsPaymentModalOpen(true)}
-          />
-        ) : activeTab === 'guide' ? (
-          <TopikKiipGuide
-            lang={lang}
-            onStartApplication={() => {
-              setActiveTab('flow');
-              setCurrentStep(1);
-            }}
-          />
-        ) : (
-          <div>
-            {currentStep === 1 && (
-              <Step1Upload
-                docs={docs}
-                setDocs={setDocs}
-                formData={formData}
-                setFormData={setFormData}
+      {/* Main Container + Right Sidebar (Live Viewer Stats + Total Visited + 300x250 Ads) */}
+      <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 py-4 sm:py-6 relative z-10 print-main-container">
+        <div className="flex flex-col lg:flex-row items-start justify-center gap-6">
+          {/* Primary Content Column */}
+          <div className="flex-1 min-w-0 w-full max-w-4xl">
+            {activeTab === 'about' ? (
+              <AboutMePage
                 lang={lang}
-                onNext={() => setCurrentStep(2)}
-                onOpenSocinetNotice={() => setIsSocinetNoticeOpen(true)}
-                isLoggedIn={user.isLoggedIn}
-                onOpenAuth={() => setIsAuthModalOpen(true)}
-              />
-            )}
-
-            {currentStep === 2 && (
-              <Step2FormTemplate
-                formData={formData}
-                setFormData={setFormData}
-                docs={docs}
-                setDocs={setDocs}
-                sigSettings={sigSettings}
-                setSigSettings={setSigSettings}
-                lang={lang}
-                onNext={() => setCurrentStep(3)}
-                onPrev={() => setCurrentStep(1)}
-                formRef={formRef}
-                isPaid={isPaid}
-                setIsPaid={setIsPaid}
+                onStartApplication={() => {
+                  setActiveTab('flow');
+                  setCurrentStep(1);
+                }}
                 onOpenPayment={() => setIsPaymentModalOpen(true)}
               />
-            )}
-
-            {currentStep === 3 && (
-              <Step3PdfPreview
-                formData={formData}
-                setFormData={setFormData}
-                docs={docs}
-                setDocs={setDocs}
-                sigSettings={sigSettings}
-                setSigSettings={setSigSettings}
+            ) : activeTab === 'guide' ? (
+              <TopikKiipGuide
                 lang={lang}
-                onNext={() => {
-                  if (!isPaid) {
-                    setPendingStepAfterPayment(4);
-                    setIsPaymentModalOpen(true);
-                  } else {
-                    setCurrentStep(4);
-                  }
-                }}
-                onPrev={() => setCurrentStep(2)}
-                formRef={formRef}
-                isPaid={isPaid}
-                setIsPaid={setIsPaid}
-                onOpenPayment={() => {
-                  setPendingStepAfterPayment(null);
-                  setIsPaymentModalOpen(true);
-                }}
-              />
-            )}
-
-            {currentStep === 4 && (
-              <Step4EmailSender
-                formData={formData}
-                lang={lang}
-                onPrev={() => setCurrentStep(3)}
-                onRestart={() => {
+                onStartApplication={() => {
+                  setActiveTab('flow');
                   setCurrentStep(1);
                 }}
               />
+            ) : (
+              <div>
+                {currentStep === 1 && (
+                  <Step1Upload
+                    docs={docs}
+                    setDocs={setDocs}
+                    formData={formData}
+                    setFormData={setFormData}
+                    lang={lang}
+                    onNext={() => setCurrentStep(2)}
+                    onOpenSocinetNotice={() => setIsSocinetNoticeOpen(true)}
+                    isLoggedIn={user.isLoggedIn}
+                    onOpenAuth={() => setIsAuthModalOpen(true)}
+                  />
+                )}
+
+                {currentStep === 2 && (
+                  <Step2FormTemplate
+                    formData={formData}
+                    setFormData={setFormData}
+                    docs={docs}
+                    setDocs={setDocs}
+                    sigSettings={sigSettings}
+                    setSigSettings={setSigSettings}
+                    lang={lang}
+                    onNext={() => setCurrentStep(3)}
+                    onPrev={() => setCurrentStep(1)}
+                    formRef={formRef}
+                    isPaid={isPaid}
+                    setIsPaid={setIsPaid}
+                    onOpenPayment={() => setIsPaymentModalOpen(true)}
+                  />
+                )}
+
+                {currentStep === 3 && (
+                  <Step3PdfPreview
+                    formData={formData}
+                    setFormData={setFormData}
+                    docs={docs}
+                    setDocs={setDocs}
+                    sigSettings={sigSettings}
+                    setSigSettings={setSigSettings}
+                    lang={lang}
+                    onNext={() => {
+                      if (!isPaid) {
+                        setPendingStepAfterPayment(4);
+                        setIsPaymentModalOpen(true);
+                      } else {
+                        setCurrentStep(4);
+                      }
+                    }}
+                    onPrev={() => setCurrentStep(2)}
+                    formRef={formRef}
+                    isPaid={isPaid}
+                    setIsPaid={setIsPaid}
+                    onOpenPayment={() => {
+                      setPendingStepAfterPayment(null);
+                      setIsPaymentModalOpen(true);
+                    }}
+                  />
+                )}
+
+                {currentStep === 4 && (
+                  <Step4EmailSender
+                    formData={formData}
+                    lang={lang}
+                    onPrev={() => setCurrentStep(3)}
+                    onRestart={() => {
+                      setCurrentStep(1);
+                    }}
+                  />
+                )}
+              </div>
             )}
           </div>
-        )}
+
+          {/* Right Sidebar: Live Viewer Stats, Total Visited Counter & 300x250 Ad Slot */}
+          <RightAdsAndStatsSidebar lang={lang} />
+        </div>
       </main>
 
       {/* Payment Checkout Modal (Non-closable & Non-skippable until paid) */}
@@ -585,7 +593,6 @@ export default function App() {
                 {t.footerSubtitle}
               </span>
             </div>
-            <VisitorStatsCounter lang={lang} />
           </div>
           <div className="flex items-center gap-3 text-slate-400 text-[11px]">
             <button

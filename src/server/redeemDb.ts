@@ -92,6 +92,11 @@ export function getRedeemDb(): DatabaseSync {
       last_login_at TEXT DEFAULT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_admin_accounts_username ON admin_accounts(username);
+
+    CREATE TABLE IF NOT EXISTS visitor_sessions (
+      session_id TEXT PRIMARY KEY,
+      first_seen TEXT NOT NULL
+    );
   `);
 
   dbInstance = db;
@@ -1116,5 +1121,26 @@ export function deleteAdminAccount(id: number): boolean {
   const db = getRedeemDb();
   const info = db.prepare('DELETE FROM admin_accounts WHERE id = ?').run(Math.floor(id));
   return Number(info.changes) > 0;
+}
+
+// ============================================================================
+// PERSISTENT VISITOR COUNTER (Real deduplicated sessions in SQLite)
+// ============================================================================
+export function recordUniqueVisitSession(sessionId: string): number {
+  const cleanId = String(sessionId || '').trim().slice(0, 64);
+  const db = getRedeemDb();
+  if (cleanId) {
+    db.prepare(
+      `INSERT OR IGNORE INTO visitor_sessions (session_id, first_seen) VALUES (?, ?)`
+    ).run(cleanId, new Date().toISOString());
+  }
+  const row = db.prepare('SELECT COUNT(*) as cnt FROM visitor_sessions').get() as { cnt: number };
+  return Math.max(1, Number(row?.cnt || 0));
+}
+
+export function getTotalRecordedVisits(): number {
+  const db = getRedeemDb();
+  const row = db.prepare('SELECT COUNT(*) as cnt FROM visitor_sessions').get() as { cnt: number };
+  return Math.max(1, Number(row?.cnt || 0));
 }
 

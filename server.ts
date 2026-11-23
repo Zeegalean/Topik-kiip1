@@ -24,6 +24,8 @@ import {
   setAdminAccountActive,
   updateAdminAccountPassword,
   deleteAdminAccount,
+  recordUniqueVisitSession,
+  getTotalRecordedVisits,
   type RedeemCodeStatus,
   type AdminAccountRole,
 } from './src/server/redeemDb.ts';
@@ -1721,6 +1723,7 @@ app.post('/api/visitors/heartbeat', async (req, res) => {
       page,
     });
     seenSessionIds.add(sessionId);
+    const persistentTotalVisits = Math.max(seenSessionIds.size, recordUniqueVisitSession(sessionId));
 
     const liveList = Array.from(activeVisitorMap.values()).filter(
       (v) => now - v.lastSeen <= LIVE_VISITOR_TTL_MS
@@ -1733,7 +1736,7 @@ app.post('/api/visitors/heartbeat', async (req, res) => {
       country: geo.country,
       countryCode: geo.countryCode,
       liveCount: liveList.length,
-      totalVisits: seenSessionIds.size,
+      totalVisits: persistentTotalVisits,
     });
   } catch {
     return res.status(500).json({ success: false });
@@ -1763,7 +1766,7 @@ app.get('/api/visitors/public-stats', (_req, res) => {
   return res.json({
     success: true,
     liveCount: liveList.length,
-    totalVisits: seenSessionIds.size,
+    totalVisits: Math.max(seenSessionIds.size, getTotalRecordedVisits()),
     liveCities,
   });
 });
@@ -1798,7 +1801,7 @@ app.get('/api/admin/live-visitors', requireAdminAuth, (_req, res) => {
   return res.json({
     success: true,
     liveCount,
-    totalVisits: seenSessionIds.size,
+    totalVisits: Math.max(seenSessionIds.size, getTotalRecordedVisits()),
     visitors,
     cityBreakdown: Object.entries(cityCounts)
       .map(([cityLabel, count]) => ({ cityLabel, count }))
