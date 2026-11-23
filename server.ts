@@ -1873,14 +1873,24 @@ app.post('/api/analytics/event', (req, res) => {
   return res.status(400).json({ success: false, error: 'Unsupported analytics event type' });
 });
 
+// Public Korea Bank receiving account details (overridable via Settings → Secrets)
+function getKoreaBankPaymentInfo() {
+  return {
+    bankName: (process.env.KR_BANK_NAME || 'KOOKMIN BANK (KB 국민은행)').trim(),
+    accountNumber: (process.env.KR_BANK_ACCOUNT || '893801-00-097236').trim(),
+    accountHolder: (process.env.KR_BANK_HOLDER || 'EANG VEASNA').trim(),
+  };
+}
+
 app.get('/api/admin/analytics', requireAdminAuth, (_req, res) => {
+  const krBank = getKoreaBankPaymentInfo();
   return res.json({
     success: true,
     documents: serverDocumentsLog,
     payments: serverPaymentsLog,
     issuedUnlockCodes: Array.from(issuedUnlockCodes.values()).sort((a, b) => b.createdAt - a.createdAt),
     integrations: {
-      krBankConfigured: Boolean(process.env.KR_BANK_ACCOUNT),
+      krBankConfigured: Boolean(krBank.accountNumber),
       telegramConfigured: Boolean(process.env.TELEGRAM_BOT_TOKEN),
     },
   });
@@ -1912,8 +1922,9 @@ async function analyzeKoreanBankReceiptWithGemini(
     };
   }
 
-  const expectedHolder = (process.env.KR_BANK_HOLDER || '').trim();
-  const expectedAccountTail = (process.env.KR_BANK_ACCOUNT || '').replace(/\D/g, '').slice(-4);
+  const krBank = getKoreaBankPaymentInfo();
+  const expectedHolder = krBank.accountHolder;
+  const expectedAccountTail = krBank.accountNumber.replace(/\D/g, '').slice(-4);
 
   const prompt = `You are a Korean banking receipt verification specialist.
 Inspect this uploaded screenshot of a South Korean bank transfer confirmation (e.g., KB 국민은행, 신한은행, 우리은행, 하나은행, NH농협, 카카오뱅크, 토스뱅크, 케이뱅크, IBK기업은행, 새마을금고, etc.).
@@ -2058,11 +2069,12 @@ async function sendTelegramMessage(chatId: string | number, text: string): Promi
 }
 
 app.get('/api/payments/kr-config', (_req, res) => {
+  const krBank = getKoreaBankPaymentInfo();
   return res.json({
     success: true,
-    bankName: process.env.KR_BANK_NAME || '',
-    accountNumber: process.env.KR_BANK_ACCOUNT || '',
-    accountHolder: process.env.KR_BANK_HOLDER || '',
+    bankName: krBank.bankName,
+    accountNumber: krBank.accountNumber,
+    accountHolder: krBank.accountHolder,
     telegramBotUsername: (process.env.TELEGRAM_BOT_USERNAME || '').replace(/^@/, ''),
     amountKrw: 35000,
     autoReceiptVerifyEnabled: Boolean(process.env.GEMINI_API_KEY),
