@@ -21,6 +21,7 @@ import { LanguageSelectorModal } from './components/LanguageSelectorModal';
 import { AdminAuthModal } from './components/AdminAuthModal';
 import { AdminDashboard } from './components/AdminDashboard';
 import { VisitorStatsCounter } from './components/VisitorStatsCounter';
+import { WebsiteGuideChatbot, NavActionId } from './components/WebsiteGuideChatbot';
 import { getTranslation } from './utils/translations';
 import { saveFormDraft, isFormDataWorthSaving } from './utils/draftStorage';
 import { auth } from './utils/firebase';
@@ -268,21 +269,67 @@ export default function App() {
   // 5. Socinet Account (ID & Password)
   // 6. Phone (전화번호)
   // (Korean address search, building/mailbox, and official address can be skipped per user requirement)
-  const isStep1Ready = Boolean(
-    docs.arcFront &&
-    docs.arcBack &&
-    docs.topikCertList &&
-    docs.topikCertList.length > 0 &&
-    docs.passportList &&
-    docs.passportList.length > 0 &&
-    docs.signature &&
-    formData.phone &&
-    formData.phone.trim().length > 0 &&
-    formData.socinetId &&
-    formData.socinetId.trim().length > 0 &&
-    formData.socinetPw &&
-    formData.socinetPw.trim().length > 0
-  );
+  const missingStep1Items: string[] = [];
+  if (!docs.arcFront) missingStep1Items.push('ARC Front (외국인등록증 앞면)');
+  if (!docs.arcBack) missingStep1Items.push('ARC Back (외국인등록증 뒷면)');
+  if (!docs.topikCertList || docs.topikCertList.length === 0) missingStep1Items.push('TOPIK Score Certificate (성적증명서)');
+  if (!docs.passportList || docs.passportList.length === 0) missingStep1Items.push('Passport Copy (여권 사본)');
+  if (!docs.signature) missingStep1Items.push('Signature (서명)');
+  if (!formData.phone || !formData.phone.trim()) missingStep1Items.push('Phone Number (전화번호)');
+  if (!formData.socinetId || !formData.socinetId.trim()) missingStep1Items.push('Socinet ID (사회통합정보망 아이디)');
+  if (!formData.socinetPw || !formData.socinetPw.trim()) missingStep1Items.push('Socinet Password (사회통합정보망 비밀번호)');
+
+  const isStep1Ready = missingStep1Items.length === 0;
+
+  const handleGuideNavAction = (action: NavActionId) => {
+    switch (action) {
+      case 'guide':
+        setActiveTab('guide');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        break;
+      case 'step1':
+        setActiveTab('flow');
+        setCurrentStep(1);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        break;
+      case 'step2':
+        setActiveTab('flow');
+        setCurrentStep(isStep1Ready ? 2 : 1);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        break;
+      case 'step3':
+        setActiveTab('flow');
+        setCurrentStep(isStep1Ready ? 3 : 1);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        break;
+      case 'step4':
+        if (!isStep1Ready) {
+          setActiveTab('flow');
+          setCurrentStep(1);
+        } else if (!isPaid) {
+          setPendingStepAfterPayment(4);
+          setIsPaymentModalOpen(true);
+        } else {
+          setActiveTab('flow');
+          setCurrentStep(4);
+        }
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        break;
+      case 'socinet':
+        setIsSocinetNoticeOpen(true);
+        break;
+      case 'payment':
+        setIsPaymentModalOpen(true);
+        break;
+      case 'language':
+        setIsLangModalOpen(true);
+        break;
+      case 'sample':
+        handleLoadSample();
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        break;
+    }
+  };
 
   return (
     <div className="min-h-dvh bg-slate-50 flex flex-col font-sans relative print-root-container">
@@ -564,6 +611,16 @@ export default function App() {
           </div>
         </div>
       </footer>
+      {/* Floating Multi-Turn Website Navigation & Help Chatbot */}
+      <WebsiteGuideChatbot
+        lang={lang}
+        activeTab={activeTab}
+        currentStep={currentStep}
+        isStep1Ready={isStep1Ready}
+        missingStep1Items={missingStep1Items}
+        isPaid={isPaid}
+        onNavigateAction={handleGuideNavAction}
+      />
     </div>
   );
 }

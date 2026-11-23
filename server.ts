@@ -2393,6 +2393,201 @@ app.post('/api/mail/send-receipt', async (req, res) => {
   }
 });
 
+// ============================================================================
+// MULTI-TURN WEBSITE NAVIGATION & HELP CHATBOT (Gemini 4 Hydrogen, SSE Stream)
+// ============================================================================
+interface ChatGuideHistoryItem {
+  role: 'user' | 'model';
+  text: string;
+}
+
+function buildWebsiteGuideSystemInstruction(ctx: {
+  lang: string;
+  activeTab: string;
+  currentStep: number;
+  isStep1Ready: boolean;
+  missingItems: string[];
+  isPaid: boolean;
+}): string {
+  const missingSummary =
+    ctx.missingItems.length > 0 ? ctx.missingItems.join(', ') : 'None — all 6 mandatory Step 1 items are complete.';
+
+  return [
+    'You are the official Website Navigation & Help Assistant for the KIIP & TOPIK Linkage Application Portal (사회통합프로그램 TOPIK 성적 연계 신청 포털).',
+    'Your role is to help visitors smoothly navigate this website, complete their TOPIK-to-KIIP linkage application step by step, troubleshoot upload/form/PDF/email questions, and jump directly to the right page or tool.',
+    '',
+    'LANGUAGE RULE:',
+    `- The website interface is currently set to language code "${ctx.lang}".`,
+    '- Always respond in the exact language the user writes in (Khmer, Korean, English, or any other language). If ambiguous, use the current website language.',
+    '- Keep responses concise, structured, friendly, and directly actionable (short paragraphs or crisp bullet points).',
+    '',
+    'LIVE USER SESSION CONTEXT:',
+    `- Current View: ${ctx.activeTab === 'guide' ? 'TOPIK-to-KIIP Official Guide tab' : `Application Workflow — Step ${ctx.currentStep} of 4`}`,
+    `- Step 1 Mandatory Checklist Ready: ${ctx.isStep1Ready ? 'Yes (Steps 2 & 3 unlocked)' : 'No'}`,
+    `- Missing Step 1 Items: ${missingSummary}`,
+    `- PDF/Step 4 Unlock Status: ${ctx.isPaid ? 'Unlocked (Watermark removed & Step 4 enabled)' : 'Locked (Requires Korea Bank transfer receipt, Telegram bot code, or Redeem/Promo code in Step 3)'}`,
+    '',
+    'ACCURATE WEBSITE MAP & WORKFLOW:',
+    '1. Guide Tab (TOPIK → KIIP Linkage Guide): Explains eligibility, official TOPIK-to-KIIP level conversion (TOPIK Level 2 → KIIP Level 3, TOPIK Level 3 → KIIP Level 4, TOPIK Level 4 → KIIP Level 5 Basic, TOPIK Level 5–6 → KIIP Level 5 exam track), validity rules, and submission tips.',
+    '2. Step 1 — Upload Documents & Info (Mandatory 6 items to unlock Steps 2–4):',
+    '   (1) ARC Front & Back (외국인등록증 앞·뒷면) — supports automatic AI OCR extraction of Name, ARC number, Visa, and Nationality.',
+    '   (2) TOPIK Score Certificate (성적증명서) — supports automatic AI OCR extraction of Exam number, Score, Level, and Verification number.',
+    '   (3) Passport Copy (여권 사본).',
+    '   (4) Signature (서명) — draw directly on screen or upload photo with automatic background removal.',
+    '   (5) Socinet Account ID & Password (사회통합정보망 아이디/비밀번호 — required by immigration officers to link your TOPIK score on socinet.go.kr; note: must already have a registered Socinet account).',
+    '   (6) Korean Phone Number (전화번호).',
+    '   Tip: Users who just want to preview how the portal works can click "Load Sample" to populate demo documents in 1 click.',
+    '3. Step 2 — Official Application Form & Signature Placement: Review/edit the auto-filled Ministry of Justice KIIP-TOPIK linkage application form (사회통합프로그램 연계신청서) and drag/resize the signature inside the signature box.',
+    '4. Step 3 — Merged PDF Preview & Unlock: Combines the filled application form + ARC + Passport + TOPIK certificate into one print-ready official PDF. To remove the watermark and unlock Step 4, users can:',
+    '   - Transfer via Korea Bank and upload the transfer receipt screenshot for instant AI verification & auto-unlock,',
+    '   - Use the Telegram bot auto-unlock receipt flow, or',
+    '   - Enter a valid Redeem Code / Center Promo Code.',
+    '5. Step 4 — Immigration Center Email Submission: Matches the applicant region/address to the jurisdiction Immigration / KIIP Operation Center email (출입국·외국인청 / 사회통합운영기관) and prepares the email with ready-to-paste subject & body so the user can attach their merged PDF and send.',
+    '6. Extra Portal Tools: 50+ Language Selector in the top bar, Socinet Account Notice popup, Background Wallpaper Settings, and automatic draft saving.',
+    '',
+    'INTERACTIVE NAVIGATION SHORTCUTS:',
+    'When guiding the user to open a specific step or dialog on this website, you may append up to 2 action tags on a new line at the very end of your reply using ONLY these exact tokens:',
+    '  [[NAV:step1]] — Jump to Step 1 (Upload Documents)',
+    '  [[NAV:step2]] — Jump to Step 2 (Application Form)',
+    '  [[NAV:step3]] — Jump to Step 3 (PDF Preview & Download)',
+    '  [[NAV:step4]] — Jump to Step 4 (Send Email to Immigration)',
+    '  [[NAV:guide]] — Open TOPIK → KIIP Official Guide tab',
+    '  [[NAV:socinet]] — Open Socinet ID/Password Notice',
+    '  [[NAV:payment]] — Open Unlock / Redeem Code dialog',
+    '  [[NAV:language]] — Open 50+ Language Selector',
+    '  [[NAV:sample]] — Load 1-Click Sample Documents for testing',
+    'Only include navigation tags that genuinely help answer the user’s request. Never invent any other tag names.',
+    '',
+    'SAFETY & ACCURACY RULES:',
+    '- Never invent fake immigration center emails, fake redeem codes, or promise official Ministry of Justice approval.',
+    '- Never ask for or discuss API keys, passwords to the admin dashboard, or internal server configuration.',
+  ].join('\n');
+}
+
+app.post('/api/chat-guide', async (req, res) => {
+  const ai = getAiClient();
+  if (!ai) {
+    return res.status(503).json({
+      success: false,
+      error: 'AI Assistant is temporarily unavailable because GEMINI_API_KEY is not configured on the server.',
+    });
+  }
+
+  const rawMessages = Array.isArray(req.body?.messages) ? req.body.messages : [];
+  if (rawMessages.length === 0) {
+    return res.status(400).json({ success: false, error: 'Please enter a message.' });
+  }
+
+  // Sanitize & cap multi-turn history
+  const cleaned: ChatGuideHistoryItem[] = [];
+  for (const item of rawMessages.slice(-24)) {
+    const role = item?.role === 'model' ? 'model' : item?.role === 'user' ? 'user' : null;
+    const text = typeof item?.text === 'string' ? item.text.trim().slice(0, 2000) : '';
+    if (!role || !text) continue;
+    cleaned.push({ role, text });
+  }
+
+  if (cleaned.length === 0 || cleaned[cleaned.length - 1].role !== 'user') {
+    return res.status(400).json({ success: false, error: 'The latest message must be from the user.' });
+  }
+
+  const latestUserMessage = cleaned[cleaned.length - 1].text;
+  const priorHistory = cleaned.slice(0, -1).map((m) => ({
+    role: m.role,
+    parts: [{ text: m.text }],
+  }));
+
+  const rawCtx = req.body?.context && typeof req.body.context === 'object' ? req.body.context : {};
+  const ctx = {
+    lang: String(rawCtx.lang || 'km').slice(0, 12),
+    activeTab: rawCtx.activeTab === 'guide' ? 'guide' : 'flow',
+    currentStep: Math.min(4, Math.max(1, Number(rawCtx.currentStep) || 1)),
+    isStep1Ready: Boolean(rawCtx.isStep1Ready),
+    missingItems: Array.isArray(rawCtx.missingItems)
+      ? rawCtx.missingItems.map((x: any) => String(x).slice(0, 60)).slice(0, 10)
+      : [],
+    isPaid: Boolean(rawCtx.isPaid),
+  };
+
+  const systemInstruction = buildWebsiteGuideSystemInstruction(ctx);
+
+  let streamResponse: AsyncIterable<any> | null = null;
+  let lastError: any = null;
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const chat = ai.chats.create({
+        model: 'gemini-4-hydrogen',
+        history: priorHistory,
+        config: {
+          systemInstruction,
+          thinkingConfig: {
+            thinkingLevel: ThinkingLevel.LOW,
+          },
+        },
+      });
+      streamResponse = await chat.sendMessageStream({ message: latestUserMessage });
+      break;
+    } catch (err: any) {
+      lastError = err;
+      if (attempt === 0 && isTransientError(err)) {
+        await sleep(800);
+        continue;
+      }
+      break;
+    }
+  }
+
+  if (!streamResponse) {
+    const errMsg = formatGeminiError(lastError);
+    console.error('[ChatGuide] Gemini stream init failed:', errMsg);
+    if (isAuthOrKeyError(lastError)) {
+      return res.status(401).json({
+        success: false,
+        error: 'Gemini API authentication failed. Please check the API key in Settings > Secrets.',
+      });
+    }
+    return res.status(502).json({
+      success: false,
+      error: 'Unable to reach the assistant right now. Please try again in a moment.',
+    });
+  }
+
+  res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+
+  let clientClosed = false;
+  req.on('close', () => {
+    clientClosed = true;
+  });
+
+  try {
+    for await (const chunk of streamResponse) {
+      if (clientClosed) break;
+      const delta = chunk?.text;
+      if (typeof delta === 'string' && delta.length > 0) {
+        res.write(`data: ${JSON.stringify({ delta })}\n\n`);
+      }
+    }
+    if (!clientClosed) {
+      res.write(`data: ${JSON.stringify({ done: true })}\n\n`);
+      res.end();
+    }
+  } catch (err: any) {
+    console.error('[ChatGuide] Stream interrupted:', formatGeminiError(err));
+    if (!clientClosed) {
+      res.write(
+        `data: ${JSON.stringify({
+          error: 'The response stream was interrupted. Please try sending your question again.',
+        })}\n\n`
+      );
+      res.end();
+    }
+  }
+});
+
 // Setup Vite middleware in dev or static files in production
 async function startServer() {
   const http = await import('http');
