@@ -26,9 +26,16 @@ import {
   deleteAdminAccount,
   recordUniqueVisitSession,
   getTotalRecordedVisits,
+  registerUserAccount,
+  verifyUserLogin,
+  upsertOtpUserAccount,
+  getUserAccountByEmail,
+  resetUserAccountPassword,
   type RedeemCodeStatus,
   type AdminAccountRole,
+  type PublicUserRecord,
 } from './src/server/redeemDb.ts';
+import { runServerSideOcrFallback } from './src/server/serverOcr.ts';
 
 dotenv.config();
 dns.setDefaultResultOrder('ipv4first');
@@ -574,10 +581,33 @@ function extractFromSvgOrText(textCorpus: string): Record<string, any> {
 // API endpoint to extract form data from uploaded documents
 app.post('/api/extract-documents', async (req, res) => {
   try {
-    const { arcFront, arcBack, topikCert, topikCertList, passport, passportList } = req.body;
+    const { arcFront, arcBack, topikCert, topikCertList, passport, passportList, pdfTexts } = req.body || {};
 
     const parts: any[] = [];
     const textRepresentations: string[] = [];
+
+    const firstTopikUrl =
+      topikCert ||
+      (Array.isArray(topikCertList) && topikCertList.length > 0
+        ? (typeof topikCertList[0] === 'string' ? topikCertList[0] : topikCertList[0]?.dataUrl)
+        : null);
+    const firstPassportUrl =
+      passport ||
+      (Array.isArray(passportList) && passportList.length > 0
+        ? (typeof passportList[0] === 'string' ? passportList[0] : passportList[0]?.dataUrl)
+        : null);
+
+    // Collect any extracted digital PDF text sent by the browser
+    if (pdfTexts && typeof pdfTexts === 'object') {
+      for (const [k, v] of Object.entries(pdfTexts)) {
+        if (typeof v === 'string' && v.trim()) {
+          textRepresentations.push(v.trim());
+          parts.push({
+            text: `[Extracted PDF Digital Text for ${k}]:\n${v.trim().slice(0, 6000)}`,
+          });
+        }
+      }
+    }
 
     // Helper to format inline image or convert SVG data url
     const addImagePart = (dataUrl: string, label: string) => {
@@ -612,7 +642,7 @@ app.post('/api/extract-documents', async (req, res) => {
           mime === 'image/jfif' ||
           mime === 'image/pjpeg' ||
           mime === 'application/octet-stream' ||
-          !mime.startsWith('image/') && mime !== 'application/pdf'
+          (!mime.startsWith('image/') && mime !== 'application/pdf')
         ) {
           mime = 'image/jpeg';
         }
@@ -655,31 +685,11 @@ app.post('/api/extract-documents', async (req, res) => {
       });
     }
 
-    // Default smart structured data so user is NEVER blocked
-    const smartDefault = {
-      name: 'SOK SRORNG',
-      regNumber1: '950910',
-      regNumber2: '5760023',
-      gender: '남',
-      nationality: 'Cambodia',
-      visaStatus: 'E-9-1',
-      address: '충청남도 서산시 수석산업로 85-9 (수석동)',
-      docVerificationNo: ['9849', '2820', '3579', '7920'],
-      examNumber: '0010197000017',
-      examDate: '2026-07-05',
-      round: '107',
-      validUntil: '2028-08-12',
-      grade: '2급',
-      passportNo: 'N01847291',
-      passportExpiry: '2031-08-15',
-    };
-
     if (parts.length === 0) {
       return res.json({
-        success: true,
-        data: smartDefault,
+        success: false,
         fallbackMode: true,
-        notice: 'ទិន្នន័យគំរូត្រូវបានបំពេញជូនដោយស្វ័យប្រវត្តិ។',
+        notice: 'សូម Upload ឯកសារជាមុនសិន មុននឹងចាប់ផ្តើមស្កេន OCR។',
       });
     }
 
@@ -813,31 +823,62 @@ Return ONLY structured JSON according to the schema.
       }
     }
 
-    // If uploaded documents were SVG/text representations, parse them directly
-    if (textRepresentations.length > 0) {
-      const combinedCorpus = textRepresentations.join('\n');
-      const fallbackResult = extractFromSvgOrText(combinedCorpus);
-      const sanitizedFallback = sanitizeExtractedData(fallbackResult);
-      if (Object.keys(sanitizedFallback).length > 0) {
-        console.log('[OCR] Successfully recovered document data via structural text parser.');
+    // Run server-side Node Tesseract + structured PDF/SVG/Text OCR fallback
+    try {
+      const ocrFallback = await runServerSideOcrFallback({
+        arcFront,
+        arcBack,
+        topikCert: firstTopikUrl,
+        passport: firstPassportUrl,
+        pdfTexts: pdfTexts && typeof pdfTexts === 'object' ? pdfTexts : undefined,
+      });
+
+      const sanitizedServerOcr = sanitizeExtractedData(ocrFallback.data);
+      if (Object.keys(sanitizedServerOcr).length > 0) {
+        console.log('[OCR] Successfully extracted document fields via server-side Tesseract/PDF parser.');
         return res.json({
           success: true,
-          data: sanitizedFallback,
-          fallbackMode: false,
-          notice: 'ទិន្នន័យត្រូវបានទាញយកដោយស្វ័យប្រវត្តិតាមរយៈម៉ាស៊ីនវិភាគឯកសារ (SVG/Text Parser Engine)។',
+          data: sanitizedServerOcr,
+          model: 'server-ocr-tesseract',
+          rawTextPreview: ocrFallback.rawTextPreview,
         });
       }
-    }
 
-    // Signal client to run in-browser Tesseract OCR on the actual uploaded image files
-    return res.json({
-      success: false,
-      fallbackMode: true,
-      notice: authErrorDetected
-        ? 'Please verify GEMINI_API_KEY in Settings > Secrets. Using client-side OCR engine.'
-        : 'Using client-side OCR engine for direct image scanning.',
-      ...(lastErrorDetail ? { detail: lastErrorDetail } : {}),
-    });
+      // Also check legacy textRepresentations if present
+      if (textRepresentations.length > 0) {
+        const combinedCorpus = textRepresentations.join('\n');
+        const fallbackResult = extractFromSvgOrText(combinedCorpus);
+        const sanitizedFallback = sanitizeExtractedData(fallbackResult);
+        if (Object.keys(sanitizedFallback).length > 0) {
+          console.log('[OCR] Successfully recovered document data via structural text parser.');
+          return res.json({
+            success: true,
+            data: sanitizedFallback,
+            model: 'server-text-parser',
+            rawTextPreview: ocrFallback.rawTextPreview,
+          });
+        }
+      }
+
+      // Signal client to run secondary browser pass if server OCR detected 0 fields
+      return res.json({
+        success: false,
+        fallbackMode: true,
+        rawTextPreview: ocrFallback.rawTextPreview,
+        notice: authErrorDetected
+          ? 'Please verify GEMINI_API_KEY in Settings > Secrets. Trying browser OCR engine.'
+          : 'Server OCR did not detect clear fields; trying browser OCR engine.',
+        ...(lastErrorDetail ? { detail: lastErrorDetail } : {}),
+      });
+    } catch (ocrErr: any) {
+      console.warn('[OCR] Server-side fallback failed:', ocrErr);
+      return res.json({
+        success: false,
+        fallbackMode: true,
+        notice: 'Using client-side OCR engine for direct image scanning.',
+        ...(lastErrorDetail ? { detail: lastErrorDetail } : {}),
+      });
+    }
   } catch (error: any) {
     console.error('Unexpected error during document extraction:', error);
     return res.json({
@@ -2618,6 +2659,283 @@ app.post('/api/chat-guide', async (req, res) => {
       res.end();
     }
   }
+});
+
+// ============================================================================
+// PUBLIC USER AUTHENTICATION (Sign Up, Sign In, OTP & Password Reset)
+// ============================================================================
+const USER_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const pendingUserOtps = new Map<string, { code: string; expiresAt: number; attempts: number }>();
+
+function issueUserBearerToken(user: PublicUserRecord): string {
+  const payload = Buffer.from(
+    JSON.stringify({
+      type: 'public_user',
+      uid: user.id,
+      sub: user.email,
+      name: user.name,
+      phone: user.phone || '',
+      provider: user.provider,
+      iat: Date.now(),
+      exp: Date.now() + USER_SESSION_TTL_MS,
+    })
+  ).toString('base64url');
+  const sig = crypto
+    .createHmac('sha256', SESSION_SIGNING_SECRET)
+    .update(payload)
+    .digest('base64url');
+  return `${payload}.${sig}`;
+}
+
+function verifyUserBearerToken(token: string): {
+  uid: number;
+  email: string;
+  name: string;
+  phone: string;
+  provider: 'email' | 'otp' | 'google';
+} | null {
+  if (!token) return null;
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const [payload, sig] = parts;
+  const expectedSig = crypto
+    .createHmac('sha256', SESSION_SIGNING_SECRET)
+    .update(payload)
+    .digest('base64url');
+  if (!safeEqualStrings(sig, expectedSig)) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    if (!parsed || parsed.type !== 'public_user' || typeof parsed.exp !== 'number' || Date.now() > parsed.exp) {
+      return null;
+    }
+    return {
+      uid: Number(parsed.uid) || 0,
+      email: String(parsed.sub || ''),
+      name: String(parsed.name || ''),
+      phone: String(parsed.phone || ''),
+      provider: parsed.provider === 'otp' ? 'otp' : parsed.provider === 'google' ? 'google' : 'email',
+    };
+  } catch {
+    return null;
+  }
+}
+
+app.post('/api/auth/register', (req, res) => {
+  try {
+    const { email, name, phone, password } = req.body || {};
+    const result = registerUserAccount({ email, name, phone, password });
+    if (!result.ok || !result.user) {
+      return res.status(400).json({ success: false, error: result.error || 'Registration failed' });
+    }
+    const token = issueUserBearerToken(result.user);
+    return res.json({
+      success: true,
+      token,
+      user: {
+        isLoggedIn: true,
+        name: result.user.name,
+        email: result.user.email,
+        phone: result.user.phone,
+        avatar: '',
+        provider: result.user.provider,
+      },
+    });
+  } catch (err: any) {
+    console.error('[Auth] Register error:', err);
+    return res.status(500).json({ success: false, error: 'ប្រព័ន្ធមានបញ្ហាក្នុងការចុះឈ្មោះ!' });
+  }
+});
+
+app.post('/api/auth/login', (req, res) => {
+  try {
+    const { email, identifier, password } = req.body || {};
+    const result = verifyUserLogin({
+      identifier: String(identifier || email || ''),
+      password: String(password || ''),
+    });
+    if (!result.ok || !result.user) {
+      return res.status(401).json({ success: false, error: result.error || 'Invalid credentials' });
+    }
+    const token = issueUserBearerToken(result.user);
+    return res.json({
+      success: true,
+      token,
+      user: {
+        isLoggedIn: true,
+        name: result.user.name,
+        email: result.user.email,
+        phone: result.user.phone,
+        avatar: '',
+        provider: result.user.provider,
+      },
+    });
+  } catch (err: any) {
+    console.error('[Auth] Login error:', err);
+    return res.status(500).json({ success: false, error: 'ប្រព័ន្ធមានបញ្ហាក្នុងការចូលគណនី!' });
+  }
+});
+
+app.get('/api/auth/me', (req, res) => {
+  const authHeader = String(req.headers.authorization || '');
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  const session = verifyUserBearerToken(token);
+  if (!session) {
+    return res.status(401).json({ success: false, error: 'Session expired or invalid' });
+  }
+  const dbUser = session.email ? getUserAccountByEmail(session.email) : null;
+  return res.json({
+    success: true,
+    user: {
+      isLoggedIn: true,
+      name: dbUser?.name || session.name || session.email.split('@')[0],
+      email: dbUser?.email || session.email,
+      phone: dbUser?.phone || session.phone,
+      avatar: '',
+      provider: dbUser?.provider || session.provider,
+    },
+  });
+});
+
+app.post('/api/auth/otp/send', (req, res) => {
+  const rawTarget = String(req.body?.target || '').trim().slice(0, 254);
+  if (!rawTarget || rawTarget.length < 5) {
+    return res.status(400).json({
+      success: false,
+      error: 'សូមបញ្ចូលលេខទូរស័ព្ទ ឬ Email ឱ្យបានត្រឹមត្រូវ!',
+    });
+  }
+  const key = `otp:${rawTarget.toLowerCase()}`;
+  const code = String(crypto.randomInt(100000, 999999));
+  pendingUserOtps.set(key, {
+    code,
+    expiresAt: Date.now() + OTP_TTL_MS,
+    attempts: 0,
+  });
+
+  // Clean up expired entries opportunistically
+  for (const [k, v] of pendingUserOtps.entries()) {
+    if (Date.now() > v.expiresAt) pendingUserOtps.delete(k);
+  }
+
+  return res.json({
+    success: true,
+    target: rawTarget,
+    expiresInSeconds: 600,
+    verificationCode: code,
+  });
+});
+
+app.post('/api/auth/otp/verify', (req, res) => {
+  const rawTarget = String(req.body?.target || '').trim().slice(0, 254);
+  const rawCode = String(req.body?.code || '').trim();
+  const rawName = String(req.body?.name || '').trim().slice(0, 120);
+
+  if (!rawTarget || !rawCode) {
+    return res.status(400).json({
+      success: false,
+      error: 'សូមបញ្ចូលលេខទូរស័ព្ទ/Email និងកូដ OTP ៦ ខ្ទង់!',
+    });
+  }
+
+  const key = `otp:${rawTarget.toLowerCase()}`;
+  const entry = pendingUserOtps.get(key);
+  if (!entry || Date.now() > entry.expiresAt) {
+    pendingUserOtps.delete(key);
+    return res.status(400).json({
+      success: false,
+      error: 'កូដ OTP ផុតកំណត់ ឬមិនទាន់បានផ្ញើ! សូមចុច "ផ្ញើកូដ OTP" ម្តងទៀត។',
+    });
+  }
+
+  if (entry.attempts >= 5) {
+    pendingUserOtps.delete(key);
+    return res.status(429).json({
+      success: false,
+      error: 'បញ្ចូលកូដខុសច្រើនដងពេក! សូមស្នើសុំកូដ OTP ថ្មី។',
+    });
+  }
+
+  if (!safeEqualStrings(rawCode, entry.code)) {
+    entry.attempts += 1;
+    return res.status(400).json({
+      success: false,
+      error: 'លេខកូដ OTP មិនត្រឹមត្រូវទេ! សូមពិនិត្យម្តងទៀត។',
+    });
+  }
+
+  pendingUserOtps.delete(key);
+  const user = upsertOtpUserAccount({ target: rawTarget, name: rawName });
+  const token = issueUserBearerToken(user);
+
+  return res.json({
+    success: true,
+    token,
+    user: {
+      isLoggedIn: true,
+      name: user.name,
+      email: user.email,
+      phone: user.phone,
+      avatar: '',
+      provider: 'otp',
+    },
+  });
+});
+
+app.post('/api/auth/reset-password/request', (req, res) => {
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ success: false, error: 'សូមបញ្ចូលអាសយដ្ឋាន Email ឱ្យបានត្រឹមត្រូវ!' });
+  }
+  const existing = getUserAccountByEmail(email);
+  if (!existing) {
+    return res.status(404).json({
+      success: false,
+      error: 'រកមិនឃើញគណនីដែលប្រើ Email នេះក្នុងប្រព័ន្ធទេ!',
+    });
+  }
+  const code = String(crypto.randomInt(100000, 999999));
+  pendingUserOtps.set(`reset:${email}`, {
+    code,
+    expiresAt: Date.now() + OTP_TTL_MS,
+    attempts: 0,
+  });
+  return res.json({
+    success: true,
+    email,
+    resetCode: code,
+  });
+});
+
+app.post('/api/auth/reset-password/confirm', (req, res) => {
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  const code = String(req.body?.code || '').trim();
+  const newPassword = String(req.body?.newPassword || '');
+
+  const key = `reset:${email}`;
+  const entry = pendingUserOtps.get(key);
+  if (!entry || Date.now() > entry.expiresAt) {
+    pendingUserOtps.delete(key);
+    return res.status(400).json({
+      success: false,
+      error: 'កូដកំណត់ពាក្យសម្ងាត់ផុតកំណត់ហើយ! សូមស្នើសុំកូដថ្មី។',
+    });
+  }
+  if (entry.attempts >= 5) {
+    pendingUserOtps.delete(key);
+    return res.status(429).json({ success: false, error: 'បញ្ចូលកូដខុសច្រើនដងពេក!' });
+  }
+  if (!safeEqualStrings(code, entry.code)) {
+    entry.attempts += 1;
+    return res.status(400).json({ success: false, error: 'លេខកូដកំណត់ពាក្យសម្ងាត់មិនត្រឹមត្រូវទេ!' });
+  }
+
+  const resetRes = resetUserAccountPassword({ email, newPassword });
+  if (!resetRes.ok) {
+    return res.status(400).json({ success: false, error: resetRes.error || 'Password reset failed' });
+  }
+  pendingUserOtps.delete(key);
+  return res.json({ success: true });
 });
 
 // Setup Vite middleware in dev or static files in production

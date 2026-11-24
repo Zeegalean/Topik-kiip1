@@ -97,6 +97,19 @@ export function getRedeemDb(): DatabaseSync {
       session_id TEXT PRIMARY KEY,
       first_seen TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS user_accounts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      name TEXT NOT NULL DEFAULT '',
+      phone TEXT NOT NULL DEFAULT '',
+      provider TEXT NOT NULL DEFAULT 'email',
+      salt TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      last_login_at TEXT DEFAULT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_accounts_email ON user_accounts(email);
   `);
 
   dbInstance = db;
@@ -1126,9 +1139,19 @@ export function deleteAdminAccount(id: number): boolean {
 // ============================================================================
 // PERSISTENT VISITOR COUNTER (Real deduplicated sessions in SQLite)
 // ============================================================================
+function ensureVisitorSessionsTable(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS visitor_sessions (
+      session_id TEXT PRIMARY KEY,
+      first_seen TEXT NOT NULL
+    );
+  `);
+}
+
 export function recordUniqueVisitSession(sessionId: string): number {
   const cleanId = String(sessionId || '').trim().slice(0, 64);
   const db = getRedeemDb();
+  ensureVisitorSessionsTable(db);
   if (cleanId) {
     db.prepare(
       `INSERT OR IGNORE INTO visitor_sessions (session_id, first_seen) VALUES (?, ?)`
@@ -1140,7 +1163,310 @@ export function recordUniqueVisitSession(sessionId: string): number {
 
 export function getTotalRecordedVisits(): number {
   const db = getRedeemDb();
+  ensureVisitorSessionsTable(db);
   const row = db.prepare('SELECT COUNT(*) as cnt FROM visitor_sessions').get() as { cnt: number };
   return Math.max(1, Number(row?.cnt || 0));
 }
+
+// ============================================================================
+// PUBLIC USER ACCOUNTS (Sign Up / Sign In / Password Reset in SQLite)
+// ============================================================================
+export interface PublicUserRecord {
+  id: number;
+  email: string;
+  name: string;
+  phone: string;
+  provider: 'email' | 'otp' | 'google';
+  createdAt: string;
+  lastLoginAt: string | null;
+}
+
+function ensureUserAccountsTable(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS user_accounts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      email TEXT NOT NULL UNIQUE COLLATE NOCASE,
+      name TEXT NOT NULL DEFAULT '',
+      phone TEXT NOT NULL DEFAULT '',
+      provider TEXT NOT NULL DEFAULT 'email',
+      salt TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      last_login_at TEXT DEFAULT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_user_accounts_email ON user_accounts(email);
+  `);
+}
+
+function hashUserPassword(password: string, salt: string): string {
+  return crypto.scryptSync(password, salt, 64).toString('hex');
+}
+
+function verifyUserPasswordHash(password: string, salt: string, storedHash: string): boolean {
+  const candidate = hashUserPassword(password, salt);
+  const a = Buffer.from(candidate, 'utf8');
+  const b = Buffer.from(storedHash, 'utf8');
+  if (a.length !== b.length) return false;
+  return crypto.timingSafeEqual(a, b);
+}
+
+export function registerUserAccount(params: {
+  email: string;
+  name: string;
+  phone?: string;
+  password: string;
+}): { ok: boolean; user?: PublicUserRecord; error?: string } {
+  const email = String(params.email || '').trim().toLowerCase().slice(0, 254);
+  const name = String(params.name || '').trim().slice(0, 120);
+  const phone = String(params.phone || '').trim().slice(0, 40);
+  const password = String(params.password || '');
+
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return { ok: false, error: 'សូមបញ្ចូលអាសយដ្ឋាន Email ឱ្យបានត្រឹមត្រូវ!' };
+  }
+  if (password.length < 6 || password.length > 128) {
+    return { ok: false, error: 'ពាក្យសម្ងាត់ត្រូវមានយ៉ាងតិច ៦ តួអក្សរ!' };
+  }
+
+  const db = getRedeemDb();
+  ensureUserAccountsTable(db);
+
+  const existing = db
+    .prepare('SELECT id FROM user_accounts WHERE email = ?')
+    .get(email) as { id: number } | undefined;
+  if (existing) {
+    return {
+      ok: false,
+      error: 'Email នេះត្រូវបានចុះឈ្មោះរួចហើយ! សូមជ្រើសរើស "ចូលគណនី (Sign In)" ជំនួសវិញ។',
+    };
+  }
+
+  const displayName = name || email.split('@')[0];
+  const salt = crypto.randomBytes(16).toString('hex');
+  const passwordHash = hashUserPassword(password, salt);
+  const nowIso = new Date().toISOString();
+
+  const info = db
+    .prepare(
+      `INSERT INTO user_accounts (email, name, phone, provider, salt, password_hash, created_at, last_login_at)
+       VALUES (?, ?, ?, 'email', ?, ?, ?, ?)`
+    )
+    .run(email, displayName, phone, salt, passwordHash, nowIso, nowIso);
+
+  return {
+    ok: true,
+    user: {
+      id: Number(info.lastInsertRowid),
+      email,
+      name: displayName,
+      phone,
+      provider: 'email',
+      createdAt: nowIso,
+      lastLoginAt: nowIso,
+    },
+  };
+}
+
+export function verifyUserLogin(params: {
+  identifier: string;
+  password: string;
+}): { ok: boolean; user?: PublicUserRecord; error?: string } {
+  const identifier = String(params.identifier || '').trim();
+  const password = String(params.password || '');
+
+  if (!identifier || !password) {
+    return { ok: false, error: 'សូមបញ្ចូល Email និងពាក្យសម្ងាត់!' };
+  }
+
+  const db = getRedeemDb();
+  ensureUserAccountsTable(db);
+
+  const lower = identifier.toLowerCase();
+  const cleanPhone = identifier.replace(/[^0-9+]/g, '');
+  const row = db
+    .prepare(
+      `SELECT id, email, name, phone, provider, salt, password_hash, created_at, last_login_at
+       FROM user_accounts
+       WHERE email = ? OR (phone != '' AND phone = ?)
+       LIMIT 1`
+    )
+    .get(lower, cleanPhone || '__no_phone__') as
+    | {
+        id: number;
+        email: string;
+        name: string;
+        phone: string;
+        provider: string;
+        salt: string;
+        password_hash: string;
+        created_at: string;
+        last_login_at: string | null;
+      }
+    | undefined;
+
+  if (!row) {
+    return {
+      ok: false,
+      error: 'រកមិនឃើញគណនីនេះទេ! សូមពិនិត្យ Email ឬចុច "ចុះឈ្មោះ (Sign Up)" ជាមុនសិន។',
+    };
+  }
+
+  if (!verifyUserPasswordHash(password, row.salt, row.password_hash)) {
+    return {
+      ok: false,
+      error: 'ពាក្យសម្ងាត់មិនត្រឹមត្រូវទេ! សូមព្យាយាមម្តងទៀត ឬចុចភ្លេចពាក្យសម្ងាត់។',
+    };
+  }
+
+  const nowIso = new Date().toISOString();
+  db.prepare('UPDATE user_accounts SET last_login_at = ? WHERE id = ?').run(nowIso, row.id);
+
+  return {
+    ok: true,
+    user: {
+      id: Number(row.id),
+      email: String(row.email),
+      name: String(row.name || row.email.split('@')[0]),
+      phone: String(row.phone || ''),
+      provider: (row.provider === 'otp' ? 'otp' : 'email') as 'email' | 'otp',
+      createdAt: String(row.created_at),
+      lastLoginAt: nowIso,
+    },
+  };
+}
+
+export function upsertOtpUserAccount(params: {
+  target: string;
+  name?: string;
+}): PublicUserRecord {
+  const rawTarget = String(params.target || '').trim().slice(0, 254);
+  const isEmail = rawTarget.includes('@');
+  const normalizedPhone = isEmail ? '' : rawTarget.replace(/[^0-9+]/g, '') || rawTarget;
+  const normalizedEmail = isEmail
+    ? rawTarget.toLowerCase()
+    : `${normalizedPhone.replace(/[^a-zA-Z0-9]/g, '') || 'user'}@otp.kiip-portal.kr`;
+
+  const db = getRedeemDb();
+  ensureUserAccountsTable(db);
+
+  const existing = db
+    .prepare(
+      `SELECT id, email, name, phone, provider, created_at
+       FROM user_accounts
+       WHERE email = ? OR (phone != '' AND phone = ?)
+       LIMIT 1`
+    )
+    .get(normalizedEmail, normalizedPhone || '__no_phone__') as
+    | {
+        id: number;
+        email: string;
+        name: string;
+        phone: string;
+        provider: string;
+        created_at: string;
+      }
+    | undefined;
+
+  const nowIso = new Date().toISOString();
+  if (existing) {
+    const nextName = String(params.name || '').trim() || existing.name || normalizedEmail.split('@')[0];
+    db.prepare('UPDATE user_accounts SET last_login_at = ?, name = ? WHERE id = ?').run(
+      nowIso,
+      nextName,
+      existing.id
+    );
+    return {
+      id: Number(existing.id),
+      email: String(existing.email),
+      name: nextName,
+      phone: String(existing.phone || normalizedPhone),
+      provider: 'otp',
+      createdAt: String(existing.created_at),
+      lastLoginAt: nowIso,
+    };
+  }
+
+  const displayName =
+    String(params.name || '').trim() ||
+    (isEmail ? normalizedEmail.split('@')[0] : `User (${rawTarget})`);
+  const salt = crypto.randomBytes(16).toString('hex');
+  const randomHash = hashUserPassword(crypto.randomBytes(24).toString('hex'), salt);
+
+  const info = db
+    .prepare(
+      `INSERT INTO user_accounts (email, name, phone, provider, salt, password_hash, created_at, last_login_at)
+       VALUES (?, ?, ?, 'otp', ?, ?, ?, ?)`
+    )
+    .run(normalizedEmail, displayName, normalizedPhone, salt, randomHash, nowIso, nowIso);
+
+  return {
+    id: Number(info.lastInsertRowid),
+    email: normalizedEmail,
+    name: displayName,
+    phone: normalizedPhone,
+    provider: 'otp',
+    createdAt: nowIso,
+    lastLoginAt: nowIso,
+  };
+}
+
+export function getUserAccountByEmail(email: string): PublicUserRecord | null {
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  if (!cleanEmail) return null;
+  const db = getRedeemDb();
+  ensureUserAccountsTable(db);
+  const row = db
+    .prepare(
+      `SELECT id, email, name, phone, provider, created_at, last_login_at
+       FROM user_accounts
+       WHERE email = ?
+       LIMIT 1`
+    )
+    .get(cleanEmail) as
+    | {
+        id: number;
+        email: string;
+        name: string;
+        phone: string;
+        provider: string;
+        created_at: string;
+        last_login_at: string | null;
+      }
+    | undefined;
+  if (!row) return null;
+  return {
+    id: Number(row.id),
+    email: String(row.email),
+    name: String(row.name || row.email.split('@')[0]),
+    phone: String(row.phone || ''),
+    provider: row.provider === 'otp' ? 'otp' : 'email',
+    createdAt: String(row.created_at),
+    lastLoginAt: row.last_login_at ? String(row.last_login_at) : null,
+  };
+}
+
+export function resetUserAccountPassword(params: {
+  email: string;
+  newPassword: string;
+}): { ok: boolean; error?: string } {
+  const email = String(params.email || '').trim().toLowerCase();
+  const newPassword = String(params.newPassword || '');
+  if (!email) return { ok: false, error: 'សូមបញ្ចូល Email!' };
+  if (newPassword.length < 6 || newPassword.length > 128) {
+    return { ok: false, error: 'ពាក្យសម្ងាត់ថ្មីត្រូវមានយ៉ាងតិច ៦ តួអក្សរ!' };
+  }
+
+  const db = getRedeemDb();
+  ensureUserAccountsTable(db);
+  const salt = crypto.randomBytes(16).toString('hex');
+  const passwordHash = hashUserPassword(newPassword, salt);
+  const info = db
+    .prepare('UPDATE user_accounts SET salt = ?, password_hash = ? WHERE email = ?')
+    .run(salt, passwordHash, email);
+  if (Number(info.changes) === 0) {
+    return { ok: false, error: 'រកមិនឃើញគណនីដែលប្រើ Email នេះទេ!' };
+  }
+  return { ok: true };
+}
+
 

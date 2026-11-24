@@ -1,5 +1,6 @@
 import dns from 'dns';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import { parseStructuredTextCorpus } from '../src/server/serverOcr.ts';
 
 dns.setDefaultResultOrder('ipv4first');
 
@@ -251,9 +252,18 @@ export default async function handler(req: any, res: any) {
 
   try {
     const body = await readJsonBody(req);
-    const { arcFront, arcBack, topikCert, topikCertList, passport, passportList } = body || {};
+    const { arcFront, arcBack, topikCert, topikCertList, passport, passportList, pdfTexts } = body || {};
 
     const parts: any[] = [];
+    if (pdfTexts && typeof pdfTexts === 'object') {
+      for (const [k, v] of Object.entries(pdfTexts)) {
+        if (typeof v === 'string' && v.trim()) {
+          parts.push({
+            text: `[Extracted PDF Digital Text for ${k}]:\n${v.trim().slice(0, 6000)}`,
+          });
+        }
+      }
+    }
 
     const addImagePart = (dataUrl: string, label: string) => {
       if (!dataUrl || typeof dataUrl !== 'string') return;
@@ -332,8 +342,27 @@ export default async function handler(req: any, res: any) {
       });
     }
 
+    const parsedFromPdfTexts =
+      pdfTexts && typeof pdfTexts === 'object'
+        ? sanitizeExtractedData(
+            parseStructuredTextCorpus({
+              arcFrontText: String(pdfTexts.arcFront || ''),
+              arcBackText: String(pdfTexts.arcBack || ''),
+              topikText: String(pdfTexts.topikCert || ''),
+              passportText: String(pdfTexts.passport || ''),
+            })
+          )
+        : {};
+
     const ai = getAiClient();
     if (!ai) {
+      if (Object.keys(parsedFromPdfTexts).length > 0) {
+        return res.status(200).json({
+          success: true,
+          data: parsedFromPdfTexts,
+          model: 'pdf-text-parser',
+        });
+      }
       return res.status(200).json({
         success: false,
         fallbackMode: true,
@@ -453,6 +482,14 @@ Return ONLY structured JSON according to the schema.
           model: successfulModel,
         });
       }
+    }
+
+    if (Object.keys(parsedFromPdfTexts).length > 0) {
+      return res.status(200).json({
+        success: true,
+        data: parsedFromPdfTexts,
+        model: 'pdf-text-parser',
+      });
     }
 
     return res.status(200).json({

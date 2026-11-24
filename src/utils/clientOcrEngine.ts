@@ -9,6 +9,7 @@ import {
   cleanGrade,
   cleanName,
 } from './sanitizers';
+import { extractPdfTextAndImageFromDataUrl, isPdfDataUrl } from './pdfOcrUtils';
 
 export interface ExtractedDocumentData {
   name?: string | null;
@@ -67,7 +68,7 @@ export async function compressImageForApi(
   quality: number = 0.78
 ): Promise<string | null | undefined> {
   if (!dataUrl || typeof dataUrl !== 'string') return dataUrl;
-  if (dataUrl.startsWith('data:image/svg+xml') || dataUrl.startsWith('data:application/pdf')) {
+  if (dataUrl.startsWith('data:image/svg+xml') || isPdfDataUrl(dataUrl)) {
     return dataUrl;
   }
 
@@ -279,19 +280,29 @@ async function runBrowserOcrOnImage(
     }
   }
 
-  // If PDF data URL, extract any embedded readable ASCII/text strings
-  if (dataUrl.startsWith('data:application/pdf')) {
+  // If PDF data URL, extract real digital text + rasterize Page 1 via pdfjs-dist (never raw atob binary!)
+  if (isPdfDataUrl(dataUrl)) {
     try {
-      const base64 = dataUrl.split(';base64,')[1];
-      if (base64) {
-        const text = atob(base64);
-        ocrTextCache.set(cacheKey, text);
-        return text;
+      const pdfParsed = await extractPdfTextAndImageFromDataUrl(dataUrl);
+      let visualText = '';
+      // If scanned PDF (minimal digital text) and Page 1 rendered to image, also run Tesseract OCR
+      if (pdfParsed.imageUrl && pdfParsed.text.trim().length < 80) {
+        const processedPdfImg = await preprocessImageForOcr(pdfParsed.imageUrl, enhanceContrast);
+        const ocrPromise = Tesseract.recognize(processedPdfImg, langSpec);
+        const timeoutPromise = new Promise<{ data?: { text?: string } }>((resolve) =>
+          setTimeout(() => resolve({ data: { text: '' } }), 35000)
+        );
+        const result = await Promise.race([ocrPromise, timeoutPromise]);
+        visualText = result?.data?.text || '';
       }
+      const combinedPdfText = [pdfParsed.text, visualText].filter(Boolean).join('\n');
+      if (combinedPdfText.trim()) {
+        ocrTextCache.set(cacheKey, combinedPdfText);
+      }
+      return combinedPdfText;
     } catch {
       return '';
     }
-    return '';
   }
 
   try {
@@ -936,45 +947,101 @@ export function parseOcrCorpusToData(
 }
 
 /**
- * Server-side Gemini document extraction proxy with local Tesseract.js fallback.
- * All Gemini model calls are executed exclusively on the server.
+ * Counts meaningful extracted OCR fields (ignoring placeholders).
+ */
+export function countExtractedFields(data: ExtractedDocumentData | null | undefined): number {
+  if (!data) return 0;
+  let count = 0;
+  if (data.name && data.name.trim() && data.name.trim() !== '0000 0000') count++;
+  if (data.regNumber1 && /^\d{6}$/.test(data.regNumber1) && data.regNumber1 !== '000000') count++;
+  if (data.regNumber2 && /^\d{7}$/.test(data.regNumber2) && data.regNumber2 !== '0000000') count++;
+  if (data.visaStatus && data.visaStatus.trim()) count++;
+  if (data.address && data.address.trim().length >= 5 && !data.address.startsWith('00000')) count++;
+  if (data.passportNo && data.passportNo.trim().length >= 6) count++;
+  if (data.passportExpiry && !data.passportExpiry.startsWith('0000')) count++;
+  if (data.examNumber && data.examNumber.trim().length >= 6 && !/^0+$/.test(data.examNumber)) count++;
+  if (data.round && data.round.trim() && data.round !== '0' && data.round !== '000') count++;
+  if (data.grade && /^[1-6]급$/.test(data.grade.trim())) count++;
+  if (data.examDate && !data.examDate.startsWith('0000')) count++;
+  if (data.validUntil && !data.validUntil.startsWith('0000')) count++;
+  if (Array.isArray(data.docVerificationNo) && data.docVerificationNo.some((p) => p && p !== '0000')) count++;
+  else if (typeof data.docVerificationNo === 'string' && data.docVerificationNo.replace(/0|-|\s/g, '').length > 0) count++;
+  return count;
+}
+
+/**
+ * Prepares any document DataURL (Raster Image, SVG, or PDF) for /api/extract-documents:
+ * converts PDFs to both extracted digital text + rasterized Page 1 JPEG so server-side
+ * OCR & Gemini Vision work seamlessly on both scanned and digital PDFs.
+ */
+export async function prepareDocumentForOcrApi(
+  dataUrl: string | null | undefined
+): Promise<{ apiUrl: string | null | undefined; pdfText: string }> {
+  if (!dataUrl) return { apiUrl: dataUrl, pdfText: '' };
+  if (isPdfDataUrl(dataUrl)) {
+    const parsed = await extractPdfTextAndImageFromDataUrl(dataUrl, 1600);
+    const compressedImg = parsed.imageUrl
+      ? await compressImageForApi(parsed.imageUrl, 1400, 0.85)
+      : dataUrl;
+    return {
+      apiUrl: compressedImg || dataUrl,
+      pdfText: parsed.text || '',
+    };
+  }
+  return {
+    apiUrl: await compressImageForApi(dataUrl),
+    pdfText: '',
+  };
+}
+
+/**
+ * Server-side OCR proxy with local Tesseract.js + PDF.js fallback.
  */
 export async function extractDocumentsClientSide(params: {
   arcFront?: string | null;
   arcBack?: string | null;
   topikCert?: string | null;
   passport?: string | null;
+  pdfTexts?: {
+    arcFront?: string;
+    arcBack?: string;
+    topikCert?: string;
+    passport?: string;
+  };
   skipServer?: boolean;
 }): Promise<ExtractedDocumentData> {
-  // 1. Try server-side Gemini OCR endpoint first unless caller already attempted it
+  // Prepare PDF texts & rasterized PDF pages upfront
+  const [pFront, pBack, pTopik, pPassport] = await Promise.all([
+    prepareDocumentForOcrApi(params.arcFront),
+    prepareDocumentForOcrApi(params.arcBack),
+    prepareDocumentForOcrApi(params.topikCert),
+    prepareDocumentForOcrApi(params.passport),
+  ]);
+
+  const mergedPdfTexts = {
+    arcFront: [params.pdfTexts?.arcFront || '', pFront.pdfText].filter(Boolean).join('\n'),
+    arcBack: [params.pdfTexts?.arcBack || '', pBack.pdfText].filter(Boolean).join('\n'),
+    topikCert: [params.pdfTexts?.topikCert || '', pTopik.pdfText].filter(Boolean).join('\n'),
+    passport: [params.pdfTexts?.passport || '', pPassport.pdfText].filter(Boolean).join('\n'),
+  };
+
+  // 1. Try server-side Gemini / Node Tesseract OCR endpoint first unless caller already attempted it
   if (!params.skipServer) {
     try {
-      const [cFront, cBack, cTopik, cPassport] = await Promise.all([
-        compressImageForApi(params.arcFront),
-        compressImageForApi(params.arcBack),
-        compressImageForApi(params.topikCert),
-        compressImageForApi(params.passport),
-      ]);
       const res = await fetch('/api/extract-documents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          arcFront: cFront,
-          arcBack: cBack,
-          topikCert: cTopik,
-          passport: cPassport,
+          arcFront: pFront.apiUrl,
+          arcBack: pBack.apiUrl,
+          topikCert: pTopik.apiUrl,
+          passport: pPassport.apiUrl,
+          pdfTexts: mergedPdfTexts,
         }),
       });
       if (res.ok) {
         const result = await res.json();
-        if (
-          result.success &&
-          result.data &&
-          (result.data.name ||
-            result.data.regNumber1 ||
-            result.data.examNumber ||
-            (Array.isArray(result.data.docVerificationNo) && result.data.docVerificationNo.length > 0))
-        ) {
+        if (result.success && result.data && countExtractedFields(result.data) > 0) {
           return result.data as ExtractedDocumentData;
         }
       }
@@ -983,31 +1050,50 @@ export async function extractDocumentsClientSide(params: {
     }
   }
 
-  // 2. Fallback to local Tesseract.js OCR if server is unreachable or GEMINI_API_KEY is missing
-  // Run clean 'eng' pass on ARC Front + Passport first so Hangul character confusion never garbles English names/digits
-  let arcFrontText = params.arcFront ? await runBrowserOcrOnImage(params.arcFront, 'eng', false) : '';
-  let passportText = params.passport ? await runBrowserOcrOnImage(params.passport, 'eng', false) : '';
-  let arcBackText = params.arcBack ? await runBrowserOcrOnImage(params.arcBack, 'kor', false) : '';
-  let topikText = params.topikCert ? await runBrowserOcrOnImage(params.topikCert, 'kor+eng', false) : '';
+  // 2. Fallback to local browser Tesseract.js OCR + PDF digital text
+  const frontSource = isPdfDataUrl(params.arcFront) ? (pFront.apiUrl || params.arcFront) : params.arcFront;
+  const backSource = isPdfDataUrl(params.arcBack) ? (pBack.apiUrl || params.arcBack) : params.arcBack;
+  const topikSource = isPdfDataUrl(params.topikCert) ? (pTopik.apiUrl || params.topikCert) : params.topikCert;
+  const passportSource = isPdfDataUrl(params.passport) ? (pPassport.apiUrl || params.passport) : params.passport;
+
+  let arcFrontText = mergedPdfTexts.arcFront;
+  if (frontSource && !isPdfDataUrl(frontSource)) {
+    arcFrontText = [arcFrontText, await runBrowserOcrOnImage(frontSource, 'eng', false)].filter(Boolean).join('\n');
+  }
+
+  let passportText = mergedPdfTexts.passport;
+  if (passportSource && !isPdfDataUrl(passportSource)) {
+    passportText = [passportText, await runBrowserOcrOnImage(passportSource, 'eng', false)].filter(Boolean).join('\n');
+  }
+
+  let arcBackText = mergedPdfTexts.arcBack;
+  if (backSource && !isPdfDataUrl(backSource)) {
+    arcBackText = [arcBackText, await runBrowserOcrOnImage(backSource, 'kor', false)].filter(Boolean).join('\n');
+  }
+
+  let topikText = mergedPdfTexts.topikCert;
+  if (topikSource && !isPdfDataUrl(topikSource) && topikText.trim().length < 80) {
+    topikText = [topikText, await runBrowserOcrOnImage(topikSource, 'kor+eng', false)].filter(Boolean).join('\n');
+  }
 
   let parsed = parseOcrCorpusToData(arcFrontText, arcBackText, topikText, passportText);
 
   // 3. Targeted high-contrast / MRZ / kor+eng second-pass if primary pass missed key fields
-  if (params.arcFront && (!parsed.regNumber1 || !parsed.name || !parsed.visaStatus)) {
-    const hcFront = await runBrowserOcrOnImage(params.arcFront, 'eng', true);
+  if (frontSource && !isPdfDataUrl(frontSource) && (!parsed.regNumber1 || !parsed.name || !parsed.visaStatus)) {
+    const hcFront = await runBrowserOcrOnImage(frontSource, 'eng', true);
     if (hcFront) arcFrontText = `${arcFrontText}\n${hcFront}`;
   }
-  if (params.arcBack && !parsed.address) {
-    const hcBack = await runBrowserOcrOnImage(params.arcBack, 'kor', true);
+  if (backSource && !isPdfDataUrl(backSource) && !parsed.address) {
+    const hcBack = await runBrowserOcrOnImage(backSource, 'kor', true);
     if (hcBack) arcBackText = `${arcBackText}\n${hcBack}`;
   }
-  if (params.passport && (!parsed.passportNo || !parsed.name)) {
-    const mrzCropUrl = await cropPassportMrzForOcr(params.passport);
+  if (passportSource && !isPdfDataUrl(passportSource) && (!parsed.passportNo || !parsed.name)) {
+    const mrzCropUrl = await cropPassportMrzForOcr(passportSource);
     const mrzText = await runBrowserOcrOnImage(mrzCropUrl, 'eng', false);
     if (mrzText) passportText = `${passportText}\n${mrzText}`;
   }
-  if (params.topikCert && (!parsed.examNumber || !parsed.docVerificationNo)) {
-    const hcTopik = await runBrowserOcrOnImage(params.topikCert, 'kor+eng', true);
+  if (topikSource && !isPdfDataUrl(topikSource) && (!parsed.examNumber || !parsed.docVerificationNo)) {
+    const hcTopik = await runBrowserOcrOnImage(topikSource, 'kor+eng', true);
     if (hcTopik) topikText = `${topikText}\n${hcTopik}`;
   }
 

@@ -89,6 +89,7 @@ export interface UserAccount {
   isLoggedIn: boolean;
   name: string;
   email: string;
+  phone?: string;
   avatar: string;
-  provider: 'google' | 'apple' | 'gmail' | 'guest' | 'otp';
+  provider: 'google' | 'apple' | 'gmail' | 'email' | 'guest' | 'otp';
 }
