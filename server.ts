@@ -1,9 +1,10 @@
 import dns from 'dns';
 import fs from 'fs';
 import crypto from 'crypto';
-import { execSync } from 'child_process';
+import { execFileSync } from 'child_process';
 import express from 'express';
 import dotenv from 'dotenv';
+import nodemailer from 'nodemailer';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -30,6 +31,7 @@ import {
   verifyUserLogin,
   upsertOtpUserAccount,
   getUserAccountByEmail,
+  changeUserAccountPassword,
   resetUserAccountPassword,
   type RedeemCodeStatus,
   type AdminAccountRole,
@@ -54,75 +56,217 @@ function getCliArg(flag: string): string | undefined {
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
+app.disable('x-powered-by');
 const cliPort = getCliArg('--port') || getCliArg('-p');
 const cliHost = getCliArg('--host');
 const port = parseInt(cliPort || process.env.PORT || '3000', 10);
 const host = cliHost || process.env.HOST || '0.0.0.0';
 
-// Enable CORS for public OCR/static endpoints; never allow wildcard CORS on authenticated /api/admin/* routes
-app.use((req, res, next) => {
-  const isAdminRoute = req.path.startsWith('/api/admin');
-  if (!isAdminRoute) {
-    res.setHeader('Access-Control-Allow-Origin', '*');
-  } else {
-    const origin = req.headers.origin;
-    const hostHeader = req.headers['x-forwarded-host'] || req.headers.host;
-    if (origin && hostHeader) {
-      try {
-        const originHost = new URL(origin).host;
-        if (originHost === String(hostHeader).split(',')[0].trim()) {
-          res.setHeader('Access-Control-Allow-Origin', origin);
-          res.setHeader('Vary', 'Origin');
-        }
-      } catch {
-        // Ignore invalid origin
-      }
+function isSameHostOrigin(origin: string | undefined, hostHeader: string | string[] | undefined): boolean {
+  if (!origin || !hostHeader) return false;
+  try {
+    const originHost = new URL(origin).host.toLowerCase();
+    const expectedHost = String(Array.isArray(hostHeader) ? hostHeader[0] : hostHeader)
+      .split(',')[0]
+      .trim()
+      .toLowerCase();
+    return Boolean(originHost && expectedHost && originHost === expectedHost);
+  } catch {
+    return false;
+  }
+}
+
+function isRequestHttps(req: express.Request): boolean {
+  const xfProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  return req.secure || xfProto === 'https';
+}
+
+function parseCookies(req: express.Request): Record<string, string> {
+  const raw = String(req.headers.cookie || '');
+  const out: Record<string, string> = {};
+  if (!raw) return out;
+  for (const part of raw.split(';')) {
+    const eqIdx = part.indexOf('=');
+    if (eqIdx === -1) continue;
+    const key = part.slice(0, eqIdx).trim();
+    const val = part.slice(eqIdx + 1).trim();
+    if (!key) continue;
+    try {
+      out[key] = decodeURIComponent(val);
+    } catch {
+      out[key] = val;
     }
   }
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  if (req.method === 'OPTIONS') {
-    return res.sendStatus(204);
+  return out;
+}
+
+function setHttpOnlyCookie(
+  req: express.Request,
+  res: express.Response,
+  name: string,
+  value: string,
+  maxAgeSeconds: number
+) {
+  const https = isRequestHttps(req);
+  const parts = [
+    `${name}=${encodeURIComponent(value)}`,
+    'Path=/',
+    `Max-Age=${Math.max(0, Math.floor(maxAgeSeconds))}`,
+    'HttpOnly',
+    https ? 'SameSite=None' : 'SameSite=Lax',
+  ];
+  if (https) {
+    parts.push('Secure', 'Partitioned');
   }
+  res.append('Set-Cookie', parts.join('; '));
+}
+
+function clearHttpOnlyCookie(req: express.Request, res: express.Response, name: string) {
+  const https = isRequestHttps(req);
+  const parts = [
+    `${name}=`,
+    'Path=/',
+    'Max-Age=0',
+    'HttpOnly',
+    https ? 'SameSite=None' : 'SameSite=Lax',
+  ];
+  if (https) {
+    parts.push('Secure', 'Partitioned');
+  }
+  res.append('Set-Cookie', parts.join('; '));
+}
+
+function getRateLimitIp(req: express.Request): string {
+  const trustedProxyIp =
+    req.headers['cf-connecting-ip'] ||
+    req.headers['x-appengine-user-ip'];
+  if (typeof trustedProxyIp === 'string' && trustedProxyIp.trim()) {
+    return trustedProxyIp.trim().slice(0, 64);
+  }
+  const raw = String(req.socket?.remoteAddress || req.ip || 'unknown').trim();
+  return raw.startsWith('::ffff:') ? raw.slice(7) : raw;
+}
+
+function createRateLimiter(options: {
+  maxRequests: number;
+  windowMs: number;
+  errorMessage: string;
+}) {
+  const buckets = new Map<string, number[]>();
+  return (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    const now = Date.now();
+    const ip = getRateLimitIp(req);
+    const key = `${ip}:${req.baseUrl || ''}${req.path}`;
+    const cutoff = now - options.windowMs;
+    const recent = (buckets.get(key) || []).filter((ts) => ts > cutoff);
+    if (recent.length >= options.maxRequests) {
+      return res.status(429).json({
+        success: false,
+        error: options.errorMessage,
+      });
+    }
+    recent.push(now);
+    buckets.set(key, recent);
+    if (buckets.size > 5000) {
+      for (const [k, list] of buckets.entries()) {
+        const active = list.filter((ts) => ts > cutoff);
+        if (active.length === 0) buckets.delete(k);
+        else buckets.set(k, active);
+      }
+    }
+    next();
+  };
+}
+
+const adminAuthRateLimiter = createRateLimiter({
+  maxRequests: 15,
+  windowMs: 15 * 60 * 1000,
+  errorMessage: 'ព្យាយាមចូល Admin ច្រើនដងពេក! សូមរង់ចាំ ១៥ នាទីសិន។',
+});
+
+const userAuthRateLimiter = createRateLimiter({
+  maxRequests: 25,
+  windowMs: 15 * 60 * 1000,
+  errorMessage: 'សំណើចូលគណនីច្រើនដងពេក! សូមរង់ចាំបន្តិចរួចព្យាយាមម្តងទៀត។',
+});
+
+const paymentRateLimiter = createRateLimiter({
+  maxRequests: 30,
+  windowMs: 15 * 60 * 1000,
+  errorMessage: 'ព្យាយាមផ្ទៀងផ្ទាត់ការបង់ប្រាក់ច្រើនដងពេក! សូមរង់ចាំបន្តិច។',
+});
+
+const aiApiRateLimiter = createRateLimiter({
+  maxRequests: 35,
+  windowMs: 5 * 60 * 1000,
+  errorMessage: 'ប្រព័ន្ធស្កេន OCR / AI ទទួលសំណើច្រើនពេកបណ្តោះអាសន្ន! សូមរង់ចាំបន្តិច។',
+});
+
+const visitorHeartbeatLimiter = createRateLimiter({
+  maxRequests: 60,
+  windowMs: 5 * 60 * 1000,
+  errorMessage: 'Too many requests.',
+});
+
+// Global HTTP security headers (iframe-compatible for AI Studio preview, safe for Google Sign-In popups)
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(self), microphone=(), geolocation=()');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin-allow-popups');
+  res.setHeader(
+    'Content-Security-Policy',
+    "frame-ancestors 'self' https://aistudio.google.com https://*.google.com https://*.googleusercontent.com"
+  );
+  res.setHeader('X-DNS-Prefetch-Control', 'off');
   next();
 });
 
-// 1. Direct Source Code ZIP download (for GitHub manual upload / backup / offline development)
-app.get(['/api/download-source-zip', '/download-source-zip', '/kiip-source-code.zip', '/api/download-pc-package', '/download-pc-package', '/kiip-topik-pc-package.zip'], (req, res) => {
-  try {
-    const zipPath = '/tmp/kiip-portal-source-code.zip';
-    
-    // Create clean source zip using Python's built-in zipfile (excludes heavy/temporary files)
-    const pythonScript = `
-import zipfile, os
-base_dir = os.path.abspath('.')
-zip_path = '/tmp/kiip-portal-source-code.zip'
-excluded_dirs = {'node_modules', 'dist', '.git', '__pycache__', '.aistudio'}
-excluded_files = {'kiip-portal-source-code.zip', 'kiip-topik-pc-package.zip'}
-with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as z:
-    for root, dirs, files in os.walk(base_dir):
-        dirs[:] = [d for d in dirs if d not in excluded_dirs and not d.startswith('.git')]
-        for file in files:
-            if file in excluded_files or file.endswith('.pyc') or file.endswith('.traineddata'):
-                continue
-            full_path = os.path.join(root, file)
-            rel_path = os.path.relpath(full_path, base_dir)
-            z.write(full_path, rel_path)
-`;
-    execSync(`python3 -c "${pythonScript.replace(/"/g, '\\"')}"`);
-    if (fs.existsSync(zipPath)) {
-      const stats = fs.statSync(zipPath);
-      res.setHeader('Content-Type', 'application/zip');
-      res.setHeader('Content-Disposition', 'attachment; filename="kiip-portal-source-code.zip"');
-      res.setHeader('Content-Length', stats.size.toString());
-      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
-      const stream = fs.createReadStream(zipPath);
-      return stream.pipe(res);
-    }
-    return res.status(500).send('ZIP file creation failed');
-  } catch (err: any) {
-    return res.status(500).send('Error generating ZIP: ' + err.message);
+// Strict Same-Origin CORS & Cross-Site Request Protection for API routes
+app.use((req, res, next) => {
+  if (!req.path.startsWith('/api') && !req.path.startsWith('/download-') && !req.path.endsWith('.zip')) {
+    return next();
   }
+
+  const origin = req.headers.origin;
+  const hostHeader = req.headers['x-forwarded-host'] || req.headers.host;
+  const sameOrigin = isSameHostOrigin(origin, hostHeader);
+
+  if (sameOrigin && origin) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Vary', 'Origin');
+  }
+
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+
+  if (req.method === 'OPTIONS') {
+    if (origin && !sameOrigin) {
+      return res.sendStatus(403);
+    }
+    return res.sendStatus(204);
+  }
+
+  // Enforce Origin match on state-changing requests to auth/admin/payment routes when Origin header is present
+  const isSensitiveStateRoute =
+    req.path.startsWith('/api/admin') ||
+    req.path.startsWith('/api/auth') ||
+    req.path.startsWith('/api/payments');
+  if (
+    isSensitiveStateRoute &&
+    req.method !== 'GET' &&
+    req.method !== 'HEAD' &&
+    origin &&
+    !sameOrigin
+  ) {
+    return res.status(403).json({
+      success: false,
+      error: 'Cross-origin request forbidden.',
+    });
+  }
+
+  next();
 });
 
 app.use(express.static(path.resolve('public')));
@@ -579,7 +723,7 @@ function extractFromSvgOrText(textCorpus: string): Record<string, any> {
 }
 
 // API endpoint to extract form data from uploaded documents
-app.post('/api/extract-documents', async (req, res) => {
+app.post('/api/extract-documents', aiApiRateLimiter, async (req, res) => {
   try {
     const { arcFront, arcBack, topikCert, topikCertList, passport, passportList, pdfTexts } = req.body || {};
 
@@ -889,157 +1033,79 @@ Return ONLY structured JSON according to the schema.
   }
 });
 
-// --- Payment Session & Strict Redeem Code Endpoints (15-Minute ABA QR Expiry) ---
-const ABA_QR_TTL_MS = 15 * 60 * 1000; // 15 minutes
-const DEFAULT_ABA_PAYWAY_LINK = 'https://link.payway.com.kh/ABAPAYzz552103m';
-
-interface AbaPaymentSession {
-  txId: string;
-  createdAt: number;
-  expiresAt: number;
-  amountUsd: number;
-  amountKrw: number;
-  paywayUrl: string;
-  status: 'pending' | 'paid' | 'expired';
-  referenceNote?: string;
-  paidAt?: number;
-}
-
-const abaSessions = new Map<string, AbaPaymentSession>();
-const usedDynamicRedeemCodes = new Set<string>();
+// --- Payment Session & Strict Redeem Code Endpoints ---
+const UNLOCK_COOKIE_NAME = 'kiip_unlock_session';
+const UNLOCK_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 const MASTER_PROMO_CODES = new Set(['199621147', 'KIIP-199621147', 'PROMO-199621147']);
 
-function pruneOldAbaSessions() {
-  const cutoff = Date.now() - 24 * 60 * 60 * 1000;
-  for (const [key, sess] of abaSessions.entries()) {
-    if (sess.createdAt < cutoff) {
-      abaSessions.delete(key);
-    }
+function issueUnlockToken(method: string, ref: string): string {
+  const payload = Buffer.from(
+    JSON.stringify({
+      type: 'pdf_unlock',
+      method: method.slice(0, 40),
+      ref: ref.slice(0, 64),
+      iat: Date.now(),
+      exp: Date.now() + UNLOCK_SESSION_TTL_MS,
+    })
+  ).toString('base64url');
+  const sig = crypto
+    .createHmac('sha256', SESSION_SIGNING_SECRET)
+    .update(payload)
+    .digest('base64url');
+  return `${payload}.${sig}`;
+}
+
+function verifyUnlockToken(token: string): boolean {
+  if (!token) return false;
+  const parts = token.split('.');
+  if (parts.length !== 2) return false;
+  const [payload, sig] = parts;
+  const expectedSig = crypto
+    .createHmac('sha256', SESSION_SIGNING_SECRET)
+    .update(payload)
+    .digest('base64url');
+  if (!safeEqualStrings(sig, expectedSig)) return false;
+  try {
+    const parsed = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    return Boolean(
+      parsed &&
+        parsed.type === 'pdf_unlock' &&
+        typeof parsed.exp === 'number' &&
+        Date.now() <= parsed.exp
+    );
+  } catch {
+    return false;
   }
 }
 
-function getEffectiveSessionStatus(sess: AbaPaymentSession): AbaPaymentSession {
-  if (sess.status === 'pending' && Date.now() >= sess.expiresAt) {
-    sess.status = 'expired';
-  }
-  return sess;
+function grantUnlockCookie(req: express.Request, res: express.Response, method: string, ref: string) {
+  const unlockToken = issueUnlockToken(method, ref);
+  setHttpOnlyCookie(
+    req,
+    res,
+    UNLOCK_COOKIE_NAME,
+    unlockToken,
+    Math.floor(UNLOCK_SESSION_TTL_MS / 1000)
+  );
 }
 
-app.post('/api/payments/aba-session', (req, res) => {
-  pruneOldAbaSessions();
-  const now = Date.now();
-  const randomHex = crypto.randomBytes(3).toString('hex').toUpperCase();
-  const timeSeq = String(now).slice(-5);
-  const txId = `KIIP-${timeSeq}-${randomHex}`;
-  const expiresAt = now + ABA_QR_TTL_MS;
-  const paywayUrl = DEFAULT_ABA_PAYWAY_LINK;
-  const hasMerchantApi = false;
+app.get('/api/payments/unlock-status', (req, res) => {
+  const cookies = parseCookies(req);
+  const unlocked = verifyUnlockToken(cookies[UNLOCK_COOKIE_NAME] || '');
+  return res.json({ success: true, unlocked });
+});
 
-  const session: AbaPaymentSession = {
-    txId,
-    createdAt: now,
-    expiresAt,
-    amountUsd: 25.0,
-    amountKrw: 35000,
-    paywayUrl,
-    status: 'pending',
-  };
-  abaSessions.set(txId, session);
-
-  return res.json({
-    success: true,
-    txId,
-    createdAt: now,
-    expiresAt,
-    ttlSeconds: Math.floor(ABA_QR_TTL_MS / 1000),
-    amountUsd: session.amountUsd,
-    amountKrw: session.amountKrw,
-    paywayUrl,
-    hasMerchantApi,
+app.post('/api/payments/aba-session', paymentRateLimiter, (_req, res) => {
+  return res.status(501).json({
+    success: false,
+    error: 'ABA automated API session is disabled. Scan the ABA PayWay QR and send your receipt or enter a Redeem Code.',
   });
 });
 
-app.get('/api/payments/aba-status/:txId', (req, res) => {
-  const { txId } = req.params;
-  const session = abaSessions.get(txId);
-  if (!session) {
-    return res.status(404).json({
-      success: false,
-      status: 'expired',
-      secondsLeft: 0,
-      error: 'Payment session not found or expired.',
-    });
-  }
-
-  const effective = getEffectiveSessionStatus(session);
-  const secondsLeft = Math.max(0, Math.ceil((effective.expiresAt - Date.now()) / 1000));
-
-  return res.json({
-    success: true,
-    txId: effective.txId,
-    status: effective.status,
-    secondsLeft,
-    expiresAt: effective.expiresAt,
-    paidAt: effective.paidAt || null,
-  });
-});
-
-// ABA PayWay Merchant API callback disabled (Merchant API env vars removed)
-
-app.post('/api/payments/aba-confirm', (req, res) => {
-  const txId = String(req.body?.txId || '').trim();
-  const referenceNote = String(req.body?.referenceNote || '').trim();
-  const hasMerchantApi = false;
-
-  const session = abaSessions.get(txId);
-  if (!session) {
-    return res.status(410).json({
-      success: false,
-      code: 'QR_EXPIRED',
-      error: 'QR Code ផុតសុពលភាព ឬមិនត្រឹមត្រូវ។ សូមចុចបង្កើត QR ថ្មី (១៥ នាទី)។',
-    });
-  }
-
-  const effective = getEffectiveSessionStatus(session);
-  if (effective.status === 'paid') {
-    return res.json({ success: true, status: 'paid', txId: effective.txId });
-  }
-
-  if (effective.status === 'expired' || Date.now() >= effective.expiresAt) {
-    effective.status = 'expired';
-    return res.status(410).json({
-      success: false,
-      code: 'QR_EXPIRED',
-      error: 'QR Code នេះផុតសុពលភាព ១៥ នាទីហើយ! សូមចុច "បង្កើត QR ថ្មី" មុនពេលបង់ប្រាក់។',
-    });
-  }
-
-  if (hasMerchantApi) {
-    // When full Merchant API + Webhook is enabled, do not unlock until ABA callback marks it paid
-    return res.status(402).json({
-      success: false,
-      code: 'AWAITING_BANK_CALLBACK',
-      error: 'ប្រព័ន្ធកំពុងរង់ចាំការបញ្ជាក់ការផ្ទេរប្រាក់ពីធនាគារ ABA PayWay។ សូមរង់ចាំបន្តិច...',
-    });
-  }
-
-  // In PayWay Payment Link mode, require a receipt reference note / sender name within the 15-minute window
-  if (referenceNote.length < 3) {
-    return res.status(400).json({
-      success: false,
-      code: 'MISSING_REFERENCE',
-      error: 'សូមបញ្ចូលឈ្មោះគណនីដែលបានបាញ់ប្រាក់ ឬលេខយោងវិក្កយបត្រ ABA (យ៉ាងតិច ៣ តួអក្សរ)។',
-    });
-  }
-
-  effective.status = 'paid';
-  effective.referenceNote = referenceNote;
-  effective.paidAt = Date.now();
-  return res.json({
-    success: true,
-    status: 'paid',
-    txId: effective.txId,
-    referenceNote,
+app.post('/api/payments/aba-confirm', paymentRateLimiter, (_req, res) => {
+  return res.status(501).json({
+    success: false,
+    error: 'Automatic ABA PayWay callback is not active. Please submit your payment screenshot via Telegram Bot / Facebook Page to receive a verified Redeem Code.',
   });
 });
 
@@ -1055,7 +1121,7 @@ interface IssuedUnlockCode {
 }
 const issuedUnlockCodes = new Map<string, IssuedUnlockCode>();
 
-app.post('/api/payments/verify-redeem', (req, res) => {
+app.post('/api/payments/verify-redeem', paymentRateLimiter, (req, res) => {
   const rawCode = String(req.body?.code || '').trim().toUpperCase();
   const userEmail = String(req.body?.userEmail || '').trim().slice(0, 160);
   if (!rawCode) {
@@ -1066,6 +1132,7 @@ app.post('/api/payments/verify-redeem', (req, res) => {
   }
 
   if (MASTER_PROMO_CODES.has(rawCode)) {
+    grantUnlockCookie(req, res, 'promo', rawCode);
     return res.json({ success: true, type: 'promo' });
   }
 
@@ -1078,6 +1145,7 @@ app.post('/api/payments/verify-redeem', (req, res) => {
         issued.used = true;
         issued.usedAt = Date.now();
       }
+      grantUnlockCookie(req, res, dbCheck.record.source || 'redeem', dbCheck.record.code);
       return res.json({
         success: true,
         type: dbCheck.record.source || 'redeem',
@@ -1106,6 +1174,7 @@ app.post('/api/payments/verify-redeem', (req, res) => {
     }
     issued.used = true;
     issued.usedAt = Date.now();
+    grantUnlockCookie(req, res, issued.source, issued.code);
     return res.json({ success: true, type: issued.source });
   }
 
@@ -1230,8 +1299,58 @@ app.get('/api/admin/auth-status', (req, res) => {
   });
 });
 
+// Protected Source Code / PC Package ZIP download (Root Admin Only, strictly excludes DB/secrets)
+app.get(
+  [
+    '/api/download-source-zip',
+    '/download-source-zip',
+    '/kiip-source-code.zip',
+    '/api/download-pc-package',
+    '/download-pc-package',
+    '/kiip-topik-pc-package.zip',
+  ],
+  requireRootAdminAuth,
+  (_req, res) => {
+    try {
+      const zipPath = '/tmp/kiip-portal-source-code.zip';
+      const pythonScript = [
+        'import zipfile, os',
+        "base_dir = os.path.abspath('.')",
+        "zip_path = '/tmp/kiip-portal-source-code.zip'",
+        "excluded_dirs = {'node_modules', 'dist', 'dist-pc', '.git', '__pycache__', '.aistudio', 'data'}",
+        "excluded_files = {'kiip-portal-source-code.zip', 'kiip-topik-pc-package.zip', 'firebase-applet-config.json', 'server.js'}",
+        "with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as z:",
+        '    for root, dirs, files in os.walk(base_dir):',
+        "        dirs[:] = [d for d in dirs if d not in excluded_dirs and not d.startswith('.git')]",
+        '        for file in files:',
+        "            lower = file.lower()",
+        "            if file in excluded_files or lower.startswith('.env') or lower.endswith(('.pyc', '.traineddata', '.sqlite', '.sqlite3', '.db', '.db-wal', '.db-shm')):",
+        '                continue',
+        '            full_path = os.path.join(root, file)',
+        '            rel_path = os.path.relpath(full_path, base_dir)',
+        '            z.write(full_path, rel_path)',
+      ].join('\n');
+
+      execFileSync('python3', ['-c', pythonScript], { stdio: 'ignore', timeout: 25000 });
+      if (fs.existsSync(zipPath)) {
+        const stats = fs.statSync(zipPath);
+        res.setHeader('Content-Type', 'application/zip');
+        res.setHeader('Content-Disposition', 'attachment; filename="kiip-portal-source-code.zip"');
+        res.setHeader('Content-Length', stats.size.toString());
+        res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+        const stream = fs.createReadStream(zipPath);
+        return stream.pipe(res);
+      }
+      return res.status(500).json({ success: false, error: 'Archive generation failed.' });
+    } catch (err) {
+      console.error('[Download ZIP] Error:', err);
+      return res.status(500).json({ success: false, error: 'Archive generation failed.' });
+    }
+  }
+);
+
 // One-time first-run admin setup (locked once claimed, DB accounts exist, or ADMIN_PASSWORD env var is set)
-app.post('/api/admin/bootstrap', (req, res) => {
+app.post('/api/admin/bootstrap', adminAuthRateLimiter, (req, res) => {
   const hasEnvCredentials = Boolean(process.env.ADMIN_PASSWORD && process.env.ADMIN_PASSWORD.trim().length > 0);
   if (hasEnvCredentials || claimedAdmin || listAdminAccounts().length > 0) {
     return res.status(403).json({
@@ -1273,7 +1392,7 @@ app.post('/api/admin/bootstrap', (req, res) => {
   });
 });
 
-app.post('/api/admin/login', (req, res) => {
+app.post('/api/admin/login', adminAuthRateLimiter, (req, res) => {
   const username = String(req.body?.username || '').trim();
   const password = String(req.body?.password || '');
 
@@ -1386,9 +1505,9 @@ async function fetchGoogleSecureTokenJwk(kid: string): Promise<any | null> {
   return match || null;
 }
 
-async function verifyFirebaseAdminIdToken(
+async function verifyFirebaseIdToken(
   idToken: string
-): Promise<{ email: string; uid: string } | null> {
+): Promise<{ email: string; uid: string; emailVerified: boolean } | null> {
   if (!FIREBASE_PROJECT_ID || typeof idToken !== 'string') return null;
   const parts = idToken.split('.');
   if (parts.length !== 3) return null;
@@ -1418,8 +1537,7 @@ async function verifyFirebaseAdminIdToken(
     typeof payload?.iat !== 'number' ||
     payload.iat > nowSec + 300 ||
     payload?.email_verified !== true ||
-    typeof payload?.email !== 'string' ||
-    payload.email.toLowerCase() !== ROOT_ADMIN_EMAIL
+    typeof payload?.email !== 'string'
   ) {
     return null;
   }
@@ -1436,10 +1554,62 @@ async function verifyFirebaseAdminIdToken(
   );
   if (!verified) return null;
 
-  return { email: payload.email.toLowerCase(), uid: payload.sub };
+  return {
+    email: payload.email.toLowerCase(),
+    uid: payload.sub,
+    emailVerified: Boolean(payload.email_verified),
+  };
 }
 
-app.post('/api/admin/login-google', async (req, res) => {
+async function verifyFirebaseAdminIdToken(
+  idToken: string
+): Promise<{ email: string; uid: string } | null> {
+  const verified = await verifyFirebaseIdToken(idToken);
+  if (!verified || verified.email !== ROOT_ADMIN_EMAIL) {
+    return null;
+  }
+  return { email: verified.email, uid: verified.uid };
+}
+
+app.post('/api/payments/confirm-firebase-unlock', paymentRateLimiter, async (req, res) => {
+  try {
+    const idToken = String(req.body?.idToken || '').trim();
+    const promoCode = String(req.body?.promoCode || '')
+      .trim()
+      .toUpperCase()
+      .replace(/[^A-Z0-9_-]/g, '')
+      .slice(0, 64);
+    if (!idToken || idToken.length > 8192 || !promoCode) {
+      return res.status(400).json({ success: false, error: 'Invalid unlock verification request.' });
+    }
+    const verifiedUser = await verifyFirebaseIdToken(idToken);
+    if (!verifiedUser) {
+      return res.status(401).json({ success: false, error: 'Unauthorized Firebase session.' });
+    }
+    // Verify the promoCode document exists & is active via Firestore REST API before granting unlock cookie
+    const fsResp = await fetch(
+      `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(FIREBASE_PROJECT_ID)}/databases/(default)/documents/promoCodes/${encodeURIComponent(promoCode)}`,
+      {
+        headers: { Authorization: `Bearer ${idToken}` },
+        signal: AbortSignal.timeout(6000),
+      }
+    ).catch(() => null);
+    if (!fsResp || !fsResp.ok) {
+      return res.status(403).json({ success: false, error: 'Invalid promo code record.' });
+    }
+    const fsDoc = (await fsResp.json().catch(() => null)) as any;
+    const isActive = Boolean(fsDoc?.fields?.isActive?.booleanValue);
+    if (!isActive) {
+      return res.status(403).json({ success: false, error: 'Promo code is inactive.' });
+    }
+    grantUnlockCookie(req, res, 'firebase_promo', promoCode);
+    return res.json({ success: true });
+  } catch {
+    return res.status(500).json({ success: false, error: 'Unable to confirm promo unlock.' });
+  }
+});
+
+app.post('/api/admin/login-google', adminAuthRateLimiter, async (req, res) => {
   try {
     const idToken = String(req.body?.idToken || '').trim();
     if (!idToken || idToken.length > 8192) {
@@ -1736,7 +1906,7 @@ function pruneStaleVisitors() {
   }
 }
 
-app.post('/api/visitors/heartbeat', async (req, res) => {
+app.post('/api/visitors/heartbeat', visitorHeartbeatLimiter, async (req, res) => {
   try {
     pruneStaleVisitors();
     const rawSessionId = String(req.body?.sessionId || '').trim();
@@ -1876,7 +2046,7 @@ interface RealPaymentEvent {
 const serverDocumentsLog: RealDocumentEvent[] = [];
 const serverPaymentsLog: RealPaymentEvent[] = [];
 
-app.post('/api/analytics/event', (req, res) => {
+app.post('/api/analytics/event', aiApiRateLimiter, (req, res) => {
   const type = String(req.body?.type || '');
   const nowIso = new Date().toISOString();
 
@@ -2126,7 +2296,7 @@ app.get('/api/payments/kr-config', (_req, res) => {
   });
 });
 
-app.post('/api/payments/verify-kr-receipt', async (req, res) => {
+app.post('/api/payments/verify-kr-receipt', paymentRateLimiter, async (req, res) => {
   try {
     const receiptImage = String(req.body?.receiptImage || '');
     const userEmail = String(req.body?.userEmail || 'guest@kiip-portal.kr').slice(0, 254);
@@ -2446,9 +2616,9 @@ app.delete('/api/admin/redeem-codes/:code', requireAdminAuth, (req, res) => {
   }
 });
 
-app.post('/api/mail/send-receipt', async (req, res) => {
+app.post('/api/mail/send-receipt', aiApiRateLimiter, async (req, res) => {
   try {
-    const { recipientEmail, officeEmail } = req.body;
+    const { recipientEmail, officeEmail } = req.body || {};
     if (!recipientEmail && !officeEmail) {
       return res.status(400).json({ success: false, error: 'Recipient email required' });
     }
@@ -2458,9 +2628,9 @@ app.post('/api/mail/send-receipt', async (req, res) => {
       simulated: true,
       message: 'Please send the attached PDF directly using your preferred email client (Gmail / Naver / Daum / Mail app).',
     });
-  } catch (err: any) {
+  } catch (err) {
     console.error('Mail endpoint error:', err);
-    return res.status(500).json({ success: false, error: err.message || 'Failed to process email request' });
+    return res.status(500).json({ success: false, error: 'Failed to process email request' });
   }
 });
 
@@ -2537,7 +2707,7 @@ function buildWebsiteGuideSystemInstruction(ctx: {
   ].join('\n');
 }
 
-app.post('/api/chat-guide', async (req, res) => {
+app.post('/api/chat-guide', aiApiRateLimiter, async (req, res) => {
   const ai = getAiClient();
   if (!ai) {
     return res.status(503).json({
@@ -2662,11 +2832,46 @@ app.post('/api/chat-guide', async (req, res) => {
 });
 
 // ============================================================================
-// PUBLIC USER AUTHENTICATION (Sign Up, Sign In, OTP & Password Reset)
+// PUBLIC USER AUTHENTICATION (Sign Up, Sign In, Change Password & Safe Reset)
 // ============================================================================
+const USER_COOKIE_NAME = 'kiip_user_session';
 const USER_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 const OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes
 const pendingUserOtps = new Map<string, { code: string; expiresAt: number; attempts: number }>();
+const revokedUserTokens = new Set<string>();
+
+function isSmtpConfigured(): boolean {
+  return Boolean(
+    process.env.SMTP_HOST?.trim() &&
+      process.env.SMTP_USER?.trim() &&
+      process.env.SMTP_PASS?.trim()
+  );
+}
+
+async function sendVerificationEmail(to: string, subject: string, textBody: string): Promise<boolean> {
+  if (!isSmtpConfigured()) return false;
+  try {
+    const transporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST!.trim(),
+      port: parseInt(process.env.SMTP_PORT || '587', 10),
+      secure: process.env.SMTP_SECURE === 'true' || process.env.SMTP_PORT === '465',
+      auth: {
+        user: process.env.SMTP_USER!.trim(),
+        pass: process.env.SMTP_PASS!.trim(),
+      },
+    });
+    await transporter.sendMail({
+      from: (process.env.SMTP_FROM || process.env.SMTP_USER!).trim(),
+      to,
+      subject,
+      text: textBody,
+    });
+    return true;
+  } catch (err) {
+    console.error('[SMTP] Failed to send email:', err);
+    return false;
+  }
+}
 
 function issueUserBearerToken(user: PublicUserRecord): string {
   const payload = Buffer.from(
@@ -2679,6 +2884,7 @@ function issueUserBearerToken(user: PublicUserRecord): string {
       provider: user.provider,
       iat: Date.now(),
       exp: Date.now() + USER_SESSION_TTL_MS,
+      jti: crypto.randomBytes(10).toString('hex'),
     })
   ).toString('base64url');
   const sig = crypto
@@ -2695,7 +2901,7 @@ function verifyUserBearerToken(token: string): {
   phone: string;
   provider: 'email' | 'otp' | 'google';
 } | null {
-  if (!token) return null;
+  if (!token || revokedUserTokens.has(token)) return null;
   const parts = token.split('.');
   if (parts.length !== 2) return null;
   const [payload, sig] = parts;
@@ -2721,7 +2927,17 @@ function verifyUserBearerToken(token: string): {
   }
 }
 
-app.post('/api/auth/register', (req, res) => {
+function extractUserTokenFromReq(req: express.Request): string {
+  const authHeader = String(req.headers.authorization || '');
+  if (authHeader.startsWith('Bearer ')) {
+    const t = authHeader.slice(7).trim();
+    if (t) return t;
+  }
+  const cookies = parseCookies(req);
+  return String(cookies[USER_COOKIE_NAME] || '').trim();
+}
+
+app.post('/api/auth/register', userAuthRateLimiter, (req, res) => {
   try {
     const { email, name, phone, password } = req.body || {};
     const result = registerUserAccount({ email, name, phone, password });
@@ -2729,9 +2945,9 @@ app.post('/api/auth/register', (req, res) => {
       return res.status(400).json({ success: false, error: result.error || 'Registration failed' });
     }
     const token = issueUserBearerToken(result.user);
+    setHttpOnlyCookie(req, res, USER_COOKIE_NAME, token, Math.floor(USER_SESSION_TTL_MS / 1000));
     return res.json({
       success: true,
-      token,
       user: {
         isLoggedIn: true,
         name: result.user.name,
@@ -2741,13 +2957,13 @@ app.post('/api/auth/register', (req, res) => {
         provider: result.user.provider,
       },
     });
-  } catch (err: any) {
+  } catch (err) {
     console.error('[Auth] Register error:', err);
     return res.status(500).json({ success: false, error: 'ប្រព័ន្ធមានបញ្ហាក្នុងការចុះឈ្មោះ!' });
   }
 });
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', userAuthRateLimiter, (req, res) => {
   try {
     const { email, identifier, password } = req.body || {};
     const result = verifyUserLogin({
@@ -2758,9 +2974,9 @@ app.post('/api/auth/login', (req, res) => {
       return res.status(401).json({ success: false, error: result.error || 'Invalid credentials' });
     }
     const token = issueUserBearerToken(result.user);
+    setHttpOnlyCookie(req, res, USER_COOKIE_NAME, token, Math.floor(USER_SESSION_TTL_MS / 1000));
     return res.json({
       success: true,
-      token,
       user: {
         isLoggedIn: true,
         name: result.user.name,
@@ -2770,41 +2986,78 @@ app.post('/api/auth/login', (req, res) => {
         provider: result.user.provider,
       },
     });
-  } catch (err: any) {
+  } catch (err) {
     console.error('[Auth] Login error:', err);
     return res.status(500).json({ success: false, error: 'ប្រព័ន្ធមានបញ្ហាក្នុងការចូលគណនី!' });
   }
 });
 
+app.post('/api/auth/logout', (req, res) => {
+  const token = extractUserTokenFromReq(req);
+  if (token) {
+    revokedUserTokens.add(token);
+  }
+  clearHttpOnlyCookie(req, res, USER_COOKIE_NAME);
+  return res.json({ success: true });
+});
+
 app.get('/api/auth/me', (req, res) => {
-  const authHeader = String(req.headers.authorization || '');
-  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  const token = extractUserTokenFromReq(req);
   const session = verifyUserBearerToken(token);
   if (!session) {
     return res.status(401).json({ success: false, error: 'Session expired or invalid' });
   }
   const dbUser = session.email ? getUserAccountByEmail(session.email) : null;
+  if (!dbUser) {
+    return res.status(401).json({ success: false, error: 'Account no longer exists' });
+  }
   return res.json({
     success: true,
     user: {
       isLoggedIn: true,
-      name: dbUser?.name || session.name || session.email.split('@')[0],
-      email: dbUser?.email || session.email,
-      phone: dbUser?.phone || session.phone,
+      name: dbUser.name || session.name || session.email.split('@')[0],
+      email: dbUser.email || session.email,
+      phone: dbUser.phone || session.phone,
       avatar: '',
-      provider: dbUser?.provider || session.provider,
+      provider: dbUser.provider || session.provider,
     },
   });
 });
 
-app.post('/api/auth/otp/send', (req, res) => {
+app.post('/api/auth/change-password', userAuthRateLimiter, (req, res) => {
+  const token = extractUserTokenFromReq(req);
+  const session = verifyUserBearerToken(token);
+  if (!session || !session.email) {
+    return res.status(401).json({ success: false, error: 'សូមចូលគណនីជាមុនសិន!' });
+  }
+  const currentPassword = String(req.body?.currentPassword || '');
+  const newPassword = String(req.body?.newPassword || '');
+  const result = changeUserAccountPassword({
+    email: session.email,
+    currentPassword,
+    newPassword,
+  });
+  if (!result.ok) {
+    return res.status(400).json({ success: false, error: result.error || 'Failed to change password' });
+  }
+  return res.json({ success: true });
+});
+
+app.post('/api/auth/otp/send', userAuthRateLimiter, async (req, res) => {
   const rawTarget = String(req.body?.target || '').trim().slice(0, 254);
-  if (!rawTarget || rawTarget.length < 5) {
+  if (!rawTarget || rawTarget.length < 5 || !rawTarget.includes('@')) {
     return res.status(400).json({
       success: false,
-      error: 'សូមបញ្ចូលលេខទូរស័ព្ទ ឬ Email ឱ្យបានត្រឹមត្រូវ!',
+      error: 'សូមបញ្ចូលអាសយដ្ឋាន Email ឱ្យបានត្រឹមត្រូវ!',
     });
   }
+  if (!isSmtpConfigured()) {
+    return res.status(503).json({
+      success: false,
+      error: 'សេវាផ្ញើកូដ OTP តាម Email មិនទាន់បានកំណត់នៅលើ Server ទេ។ សូមចុះឈ្មោះ/ចូលគណនីដោយប្រើ Email & Password ឬ Continue with Google!',
+    });
+  }
+
   const key = `otp:${rawTarget.toLowerCase()}`;
   const code = String(crypto.randomInt(100000, 999999));
   pendingUserOtps.set(key, {
@@ -2813,20 +3066,32 @@ app.post('/api/auth/otp/send', (req, res) => {
     attempts: 0,
   });
 
-  // Clean up expired entries opportunistically
   for (const [k, v] of pendingUserOtps.entries()) {
     if (Date.now() > v.expiresAt) pendingUserOtps.delete(k);
+  }
+
+  const sent = await sendVerificationEmail(
+    rawTarget,
+    'KIIP & TOPIK Portal — Verification Code',
+    `Your 6-digit verification code is: ${code}\n\nThis code expires in 10 minutes.`
+  );
+  if (!sent) {
+    pendingUserOtps.delete(key);
+    return res.status(502).json({
+      success: false,
+      error: 'មិនអាចផ្ញើ Email ផ្ទៀងផ្ទាត់បានទេនៅពេលនេះ។ សូមប្រើ Email & Password ឬ Google Sign-In!',
+    });
   }
 
   return res.json({
     success: true,
     target: rawTarget,
     expiresInSeconds: 600,
-    verificationCode: code,
+    delivery: 'email',
   });
 });
 
-app.post('/api/auth/otp/verify', (req, res) => {
+app.post('/api/auth/otp/verify', userAuthRateLimiter, (req, res) => {
   const rawTarget = String(req.body?.target || '').trim().slice(0, 254);
   const rawCode = String(req.body?.code || '').trim();
   const rawName = String(req.body?.name || '').trim().slice(0, 120);
@@ -2834,7 +3099,7 @@ app.post('/api/auth/otp/verify', (req, res) => {
   if (!rawTarget || !rawCode) {
     return res.status(400).json({
       success: false,
-      error: 'សូមបញ្ចូលលេខទូរស័ព្ទ/Email និងកូដ OTP ៦ ខ្ទង់!',
+      error: 'សូមបញ្ចូល Email និងកូដ OTP ៦ ខ្ទង់!',
     });
   }
 
@@ -2865,49 +3130,63 @@ app.post('/api/auth/otp/verify', (req, res) => {
   }
 
   pendingUserOtps.delete(key);
-  const user = upsertOtpUserAccount({ target: rawTarget, name: rawName });
-  const token = issueUserBearerToken(user);
+  const otpResult = upsertOtpUserAccount({ target: rawTarget, name: rawName });
+  if (!otpResult.ok || !otpResult.user) {
+    return res.status(409).json({
+      success: false,
+      error: otpResult.error || 'គណនីនេះត្រូវបានការពារដោយពាក្យសម្ងាត់! សូមចូលតាម Email & Password។',
+    });
+  }
+  const token = issueUserBearerToken(otpResult.user);
+  setHttpOnlyCookie(req, res, USER_COOKIE_NAME, token, Math.floor(USER_SESSION_TTL_MS / 1000));
 
   return res.json({
     success: true,
-    token,
     user: {
       isLoggedIn: true,
-      name: user.name,
-      email: user.email,
-      phone: user.phone,
+      name: otpResult.user.name,
+      email: otpResult.user.email,
+      phone: otpResult.user.phone,
       avatar: '',
       provider: 'otp',
     },
   });
 });
 
-app.post('/api/auth/reset-password/request', (req, res) => {
+app.post('/api/auth/reset-password/request', userAuthRateLimiter, async (req, res) => {
   const email = String(req.body?.email || '').trim().toLowerCase();
   if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     return res.status(400).json({ success: false, error: 'សូមបញ្ចូលអាសយដ្ឋាន Email ឱ្យបានត្រឹមត្រូវ!' });
   }
-  const existing = getUserAccountByEmail(email);
-  if (!existing) {
-    return res.status(404).json({
+  if (!isSmtpConfigured()) {
+    return res.status(503).json({
       success: false,
-      error: 'រកមិនឃើញគណនីដែលប្រើ Email នេះក្នុងប្រព័ន្ធទេ!',
+      error: 'ការផ្ញើកូដប្ដូរពាក្យសម្ងាត់តាម Email មិនទាន់បានកំណត់នៅលើ Server ទេ។ សូមចូលតាម Google ឬទាក់ទង Admin (Facebook/KakaoTalk: 9111veasna) ដើម្បីជួយស្តារគណនី។',
     });
   }
-  const code = String(crypto.randomInt(100000, 999999));
-  pendingUserOtps.set(`reset:${email}`, {
-    code,
-    expiresAt: Date.now() + OTP_TTL_MS,
-    attempts: 0,
-  });
+
+  const existing = getUserAccountByEmail(email);
+  if (existing) {
+    const code = String(crypto.randomInt(100000, 999999));
+    pendingUserOtps.set(`reset:${email}`, {
+      code,
+      expiresAt: Date.now() + OTP_TTL_MS,
+      attempts: 0,
+    });
+    await sendVerificationEmail(
+      email,
+      'KIIP & TOPIK Portal — Password Reset Code',
+      `Your 6-digit password reset code is: ${code}\n\nIf you did not request this, ignore this email.`
+    );
+  }
+  // Never reveal account existence or secret reset code in HTTP JSON response
   return res.json({
     success: true,
-    email,
-    resetCode: code,
+    message: 'ប្រសិនបើ Email នេះមានក្នុងប្រព័ន្ធ កូដកំណត់ពាក្យសម្ងាត់ថ្មីត្រូវបានផ្ញើទៅប្រអប់សារ Email របស់អ្នកហើយ។',
   });
 });
 
-app.post('/api/auth/reset-password/confirm', (req, res) => {
+app.post('/api/auth/reset-password/confirm', userAuthRateLimiter, (req, res) => {
   const email = String(req.body?.email || '').trim().toLowerCase();
   const code = String(req.body?.code || '').trim();
   const newPassword = String(req.body?.newPassword || '');

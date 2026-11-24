@@ -1338,7 +1338,7 @@ export function verifyUserLogin(params: {
 export function upsertOtpUserAccount(params: {
   target: string;
   name?: string;
-}): PublicUserRecord {
+}): { ok: boolean; user?: PublicUserRecord; error?: string } {
   const rawTarget = String(params.target || '').trim().slice(0, 254);
   const isEmail = rawTarget.includes('@');
   const normalizedPhone = isEmail ? '' : rawTarget.replace(/[^0-9+]/g, '') || rawTarget;
@@ -1369,6 +1369,12 @@ export function upsertOtpUserAccount(params: {
 
   const nowIso = new Date().toISOString();
   if (existing) {
+    if (existing.provider === 'email') {
+      return {
+        ok: false,
+        error: 'គណនី Email នេះត្រូវបានការពារដោយពាក្យសម្ងាត់! សូមចូលតាម Email និង Password ជំនួសវិញ។',
+      };
+    }
     const nextName = String(params.name || '').trim() || existing.name || normalizedEmail.split('@')[0];
     db.prepare('UPDATE user_accounts SET last_login_at = ?, name = ? WHERE id = ?').run(
       nowIso,
@@ -1376,13 +1382,16 @@ export function upsertOtpUserAccount(params: {
       existing.id
     );
     return {
-      id: Number(existing.id),
-      email: String(existing.email),
-      name: nextName,
-      phone: String(existing.phone || normalizedPhone),
-      provider: 'otp',
-      createdAt: String(existing.created_at),
-      lastLoginAt: nowIso,
+      ok: true,
+      user: {
+        id: Number(existing.id),
+        email: String(existing.email),
+        name: nextName,
+        phone: String(existing.phone || normalizedPhone),
+        provider: 'otp',
+        createdAt: String(existing.created_at),
+        lastLoginAt: nowIso,
+      },
     };
   }
 
@@ -1400,13 +1409,16 @@ export function upsertOtpUserAccount(params: {
     .run(normalizedEmail, displayName, normalizedPhone, salt, randomHash, nowIso, nowIso);
 
   return {
-    id: Number(info.lastInsertRowid),
-    email: normalizedEmail,
-    name: displayName,
-    phone: normalizedPhone,
-    provider: 'otp',
-    createdAt: nowIso,
-    lastLoginAt: nowIso,
+    ok: true,
+    user: {
+      id: Number(info.lastInsertRowid),
+      email: normalizedEmail,
+      name: displayName,
+      phone: normalizedPhone,
+      provider: 'otp',
+      createdAt: nowIso,
+      lastLoginAt: nowIso,
+    },
   };
 }
 
@@ -1443,6 +1455,42 @@ export function getUserAccountByEmail(email: string): PublicUserRecord | null {
     createdAt: String(row.created_at),
     lastLoginAt: row.last_login_at ? String(row.last_login_at) : null,
   };
+}
+
+export function changeUserAccountPassword(params: {
+  email: string;
+  currentPassword: string;
+  newPassword: string;
+}): { ok: boolean; error?: string } {
+  const email = String(params.email || '').trim().toLowerCase();
+  const currentPassword = String(params.currentPassword || '');
+  const newPassword = String(params.newPassword || '');
+  if (!email) return { ok: false, error: 'សូមបញ្ចូល Email!' };
+  if (!currentPassword) return { ok: false, error: 'សូមបញ្ចូលពាក្យសម្ងាត់បច្ចុប្បន្ន!' };
+  if (newPassword.length < 6 || newPassword.length > 128) {
+    return { ok: false, error: 'ពាក្យសម្ងាត់ថ្មីត្រូវមានយ៉ាងតិច ៦ តួអក្សរ!' };
+  }
+
+  const db = getRedeemDb();
+  ensureUserAccountsTable(db);
+  const row = db
+    .prepare('SELECT id, salt, password_hash FROM user_accounts WHERE email = ? LIMIT 1')
+    .get(email) as { id: number; salt: string; password_hash: string } | undefined;
+  if (!row) {
+    return { ok: false, error: 'រកមិនឃើញគណនីដែលប្រើ Email នេះទេ!' };
+  }
+  if (!verifyUserPasswordHash(currentPassword, row.salt, row.password_hash)) {
+    return { ok: false, error: 'ពាក្យសម្ងាត់បច្ចុប្បន្នមិនត្រឹមត្រូវទេ!' };
+  }
+
+  const salt = crypto.randomBytes(16).toString('hex');
+  const passwordHash = hashUserPassword(newPassword, salt);
+  db.prepare('UPDATE user_accounts SET salt = ?, password_hash = ? WHERE id = ?').run(
+    salt,
+    passwordHash,
+    row.id
+  );
+  return { ok: true };
 }
 
 export function resetUserAccountPassword(params: {
