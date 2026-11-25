@@ -735,6 +735,15 @@ export function parseStructuredTextCorpus(params: {
     if (passMatch) result.passportNo = passMatch[1].toUpperCase();
   }
 
+  // 13. Entry Date into Korea (입국일 / 입국일자 / Entry Date)
+  const entryDateMatch = combined.match(
+    /(?:입\s*국\s*일(?:\s*자)?|최\s*초\s*입\s*국\s*일|Date\s*of\s*Entry|Entry\s*Date)[^\d\n]{0,20}(\d{4}\s*[.\-년/]\s*\d{1,2}\s*[.\-월/]\s*\d{1,2}|\d{1,2}\s+[A-Za-z]{3,9}[.,]?\s+\d{4})/i
+  );
+  if (entryDateMatch) {
+    const parsedEntry = parseFlexibleDate(entryDateMatch[1], 1995, 2035);
+    if (parsedEntry) result.entryDate = parsedEntry;
+  }
+
   return result;
 }
 
@@ -769,7 +778,7 @@ async function recognizeDataUrlServer(
     const buf = Buffer.from(base64, 'base64');
     const ocrPromise = Tesseract.recognize(buf, langSpec);
     const timeoutPromise = new Promise<{ data?: { text?: string } }>((resolve) =>
-      setTimeout(() => resolve({ data: { text: '' } }), 20000)
+      setTimeout(() => resolve({ data: { text: '' } }), 15000)
     );
     const res = await Promise.race([ocrPromise, timeoutPromise]);
     return res?.data?.text || '';
@@ -785,7 +794,7 @@ export async function runServerSideOcrFallback(input: ServerOcrInput): Promise<{
 }> {
   const pdfTexts = input.pdfTexts || {};
   const [arcFrontOcr, arcBackOcr, topikOcr, passportOcr] = await Promise.all([
-    input.arcFront ? recognizeDataUrlServer(input.arcFront, 'eng') : Promise.resolve(''),
+    input.arcFront ? recognizeDataUrlServer(input.arcFront, 'kor+eng') : Promise.resolve(''),
     input.arcBack ? recognizeDataUrlServer(input.arcBack, 'kor+eng') : Promise.resolve(''),
     input.topikCert ? recognizeDataUrlServer(input.topikCert, 'kor+eng') : Promise.resolve(''),
     input.passport ? recognizeDataUrlServer(input.passport, 'eng') : Promise.resolve(''),

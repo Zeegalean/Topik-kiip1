@@ -346,10 +346,10 @@ async function runBrowserOcrWithMeta(
 
   try {
     const processedUrl = await preprocessImageForOcr(dataUrl, enhanceContrast);
-    // Allow 45 seconds so initial kor+eng traineddata CDN download never gets aborted mid-flight
+    // Keep browser OCR responsive so UI never freezes indefinitely on slow connections
     const ocrPromise = Tesseract.recognize(processedUrl, langSpec);
     const timeoutPromise = new Promise<{ data?: { text?: string; confidence?: number } }>((resolve) =>
-      setTimeout(() => resolve({ data: { text: '', confidence: 0 } }), 45000)
+      setTimeout(() => resolve({ data: { text: '', confidence: 0 } }), 20000)
     );
     const result = await Promise.race([ocrPromise, timeoutPromise]);
     const text = result?.data?.text || '';
@@ -1284,6 +1284,8 @@ export interface OcrPipelineResult {
   confidence: OcrFieldConfidenceMap;
   rawTextPreview: string;
   model: string;
+  serverNotice?: string;
+  extractedCount: number;
 }
 
 export function mergeExtractedDrafts(
@@ -1354,12 +1356,14 @@ export async function runFullDocumentOcrPipeline(params: {
   let serverConfidenceRaw: Record<string, number> = {};
   let serverRawPreview = '';
   let serverModel = '';
+  let serverNotice = '';
+  let serverUsedTesseract = false;
 
   const isStaticGitHubPages = typeof window !== 'undefined' && window.location.hostname.includes('github.io');
   if (!params.skipServer && !isStaticGitHubPages) {
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 45000);
+      const timer = setTimeout(() => controller.abort(), 32000);
       const res = await fetch('/api/extract-documents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1380,6 +1384,13 @@ export async function runFullDocumentOcrPipeline(params: {
         }
         if (result?.model) {
           serverModel = String(result.model);
+          if (serverModel.includes('tesseract')) serverUsedTesseract = true;
+        }
+        if (result?.serverFallbackUsed) {
+          serverUsedTesseract = true;
+        }
+        if (result?.notice) {
+          serverNotice = String(result.notice);
         }
         if (result?.confidence && typeof result.confidence === 'object') {
           serverConfidenceRaw = result.confidence as Record<string, number>;
@@ -1387,9 +1398,12 @@ export async function runFullDocumentOcrPipeline(params: {
         if (result?.success && result?.data && !result?.fallbackMode) {
           serverData = result.data as ExtractedDocumentData;
         }
+      } else {
+        serverNotice = `Server OCR returned HTTP ${res.status}`;
       }
     } catch (err) {
       console.warn('[Client OCR] Server extraction failed, running local OCR:', err);
+      serverNotice = 'Server OCR timed out; switched to browser OCR.';
     }
   }
 
@@ -1397,21 +1411,6 @@ export async function runFullDocumentOcrPipeline(params: {
   const backSource = isPdfDataUrl(params.arcBack) ? (pBack.apiUrl || params.arcBack) : params.arcBack;
   const topikSource = isPdfDataUrl(params.topikCert) ? (pTopik.apiUrl || params.topikCert) : params.topikCert;
   const passportSource = isPdfDataUrl(params.passport) ? (pPassport.apiUrl || params.passport) : params.passport;
-
-  // Determine which documents still need local structural / Tesseract OCR gap-fill
-  const needFrontOcr = Boolean(frontSource && (!serverData.name || !serverData.regNumber1 || !serverData.regNumber2 || !serverData.visaStatus));
-  const needBackOcr = Boolean(backSource && !serverData.address);
-  const needTopikOcr = Boolean(
-    topikSource &&
-      (!serverData.examDate ||
-        !serverData.validUntil ||
-        !serverData.round ||
-        !serverData.examNumber ||
-        !serverData.grade ||
-        !serverData.docVerificationNo ||
-        (Array.isArray(serverData.docVerificationNo) && serverData.docVerificationNo.every((p) => !p || p === '0000')))
-  );
-  const needPassportOcr = Boolean(passportSource && (!serverData.passportNo || !serverData.passportExpiry || !serverData.name));
 
   let arcFrontText = mergedPdfTexts.arcFront;
   let arcBackText = mergedPdfTexts.arcBack;
@@ -1427,91 +1426,111 @@ export async function runFullDocumentOcrPipeline(params: {
   const digitalParsed = parseOcrCorpusToData(arcFrontText, arcBackText, topikText, passportText);
   let merged = mergeExtractedDrafts(serverData, digitalParsed);
 
-  const stillNeedFront = Boolean(frontSource && !isPdfDataUrl(frontSource) && (!merged.name || !merged.regNumber1 || !merged.regNumber2 || !merged.visaStatus));
+  // Only run browser Tesseract on documents where critical fields are STILL missing
+  // (avoid redundant slow WASM downloads when server already extracted the document cleanly)
+  const frontHasCore = Boolean(merged.name && merged.regNumber1 && merged.regNumber2);
+  const topikHasCore = Boolean(merged.grade && (merged.examDate || merged.round || merged.examNumber));
+  const passportHasCore = Boolean(merged.passportNo && merged.name);
+
+  const stillNeedFront = Boolean(
+    frontSource &&
+      !isPdfDataUrl(frontSource) &&
+      (!frontHasCore || (!serverUsedTesseract && !merged.visaStatus))
+  );
   const stillNeedBack = Boolean(backSource && !isPdfDataUrl(backSource) && !merged.address);
   const stillNeedTopik = Boolean(
     topikSource &&
       !isPdfDataUrl(topikSource) &&
-      (!merged.examDate ||
-        !merged.validUntil ||
-        !merged.round ||
-        !merged.examNumber ||
-        !merged.grade ||
-        !merged.docVerificationNo ||
-        (Array.isArray(merged.docVerificationNo) && merged.docVerificationNo.every((p) => !p || p === '0000')))
+      (!topikHasCore || (!serverUsedTesseract && (!merged.validUntil || !merged.examDate || !merged.round)))
   );
-  const stillNeedPassport = Boolean(passportSource && !isPdfDataUrl(passportSource) && (!merged.passportNo || !merged.passportExpiry || !merged.name));
+  const stillNeedPassport = Boolean(
+    passportSource && !isPdfDataUrl(passportSource) && !passportHasCore
+  );
 
-  if (needFrontOcr && stillNeedFront && frontSource) {
-    const tFront = await runBrowserOcrWithMeta(frontSource, 'eng', false);
-    if (tFront.text) {
-      arcFrontText = [arcFrontText, tFront.text].filter(Boolean).join('\n');
-      frontTesseractConf = Math.max(frontTesseractConf, tFront.confidence);
-    }
+  // Run first-pass browser OCR in parallel across only the needed documents (never 8 sequential hangs!)
+  const [tFront, tPass, tBack, tTopik] = await Promise.all([
+    stillNeedFront && frontSource
+      ? runBrowserOcrWithMeta(frontSource, 'kor+eng', false)
+      : Promise.resolve({ text: '', confidence: 0 }),
+    stillNeedPassport && passportSource
+      ? runBrowserOcrWithMeta(passportSource, 'eng', false)
+      : Promise.resolve({ text: '', confidence: 0 }),
+    stillNeedBack && backSource
+      ? runBrowserOcrWithMeta(backSource, 'kor+eng', false)
+      : Promise.resolve({ text: '', confidence: 0 }),
+    stillNeedTopik && topikSource
+      ? runBrowserOcrWithMeta(topikSource, 'kor+eng', false)
+      : Promise.resolve({ text: '', confidence: 0 }),
+  ]);
+
+  if (tFront.text) {
+    arcFrontText = [arcFrontText, tFront.text].filter(Boolean).join('\n');
+    frontTesseractConf = Math.max(frontTesseractConf, tFront.confidence);
   }
-  if (needPassportOcr && stillNeedPassport && passportSource) {
-    const tPass = await runBrowserOcrWithMeta(passportSource, 'eng', false);
-    if (tPass.text) {
-      passportText = [passportText, tPass.text].filter(Boolean).join('\n');
-      passportTesseractConf = Math.max(passportTesseractConf, tPass.confidence);
-    }
+  if (tPass.text) {
+    passportText = [passportText, tPass.text].filter(Boolean).join('\n');
+    passportTesseractConf = Math.max(passportTesseractConf, tPass.confidence);
   }
-  if (needBackOcr && stillNeedBack && backSource) {
-    // Use kor+eng on ARC Back so road numbers, dash digits, and Hangul district names stay crisp
-    const tBack = await runBrowserOcrWithMeta(backSource, 'kor+eng', false);
-    if (tBack.text) {
-      arcBackText = [arcBackText, tBack.text].filter(Boolean).join('\n');
-      backTesseractConf = Math.max(backTesseractConf, tBack.confidence);
-    }
+  if (tBack.text) {
+    arcBackText = [arcBackText, tBack.text].filter(Boolean).join('\n');
+    backTesseractConf = Math.max(backTesseractConf, tBack.confidence);
   }
-  if (needTopikOcr && stillNeedTopik && topikSource) {
-    const tTopik = await runBrowserOcrWithMeta(topikSource, 'kor+eng', false);
-    if (tTopik.text) {
-      topikText = [topikText, tTopik.text].filter(Boolean).join('\n');
-      topikTesseractConf = Math.max(topikTesseractConf, tTopik.confidence);
-    }
+  if (tTopik.text) {
+    topikText = [topikText, tTopik.text].filter(Boolean).join('\n');
+    topikTesseractConf = Math.max(topikTesseractConf, tTopik.confidence);
   }
 
   let localParsed = parseOcrCorpusToData(arcFrontText, arcBackText, topikText, passportText);
   merged = mergeExtractedDrafts(merged, localParsed);
 
-  // Targeted high-contrast / MRZ second-pass if key fields are still missing
+  // Targeted parallel high-contrast / MRZ second-pass ONLY if critical fields are still completely empty
+  const needSecondFront = Boolean(stillNeedFront && frontSource && (!merged.regNumber1 || !merged.name));
+  const needSecondBack = Boolean(stillNeedBack && backSource && !merged.address);
+  const needSecondPassport = Boolean(stillNeedPassport && passportSource && (!merged.passportNo || !merged.name));
+  const needSecondTopik = Boolean(stillNeedTopik && topikSource && (!merged.grade && !merged.examNumber && !merged.examDate));
+
   let ranSecondPass = false;
   let usedSecondPassFront = false;
   let usedSecondPassBack = false;
   let usedSecondPassTopik = false;
   let usedSecondPassPassport = false;
 
-  if (stillNeedFront && frontSource && (!merged.regNumber1 || !merged.name || !merged.visaStatus)) {
-    const hcFront = await runBrowserOcrWithMeta(frontSource, 'eng', true);
+  if (needSecondFront || needSecondBack || needSecondPassport || needSecondTopik) {
+    const [hcFront, hcBack, mrzRes, hcTopik] = await Promise.all([
+      needSecondFront && frontSource
+        ? runBrowserOcrWithMeta(frontSource, 'eng', true)
+        : Promise.resolve({ text: '', confidence: 0 }),
+      needSecondBack && backSource
+        ? runBrowserOcrWithMeta(backSource, 'kor+eng', true)
+        : Promise.resolve({ text: '', confidence: 0 }),
+      needSecondPassport && passportSource
+        ? cropPassportMrzForOcr(passportSource).then((mrzCropUrl) =>
+            runBrowserOcrWithMeta(mrzCropUrl, 'eng', false)
+          )
+        : Promise.resolve({ text: '', confidence: 0 }),
+      needSecondTopik && topikSource
+        ? runBrowserOcrWithMeta(topikSource, 'kor+eng', true)
+        : Promise.resolve({ text: '', confidence: 0 }),
+    ]);
+
     if (hcFront.text) {
       arcFrontText = [arcFrontText, hcFront.text].filter(Boolean).join('\n');
       frontTesseractConf = Math.max(frontTesseractConf, Math.max(45, hcFront.confidence - 6));
       ranSecondPass = true;
       usedSecondPassFront = true;
     }
-  }
-  if (stillNeedBack && backSource && !merged.address) {
-    const hcBack = await runBrowserOcrWithMeta(backSource, 'kor+eng', true);
     if (hcBack.text) {
       arcBackText = [arcBackText, hcBack.text].filter(Boolean).join('\n');
       backTesseractConf = Math.max(backTesseractConf, Math.max(45, hcBack.confidence - 8));
       ranSecondPass = true;
       usedSecondPassBack = true;
     }
-  }
-  if (stillNeedPassport && passportSource && (!merged.passportNo || !merged.name)) {
-    const mrzCropUrl = await cropPassportMrzForOcr(passportSource);
-    const mrzRes = await runBrowserOcrWithMeta(mrzCropUrl, 'eng', false);
     if (mrzRes.text) {
       passportText = [passportText, mrzRes.text].filter(Boolean).join('\n');
       passportTesseractConf = Math.max(passportTesseractConf, mrzRes.confidence);
       ranSecondPass = true;
       usedSecondPassPassport = true;
     }
-  }
-  if (stillNeedTopik && topikSource && (!merged.examNumber || !merged.examDate || !merged.validUntil || !merged.round)) {
-    const hcTopik = await runBrowserOcrWithMeta(topikSource, 'kor+eng', true);
     if (hcTopik.text) {
       topikText = [topikText, hcTopik.text].filter(Boolean).join('\n');
       topikTesseractConf = Math.max(topikTesseractConf, Math.max(45, hcTopik.confidence - 6));
@@ -1569,6 +1588,8 @@ export async function runFullDocumentOcrPipeline(params: {
     confidence,
     rawTextPreview,
     model: serverModel || 'browser-ocr',
+    ...(serverNotice ? { serverNotice } : {}),
+    extractedCount: countExtractedFields(merged),
   };
 }
 

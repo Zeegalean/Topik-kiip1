@@ -1132,15 +1132,19 @@ Return ONLY structured JSON according to the schema.
     };
 
     const ai = getAiClient();
+    const modelErrors: string[] = [];
     if (ai) {
       outer: for (const model of candidateModels) {
         const maxAttempts = 2;
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 12000);
           try {
             console.log(`[OCR] Invoking Gemini model '${model}' (attempt ${attempt}/${maxAttempts})...`);
             const config: any = {
               responseMimeType: 'application/json',
               responseSchema,
+              abortSignal: controller.signal,
             };
             if (model === 'gemini-4-hydrogen') {
               config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
@@ -1165,21 +1169,30 @@ Return ONLY structured JSON according to the schema.
               break outer;
             }
           } catch (err: any) {
-            lastErrorDetail = formatGeminiError(err);
+            const detail = controller.signal.aborted
+              ? `Model '${model}' timed out after 12s`
+              : formatGeminiError(err);
+            lastErrorDetail = detail;
+            modelErrors.push(`${model}#${attempt}: ${detail}`);
             if (isAuthOrKeyError(err)) {
               authErrorDetected = true;
-              console.log(`[OCR] Gemini API key issue (${lastErrorDetail}); falling back to structural/client OCR.`);
+              console.log(`[OCR] Gemini API key issue (${detail}); falling back to structural/client OCR.`);
               break outer;
             }
-            if (isTransientError(err) && attempt < maxAttempts) {
-              console.log(`[OCR] Transient error on '${model}' (${lastErrorDetail}), retrying...`);
-              await sleep(600 * attempt);
+            if (!controller.signal.aborted && isTransientError(err) && attempt < maxAttempts) {
+              console.log(`[OCR] Transient error on '${model}' (${detail}), retrying...`);
+              await sleep(700 * attempt);
               continue;
             }
-            console.log(`[OCR] Model '${model}' unavailable (${lastErrorDetail}), trying next fallback...`);
+            console.log(`[OCR] Model '${model}' unavailable (${detail}), trying next fallback...`);
             break;
+          } finally {
+            clearTimeout(timeoutId);
           }
         }
+      }
+      if (!extractedData && modelErrors.length > 0) {
+        lastErrorDetail = modelErrors[modelErrors.length - 1];
       }
     } else {
       console.log('[OCR] GEMINI_API_KEY not configured, falling back to structural/client OCR.');
@@ -1320,6 +1333,7 @@ Return ONLY structured JSON according to the schema.
           success: true,
           data: sanitizedServerOcr,
           model: 'server-ocr-tesseract',
+          serverFallbackUsed: true,
           confidenceScore: audit.confidenceScore,
           ...(ocrTxId ? { ocrTxId } : {}),
           rawTextPreview: ocrFallback.rawTextPreview || pdfRawPreview,

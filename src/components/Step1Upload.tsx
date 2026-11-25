@@ -22,6 +22,7 @@ import {
   mergeExtractedDrafts,
   formDataToExtractedDraft,
   evaluateDraftConfidence,
+  countExtractedFields,
 } from '../utils/clientOcrEngine';
 import { 
   Upload, 
@@ -475,12 +476,13 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
   };
 
   const docsRef = useRef<UploadedDocuments>(docs);
+  const extractRunIdRef = useRef<number>(0);
   useEffect(() => {
     docsRef.current = docs;
   }, [docs]);
 
   // Auto-extract documents using the hybrid Server Gemini/PDF + Browser Tesseract pipeline
-  // Stages extracted fields into extractedDraft for user verification in Step 2 before committing into formData
+  // Stages extracted fields into extractedDraft for user verification in Step 2 / 2.5
   const handleExtractDocuments = async (
     customTopikUrl?: string,
     customArcFront?: string | null,
@@ -498,6 +500,7 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
       return;
     }
 
+    const runId = ++extractRunIdRef.current;
     setIsExtractingTopik(true);
     setExtractError(null);
     setExtractSuccess(false);
@@ -524,15 +527,30 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
       );
 
       const mergedConfidence = evaluateDraftConfidence(stagedData, pipelineRes.confidence);
+      const foundCount = countExtractedFields(stagedData);
 
       if (onOcrCompleted) {
         onOcrCompleted(stagedData, pipelineRes.rawTextPreview, pipelineRes.model, mergedConfidence);
       } else {
-        setExtractedDraft((prev) => mergeExtractedDrafts(prev, stagedData));
+        setExtractedDraft((prev) => mergeExtractedDrafts(stagedData, prev));
       }
 
-      setExtractSuccess(true);
-      setTimeout(() => setExtractSuccess(false), 8000);
+      if (runId === extractRunIdRef.current) {
+        if (foundCount > 0) {
+          setExtractError(null);
+          setExtractSuccess(true);
+          setTimeout(() => setExtractSuccess(false), 8000);
+        } else {
+          setExtractSuccess(false);
+          setExtractError(
+            lang === 'ko'
+              ? '이미지에서 텍스트를 선명하게 인식하지 못했습니다. 더 밝고 선명한 사진으로 다시 스캔하거나 아래 칸에 직접 입력해 주세요.'
+              : lang === 'en'
+              ? 'OCR could not read clear text from this image (AI service busy or blurry photo). Try a brighter, clearer photo or enter fields directly below.'
+              : 'ប្រព័ន្ធ OCR មិនអាចអានអក្សរច្បាស់ពីរូបភាពនេះបានទេ (រូបភាពព្រិល ឬ AI កំពុងមមាញឹក)។ សូមសាកល្បងចុច "ស្កេន OCR ម្តងទៀត" ឬបញ្ចូលព័ត៌មានដោយផ្ទាល់ខាងក្រោម។'
+          );
+        }
+      }
     } catch (err: any) {
       console.warn('Extraction notice:', err);
       const parsedArc = parseArcTextOrSvg(frontUrl, backUrl) || {};
@@ -541,15 +559,32 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
         ...parsedArc,
         ...parsedTopik,
       };
+      const fallbackCount = countExtractedFields(fallbackData);
       const fallbackConfidence = evaluateDraftConfidence(fallbackData, undefined, undefined, 'svg-preset');
-      if (onOcrCompleted) {
-        onOcrCompleted(fallbackData, '', 'svg-fallback', fallbackConfidence);
-      } else {
-        setExtractedDraft((prev) => mergeExtractedDrafts(prev, fallbackData));
+      if (fallbackCount > 0) {
+        if (onOcrCompleted) {
+          onOcrCompleted(fallbackData, '', 'svg-fallback', fallbackConfidence);
+        } else {
+          setExtractedDraft((prev) => mergeExtractedDrafts(fallbackData, prev));
+        }
       }
-      setExtractSuccess(true);
+      if (runId === extractRunIdRef.current) {
+        if (fallbackCount > 0) {
+          setExtractSuccess(true);
+        } else {
+          setExtractError(
+            lang === 'ko'
+              ? 'OCR 스캔 중 오류가 발생했습니다. 다시 시도하거나 아래 칸에 직접 입력해 주세요.'
+              : lang === 'en'
+              ? 'OCR scan encountered an error. Please retry or fill the fields manually below.'
+              : 'ការស្កេន OCR មានបញ្ហាបណ្តោះអាសន្ន។ សូមចុចស្កេនម្តងទៀត ឬបំពេញព័ត៌មានដោយផ្ទាល់ខាងក្រោម។'
+          );
+        }
+      }
     } finally {
-      setIsExtractingTopik(false);
+      if (runId === extractRunIdRef.current) {
+        setIsExtractingTopik(false);
+      }
     }
   };
 
@@ -1161,9 +1196,16 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
             </div>
 
             {isExtractingTopik && (
-              <div className="flex items-center gap-2 text-xs text-blue-800 bg-white/90 px-3 py-2 rounded-xl border border-blue-200 font-semibold animate-pulse">
+              <div className="flex items-center gap-2 text-xs text-blue-800 bg-white/90 px-3 py-2 rounded-xl border border-blue-200 font-semibold">
                 <RefreshCw className="w-4 h-4 animate-spin text-blue-600 shrink-0" />
                 <span>កំពុងស្កេនចាប់ឈ្មោះ លេខកាត ARC ថ្ងៃចូលកូរ៉េ និងអាសយដ្ឋានដោយស្វ័យប្រវត្តិ សូមរង់ចាំបន្តិច...</span>
+              </div>
+            )}
+
+            {!isExtractingTopik && extractError && (
+              <div className="flex items-start gap-2 text-xs text-amber-900 bg-amber-50 px-3 py-2.5 rounded-xl border border-amber-300 font-medium">
+                <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                <span>{extractError}</span>
               </div>
             )}
 

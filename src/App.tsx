@@ -22,6 +22,7 @@ import {
   OcrFieldConfidenceMap,
   runFullDocumentOcrPipeline,
   mergeExtractedIntoFormData,
+  mergeExtractedDrafts,
   formDataToExtractedDraft,
   evaluateDraftConfidence,
 } from './utils/clientOcrEngine';
@@ -322,8 +323,9 @@ export default function App() {
     model: string,
     confidenceMap?: OcrFieldConfidenceMap
   ) => {
-    setExtractedOcrDraft((prev) => ({ ...prev, ...data }));
-    setOcrInitialSnapshot((prev) => ({ ...(prev || {}), ...data }));
+    setExtractedOcrDraft((prev) => mergeExtractedDrafts(data, prev));
+    setOcrInitialSnapshot((prev) => mergeExtractedDrafts(data, prev));
+    setFormData((prev) => mergeExtractedIntoFormData(prev, data, false));
     if (confidenceMap) {
       setOcrConfidenceMap((prev) => ({ ...prev, ...confidenceMap }));
       setOcrInitialConfidenceSnapshot((prev) => ({ ...(prev || {}), ...confidenceMap }));
@@ -342,8 +344,9 @@ export default function App() {
         topikCert: docs.topikCertList[0]?.dataUrl || null,
         passport: docs.passportList[0]?.dataUrl || null,
       });
-      setExtractedOcrDraft((prev) => ({ ...prev, ...res.data }));
-      setOcrInitialSnapshot((prev) => ({ ...(prev || {}), ...res.data }));
+      setExtractedOcrDraft((prev) => mergeExtractedDrafts(res.data, prev));
+      setOcrInitialSnapshot((prev) => mergeExtractedDrafts(res.data, prev));
+      setFormData((prev) => mergeExtractedIntoFormData(prev, res.data, false));
       setOcrConfidenceMap((prev) => ({ ...prev, ...res.confidence }));
       setOcrInitialConfidenceSnapshot((prev) => ({ ...(prev || {}), ...res.confidence }));
       if (res.rawTextPreview) setOcrRawText(res.rawTextPreview);
