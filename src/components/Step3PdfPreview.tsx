@@ -515,7 +515,7 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
                         type="button"
                         onClick={() => handlePromoUnlock(redeemCodeInput, 'redeem')}
                         className="px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white text-[11px] font-bold rounded-xl shadow-xs cursor-pointer flex items-center gap-1 shrink-0 transition-transform"
-                        title="ដោះសោដោយ Redeem Code (Google Sheet 10,000 កូដ — ត្រូវបង់ប្រាក់ជាមុន)"
+                        title="ដោះសោដោយ Redeem Code ក្រោយបង់ប្រាក់"
                       >
                         <Zap className="w-3 h-3 text-amber-300" />
                         <span>{lang === 'km' ? 'ដោះសោ' : lang === 'ko' ? '해제' : 'Unlock'}</span>

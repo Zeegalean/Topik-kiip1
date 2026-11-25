@@ -113,7 +113,13 @@ export default async function handler(req: any, res: any) {
       });
     }
 
-    const analysis = await analyzeKoreanBankReceiptWithGemini(base64Data, mimeType, lang);
+    const analysis = await analyzeKoreanBankReceiptWithGemini(
+      base64Data,
+      mimeType,
+      lang,
+      undefined,
+      senderNameInput
+    );
     if (!analysis.isValidReceipt) {
       return res.status(analysis.httpStatus || 422).json({
         success: false,

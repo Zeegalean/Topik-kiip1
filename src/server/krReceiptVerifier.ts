@@ -10,6 +10,7 @@ export interface KoreanBankPaymentInfo {
 export interface KoreanReceiptChecks {
   isReceipt: boolean;
   recipientMatched: boolean;
+  senderMatched: boolean;
   amountMatched: boolean;
   statusSuccess: boolean;
   timeVerified: boolean;
@@ -276,6 +277,71 @@ export function matchesExpectedKoreanRecipient(params: {
   return false;
 }
 
+export function matchesExpectedSenderName(params: {
+  detectedSender: string;
+  expectedSender: string;
+  aiSenderMatched?: boolean;
+}): boolean {
+  const cleanExpected = String(params.expectedSender || '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9가-힣\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  // If caller did not require a sender name (e.g. photo-only Telegram flow), skip sender check
+  if (!cleanExpected || cleanExpected.length < 2) {
+    return true;
+  }
+
+  const rawDetected = String(params.detectedSender || '').trim();
+  if (!rawDetected) {
+    return false;
+  }
+
+  const cleanDetected = rawDetected
+    .toUpperCase()
+    .replace(/[^A-Z0-9가-힣\s*○●]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const compactExpected = cleanExpected.replace(/\s+/g, '');
+  const compactDetected = cleanDetected.replace(/[\s*○●]+/g, '');
+  const isMasked = /[*○●]/.test(cleanDetected);
+
+  if (!compactDetected) {
+    return false;
+  }
+
+  // 1. Direct compact or substring match
+  if (
+    compactDetected === compactExpected ||
+    compactDetected.includes(compactExpected) ||
+    (compactExpected.includes(compactDetected) && compactDetected.length >= 3)
+  ) {
+    return true;
+  }
+
+  // 2. Multi-token match (handles reversed name order like "DARA SOK" vs "SOK DARA" and masked names like "SOK***")
+  const expectedTokens = cleanExpected.split(/\s+/).filter((t) => t.length >= 2);
+  if (expectedTokens.length >= 2) {
+    const matchedTokens = expectedTokens.filter((tok) => compactDetected.includes(tok));
+    if (matchedTokens.length >= 2) {
+      return true;
+    }
+    if (isMasked && matchedTokens.length >= 1) {
+      return true;
+    }
+  } else if (expectedTokens.length === 1 && compactDetected.includes(expectedTokens[0])) {
+    return true;
+  }
+
+  // 3. Cross-script Hangul <-> Latin phonetic match validated by Gemini Vision (only when a sender name was genuinely visible on receipt)
+  if (params.aiSenderMatched === true && compactDetected.length >= 2) {
+    return true;
+  }
+
+  return false;
+}
+
 function formatGeminiError(err: any): string {
   const msg = typeof err?.message === 'string' ? err.message : JSON.stringify(err || '');
   const causeCode = err?.cause?.code ? ` (${err.cause.code})` : '';
@@ -321,11 +387,19 @@ export async function analyzeKoreanBankReceiptWithGemini(
   imageBase64: string,
   rawMimeType: string,
   lang = 'km',
-  aiOverride?: GoogleGenAI | null
+  aiOverride?: GoogleGenAI | null,
+  expectedSenderName = ''
 ): Promise<KoreanReceiptAnalysisResult> {
+  const cleanExpectedSender = String(expectedSenderName || '')
+    .replace(/[\u0000-\u001F\u007F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 100);
+
   const emptyChecks: KoreanReceiptChecks = {
     isReceipt: false,
     recipientMatched: false,
+    senderMatched: !cleanExpectedSender,
     amountMatched: false,
     statusSuccess: false,
     timeVerified: false,
@@ -361,9 +435,14 @@ export async function analyzeKoreanBankReceiptWithGemini(
   const { nowMs, kstDateTimeLabel } = getCurrentKstInfo();
   const maxAgeHours = Math.max(1, Number(process.env.KR_RECEIPT_MAX_AGE_HOURS) || 72);
 
+  const senderPromptInstruction = cleanExpectedSender
+    ? `Expected sender / depositor name declared by user: "${cleanExpectedSender}".`
+    : 'No declared sender name provided.';
+
   const prompt = `You are a strict South Korean bank transfer receipt verification auditor.
 Current server time in Korea Standard Time (KST): ${kstDateTimeLabel}.
 Expected receiving account holder: "${expectedHolder}" (${krBank.bankName}, account ending in "${expectedAccountDigits.slice(-4)}").
+${senderPromptInstruction}
 Expected minimum transfer amount: 35,000 KRW (₩35,000).
 
 Inspect the uploaded screenshot carefully and extract ONLY what is genuinely visible in the image:
@@ -374,11 +453,16 @@ Inspect the uploaded screenshot carefully and extract ONLY what is genuinely vis
 5. bankName: bank or app name shown on the receipt.
 6. recipientName: exact recipient / beneficiary name visible on the receipt (받는분 / 입금계좌 예금주 / 받는 사람). Return "" if not visible.
 7. recipientAccountDigits: digits visible for the recipient account number (입금계좌번호), digits only. Return "" if not visible.
-8. senderName: exact sender / depositor name visible on the receipt if shown (보내는분 / 출금계좌 예금주 / 송금인 / 내 통장 표시). Return "" if not visible.
-9. transferDateTimeRaw: exact transfer date and time string visible on the screenshot (거래일시 / 이체일시 / 송금일시). Return "" if not visible.
-10. transferDateIso: normalized transfer date in "YYYY-MM-DD" (KST). If year is omitted on the receipt (e.g. "11월 25일"), infer current KST year from ${kstDateTimeLabel}. Return "" if date is not visible.
-11. transferTime24h: normalized transfer time in 24-hour "HH:MM" (KST). Return "" if time is not visible.
-12. verdictKhmer: return "ពិត" ONLY if ALL conditions are clearly satisfied (genuine completed bank transfer + recipient matches "${expectedHolder}" + amount >= 35000 + valid transfer date/time visible); otherwise return "មិនពិត".
+8. senderName: exact sender / depositor / memo name visible on the receipt if shown (보내는분 / 출금계좌 예금주 / 송금인 / 내 통장 표시 / 받는분 통장 표시 / 입금자명). Return "" if not visible.
+9. senderNameMatchesDeclared: ${
+    cleanExpectedSender
+      ? `true ONLY if a sender/depositor name is genuinely visible on the receipt AND matches "${cleanExpectedSender}" (allowing reversed surname/given-name order, masked middle characters like SOK***, or Korean Hangul ↔ English phonetic transliteration of the exact same person's name). Return false if no sender name is visible or if it belongs to a different person.`
+      : 'true.'
+  }
+10. transferDateTimeRaw: exact transfer date and time string visible on the screenshot (거래일시 / 이체일시 / 송금일시). Return "" if not visible.
+11. transferDateIso: normalized transfer date in "YYYY-MM-DD" (KST). If year is omitted on the receipt (e.g. "11월 25일"), infer current KST year from ${kstDateTimeLabel}. Return "" if date is not visible.
+12. transferTime24h: normalized transfer time in 24-hour "HH:MM" (KST). Return "" if time is not visible.
+13. verdictKhmer: return "ពិត" ONLY if ALL conditions are clearly satisfied (genuine completed bank transfer + recipient matches "${expectedHolder}" + ${cleanExpectedSender ? `sender matches "${cleanExpectedSender}" + ` : ''}amount >= 35000 + valid transfer date/time visible); otherwise return "មិនពិត".
 
 Return ONLY valid JSON matching the schema.`;
 
@@ -393,6 +477,7 @@ Return ONLY valid JSON matching the schema.`;
       recipientName: { type: Type.STRING },
       recipientAccountDigits: { type: Type.STRING },
       senderName: { type: Type.STRING },
+      senderNameMatchesDeclared: { type: Type.BOOLEAN },
       transferDateTimeRaw: { type: Type.STRING },
       transferDateIso: { type: Type.STRING },
       transferTime24h: { type: Type.STRING },
@@ -458,6 +543,12 @@ Return ONLY valid JSON matching the schema.`;
           expectedAccountDigits,
         });
 
+        const senderMatched = matchesExpectedSenderName({
+          detectedSender: senderName,
+          expectedSender: cleanExpectedSender,
+          aiSenderMatched: Boolean(parsed.senderNameMatchesDeclared),
+        });
+
         const parsedTime = parseKstTimestampFromReceipt(
           transferDateIso,
           transferTime24h,
@@ -503,6 +594,7 @@ Return ONLY valid JSON matching the schema.`;
         const checks: KoreanReceiptChecks = {
           isReceipt,
           recipientMatched,
+          senderMatched,
           amountMatched,
           statusSuccess,
           timeVerified,
@@ -586,6 +678,7 @@ Return ONLY valid JSON matching the schema.`;
             amountKrw,
             bankName,
             recipientName,
+            senderName,
             statusText,
             transferTimestamp,
             transferFingerprint,
@@ -601,6 +694,34 @@ Return ONLY valid JSON matching the schema.`;
           };
         }
 
+        if (!senderMatched) {
+          return {
+            isValidReceipt: false,
+            verdict: 'មិនពិត',
+            amountKrw,
+            bankName,
+            recipientName,
+            senderName,
+            statusText,
+            transferTimestamp,
+            transferFingerprint,
+            transferCompleted: true,
+            checks,
+            modelUsed: model,
+            reason: senderName
+              ? lang === 'ko'
+                ? `입력한 송금인 이름("${cleanExpectedSender}")과 영수증에 표시된 보내는 분("${senderName}")이 일치하지 않습니다.`
+                : lang === 'en'
+                ? `Entered Sender Name ("${cleanExpectedSender}") does not match the sender visible on the receipt ("${senderName}").`
+                : `ឈ្មោះអ្នកផ្ញើរប្រាក់ដែលអ្នកបំពេញ ("${cleanExpectedSender}") មិនត្រូវគ្នានឹងឈ្មោះអ្នកផ្ញើលើវិក្កយបត្រ ("${senderName}") ទេ! សូមពិនិត្យ និងបំពេញឱ្យដូចលើវិក្កយបត្រ។`
+              : lang === 'ko'
+              ? `영수증 이미지에서 송금인 이름("${cleanExpectedSender}")을 확인할 수 없습니다. 보내는 분 이름이 표시된 상세 이체확인증을 업로드해 주세요.`
+              : lang === 'en'
+              ? `Could not verify Sender Name ("${cleanExpectedSender}") on the receipt image. Please upload the full transfer receipt showing the sender's name.`
+              : `AI រកមិនឃើញឈ្មោះអ្នកផ្ញើរប្រាក់ ("${cleanExpectedSender}") នៅលើរូបវិក្កយបត្រទេ! សូមថត Screenshot វិក្កយបត្រពេញដែលបង្ហាញឈ្មោះអ្នកផ្ញើ (보내는분 / 송금인)។`,
+          };
+        }
+
         if (!timeVerified) {
           return {
             isValidReceipt: false,
@@ -608,6 +729,7 @@ Return ONLY valid JSON matching the schema.`;
             amountKrw,
             bankName,
             recipientName,
+            senderName,
             statusText,
             transferTimestamp,
             transferFingerprint,

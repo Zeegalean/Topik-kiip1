@@ -100,6 +100,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const [receiptChecks, setReceiptChecks] = useState<{
     isReceipt: boolean;
     recipientMatched: boolean;
+    senderMatched?: boolean;
     amountMatched: boolean;
     statusSuccess: boolean;
     timeVerified: boolean;
@@ -107,6 +108,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const [receiptDetected, setReceiptDetected] = useState<{
     bankName?: string;
     recipientName?: string;
+    senderName?: string;
     amountKrw?: number;
     statusText?: string;
     transferTimestamp?: string;
@@ -116,12 +118,14 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     verdict: string;
     bankName: string;
     recipientName: string;
+    senderName?: string;
     verifiedAmount: number;
     statusText: string;
     transferTimestamp: string;
     checks: {
       isReceipt: boolean;
       recipientMatched: boolean;
+      senderMatched?: boolean;
       amountMatched: boolean;
       statusSuccess: boolean;
       timeVerified: boolean;
@@ -508,6 +512,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       const verifiedChecks = data.checks || {
         isReceipt: true,
         recipientMatched: true,
+        senderMatched: true,
         amountMatched: true,
         statusSuccess: true,
         timeVerified: true,
@@ -518,6 +523,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         verdict: data.verdict || 'ពិត',
         bankName: data.bankName || krConfig.bankName || 'Korean Bank',
         recipientName: data.recipientName || krConfig.accountHolder || 'EANG VEASNA',
+        senderName: data.senderName || receiptSenderName.trim(),
         verifiedAmount: Number(data.verifiedAmount) || krConfig.amountKrw || 35000,
         statusText: data.statusText || '이체완료',
         transferTimestamp: data.transferTimestamp || '',
@@ -737,7 +743,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                 1. Paid Redeem Code Box (10,000 Google Sheet codes — requires payment first!)
                 2. Separate Promo Code Box (Admin Dashboard Promo Codes — free unlock) */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {/* BOX 1: Paid Redeem Code (10,000 Google Sheet — Payment Required) */}
+              {/* BOX 1: Paid Redeem Code */}
               <div className="p-3.5 bg-gradient-to-br from-indigo-50 via-blue-50 to-slate-50 border-2 border-indigo-300 rounded-2xl space-y-2 shadow-xs">
                 <div className="flex items-start gap-2">
                   <span className="p-1.5 rounded-lg bg-indigo-600 text-white shadow-2xs shrink-0 mt-0.5">
@@ -749,14 +755,14 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                         ? 'ប្រអប់ Redeem Code (ក្រោយបង់ប្រាក់)'
                         : isKo
                         ? '리딤 코드 입력 (결제 완료 코드)'
-                        : 'Paid Redeem Code (Google Sheet)'}
+                        : 'Paid Redeem Code'}
                     </span>
                     <span className="text-[10.5px] text-indigo-700 leading-snug block mt-0.5">
                       {isKm
-                        ? 'សម្រាប់លេខកូដ Google Sheet (10,000 កូដ) ដែលទទួលបានក្រោយបង់ប្រាក់តាមធនាគារកូរ៉េ ឬ ABA'
+                        ? 'សម្រាប់លេខកូដដែលទទួលបានក្រោយបង់ប្រាក់តាមធនាគារកូរ៉េ ឬ ABA'
                         : isKo
-                        ? '결제 확인 후 발급받은 Google Sheet 리딤 코드를 입력하세요'
-                        : 'Requires payment first — enter the paid Google Sheet code issued after payment'}
+                        ? '결제 확인 후 발급받은 리딤 코드를 입력하세요'
+                        : 'Enter the Redeem Code issued after completing payment'}
                     </span>
                   </div>
                 </div>
@@ -1115,10 +1121,10 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                         </h4>
                         <p className="text-[11px] text-slate-600 mt-0.5 leading-relaxed">
                           {isKm
-                            ? `AI នឹងអានរូបភាពដោយស្វ័យប្រវត្តិ និងផ្ទៀងផ្ទាត់ ៤ ចំណុច៖ ឈ្មោះអ្នកទទួល (${krConfig.accountHolder}) · ចំនួនទឹកប្រាក់ ₩35,000 · ស្ថានភាពជោគជ័យ (이체완료) · និងកាលបរិច្ឆេទ/ពេលវេលាផ្ទេរប្រាក់។`
+                            ? `AI នឹងអានរូបភាពដោយស្វ័យប្រវត្តិ និងផ្ទៀងផ្ទាត់ ៥ ចំណុច៖ ឈ្មោះអ្នកទទួល (${krConfig.accountHolder}) · ឈ្មោះអ្នកផ្ញើរប្រាក់ · ចំនួនទឹកប្រាក់ ₩35,000 · ស្ថានភាពជោគជ័យ (이체완료) · និងកាលបរិច្ឆេទ/ពេលវេលាផ្ទេរប្រាក់។`
                             : isKo
-                            ? `AI가 받는 분(${krConfig.accountHolder}), 금액(₩35,000), 이체완료 상태, 거래일시(시간)를 자동 검증한 뒤 리딤 코드를 즉시 발급합니다.`
-                            : `AI automatically verifies recipient (${krConfig.accountHolder}), amount (₩35,000), transfer completion status, and transfer timestamp before issuing your Redeem Code.`}
+                            ? `AI가 받는 분(${krConfig.accountHolder}), 송금인 이름, 금액(₩35,000), 이체완료 상태, 거래일시(시간)를 자동 검증한 뒤 리딤 코드를 즉시 발급합니다.`
+                            : `AI automatically cross-references recipient (${krConfig.accountHolder}), sender name, amount (₩35,000), transfer completion status, and transfer timestamp before issuing your Redeem Code.`}
                         </p>
                         {idCardName && (
                           <div className="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-50 border border-indigo-200 text-[11px] font-bold text-indigo-900">
@@ -1303,6 +1309,11 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                                 val: receiptDetected?.recipientName || '',
                               },
                               {
+                                ok: receiptChecks.senderMatched !== false,
+                                label: isKm ? 'ឈ្មោះអ្នកផ្ញើរប្រាក់' : isKo ? '송금인 일치' : 'Sender Name',
+                                val: receiptDetected?.senderName || (isKm ? 'មិនត្រូវគ្នា/មិនឃើញ' : 'Not matched'),
+                              },
+                              {
                                 ok: receiptChecks.amountMatched,
                                 label: isKm ? 'ទឹកប្រាក់ ₩35,000' : isKo ? '금액 ₩35,000' : 'Amount ₩35,000',
                                 val: receiptDetected?.amountKrw ? `₩${receiptDetected.amountKrw.toLocaleString()}` : '',
@@ -1363,7 +1374,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                           </span>
                         </div>
 
-                        {/* 4 Verified Criteria Summary */}
+                        {/* Verified Criteria Summary */}
                         <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-[11px] bg-white/90 p-2.5 rounded-xl border border-emerald-200">
                           <div className="flex items-center gap-1.5 text-emerald-900">
                             <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
@@ -1372,6 +1383,15 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                               <strong>{issuedKrCode.recipientName}</strong>
                             </span>
                           </div>
+                          {issuedKrCode.senderName && (
+                            <div className="flex items-center gap-1.5 text-emerald-900">
+                              <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                              <span className="font-semibold">
+                                {isKm ? 'អ្នកផ្ញើរប្រាក់:' : isKo ? '보내는 분:' : 'Sender:'}{' '}
+                                <strong>{issuedKrCode.senderName}</strong>
+                              </span>
+                            </div>
+                          )}
                           <div className="flex items-center gap-1.5 text-emerald-900 tabular-nums">
                             <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
                             <span className="font-semibold">
@@ -1543,15 +1563,15 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               </div>
             )}
 
-            {/* TAB 3: PAID REDEEM CODE (10,000 GOOGLE SHEET) + SEPARATE PROMO CODE BOX */}
+            {/* TAB 3: PAID REDEEM CODE + SEPARATE PROMO CODE BOX */}
             {activeTab === 'redeem' && (
               <div className="space-y-4">
                 <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200 text-xs text-slate-700 leading-relaxed">
                   {isKm
-                    ? '🔒 លេខកូដ Google Sheet (10,000 កូដ) តម្រូវឱ្យបង់ប្រាក់ជាមុនសិន ទើបអាចដោះសោបាននៅប្រអប់ Redeem Code ខាងឆ្វេង។ ប្រសិនបើអ្នកមាន Promo Code ពី Admin Dashboard សូមវាយបញ្ចូលក្នុងប្រអប់ Promo Code ផ្សេងខាងស្តាំ៖'
+                    ? '🔒 សូមបញ្ចូលលេខកូដ Redeem Code ដែលទទួលបានក្រោយបង់ប្រាក់នៅប្រអប់ខាងឆ្វេង។ ប្រសិនបើអ្នកមាន Promo Code ពី Admin Dashboard សូមវាយបញ្ចូលក្នុងប្រអប់ Promo Code ផ្សេងខាងស្តាំ៖'
                     : isKo
-                    ? '🔒 Google Sheet 10,000개 리딤 코드는 결제 완료 후 왼쪽 리딤 코드 입력란에서 잠금 해제할 수 있습니다. 관리자 프로모션 코드는 오른쪽 전용 입력란에 입력해 주세요.'
-                    : '🔒 Google Sheet (10,000) Redeem Codes require payment first before unlocking in the Redeem Code box. If you have an Admin Promo Code, enter it in the separate Promo Code box:'}
+                    ? '🔒 결제 완료 후 발급받은 리딤 코드는 왼쪽 입력란에서 잠금 해제할 수 있습니다. 관리자 프로모션 코드는 오른쪽 전용 입력란에 입력해 주세요.'
+                    : '🔒 Enter the Redeem Code issued after payment in the left box. If you have an Admin Promo Code, enter it in the separate Promo Code box on the right:'}
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
@@ -1565,9 +1585,6 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                         <h4 className="text-xs sm:text-sm font-black text-indigo-950">
                           {isKm ? '1. ប្រអប់ Redeem Code (ក្រោយបង់ប្រាក់)' : isKo ? '1. 리딤 코드 (결제 완료 후)' : '1. Paid Redeem Code'}
                         </h4>
-                        <p className="text-[11px] text-indigo-700">
-                          {isKm ? '10,000 កូដ Google Sheet (ត្រូវបង់ប្រាក់ជាមុន)' : 'Google Sheet 10,000 (Payment Required)'}
-                        </p>
                       </div>
                     </div>
 

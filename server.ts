@@ -1550,7 +1550,7 @@ function localizeCodeError(errorCode: UnlockErrorCode, lang: string): string {
       case 'EMPTY':
         return '리딤 코드 또는 프로모션 코드를 입력해 주세요.';
       case 'PAYMENT_REQUIRED':
-        return '결제가 확인되지 않은 Google Sheet 리딤 코드입니다. 계좌이체 또는 ABA 결제 완료 후 코드를 사용해 주세요.';
+        return '결제가 확인되지 않은 리딤 코드입니다. 계좌이체 또는 ABA 결제 완료 후 코드를 사용해 주세요.';
       case 'WRONG_BOX_PROMO':
         return '이 코드는 프로모션 코드입니다. 별도의 "프로모션 코드(Promo Code)" 입력란에 입력해 주세요.';
       case 'WRONG_BOX_REDEEM':
@@ -1575,7 +1575,7 @@ function localizeCodeError(errorCode: UnlockErrorCode, lang: string): string {
       case 'EMPTY':
         return 'Please enter a Redeem Code or Promo Code.';
       case 'PAYMENT_REQUIRED':
-        return 'Payment required! This Google Sheet Redeem Code has not been paid/activated yet. Please complete payment via Korea Bank or ABA PayWay first.';
+        return 'Payment required! This Redeem Code has not been paid/activated yet. Please complete payment via Korea Bank or ABA PayWay first.';
       case 'WRONG_BOX_PROMO':
         return 'This is a Promo Code. Please enter it in the separate Promo Code box.';
       case 'WRONG_BOX_REDEEM':
@@ -1600,7 +1600,7 @@ function localizeCodeError(errorCode: UnlockErrorCode, lang: string): string {
     case 'EMPTY':
       return 'សូមបញ្ចូលលេខកូដ Redeem Code ឬ Promo Code!';
     case 'PAYMENT_REQUIRED':
-      return 'លេខកូដ Redeem Code (Google Sheet) នេះមិនទាន់បានបង់ប្រាក់ទេ! សូមបង់ប្រាក់តាមធនាគារកូរ៉េ ឬ ABA PayWay ជាមុនសិន ទើបប្រព័ន្ធ ឬ Admin បើកសិទ្ធិដោះសោបាន។';
+      return 'លេខកូដ Redeem Code នេះមិនទាន់បានបង់ប្រាក់ទេ! សូមបង់ប្រាក់តាមធនាគារកូរ៉េ ឬ ABA PayWay ជាមុនសិន ទើបប្រព័ន្ធ ឬ Admin បើកសិទ្ធិដោះសោបាន។';
     case 'WRONG_BOX_PROMO':
       return 'នេះជាលេខកូដ Promo Code! សូមយកទៅវាយបញ្ចូលក្នុង "ប្រអប់ Promo Code ផ្សេង" វិញ។';
     case 'WRONG_BOX_REDEEM':
@@ -2940,7 +2940,13 @@ app.post('/api/payments/verify-kr-receipt', paymentRateLimiter, async (req, res)
       .update(Buffer.from(base64Data, 'base64'))
       .digest('hex');
 
-    const analysis = await analyzeKoreanBankReceiptWithGemini(base64Data, mimeType, lang, getAiClient());
+    const analysis = await analyzeKoreanBankReceiptWithGemini(
+      base64Data,
+      mimeType,
+      lang,
+      getAiClient(),
+      senderNameInput
+    );
     const checkEntries = Object.entries(analysis.checks || {});
     const passedChecks = checkEntries.filter(([, v]) => Boolean(v)).map(([k]) => k);
     const failedChecks = checkEntries.filter(([, v]) => !v).map(([k]) => k);
@@ -2955,6 +2961,7 @@ app.post('/api/payments/verify-kr-receipt', paymentRateLimiter, async (req, res)
       else if (!analysis.checks.statusSuccess) receiptPattern = 'RECEIPT_STATUS_INCOMPLETE';
       else if (!analysis.checks.recipientMatched) receiptPattern = 'RECEIPT_RECIPIENT_MISMATCH';
       else if (!analysis.checks.amountMatched) receiptPattern = 'RECEIPT_AMOUNT_LOW';
+      else if (!analysis.checks.senderMatched) receiptPattern = 'RECEIPT_SENDER_MISMATCH';
       else if (!analysis.checks.timeVerified) receiptPattern = 'RECEIPT_TIME_INVALID';
 
       try {
@@ -2982,6 +2989,7 @@ app.post('/api/payments/verify-kr-receipt', paymentRateLimiter, async (req, res)
         detected: {
           bankName: analysis.bankName,
           recipientName: analysis.recipientName,
+          senderName: analysis.senderName || '',
           amountKrw: analysis.amountKrw,
           statusText: analysis.statusText,
           transferTimestamp: analysis.transferTimestamp,
