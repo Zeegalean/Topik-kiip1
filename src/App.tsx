@@ -8,6 +8,7 @@ import {
 } from './types';
 import { INITIAL_FORM_DATA, SAMPLE_FORM_DATA, generateSampleArcFront, generateSampleArcBack, generateSampleTopikCert, generateSampleSignature, generateSamplePassport } from './data/sampleData';
 import { Navbar } from './components/Navbar';
+import { StepsProgressBar } from './components/StepsProgressBar';
 import { AuthModal } from './components/AuthModal';
 import { TopikKiipGuide } from './components/TopikKiipGuide';
 import { Step1Upload } from './components/Step1Upload';
@@ -446,6 +447,23 @@ export default function App() {
     }
   };
 
+  const handleNavigateStep = (s: number) => {
+    if (s > 1 && !isStep1Ready) {
+      return;
+    }
+    if (s >= 3 && (currentStep === 2 || (!hasConfirmedOcrReview && Object.keys(extractedOcrDraft).length > 0))) {
+      setFormData((prev) => mergeExtractedIntoFormData(prev, extractedOcrDraft, true));
+      setHasConfirmedOcrReview(true);
+    }
+    if (s === 5 && !isPaid) {
+      setPendingStepAfterPayment(5);
+      setIsPaymentModalOpen(true);
+      return;
+    }
+    setActiveTab('flow');
+    setCurrentStep(s);
+  };
+
   return (
     <div className="min-h-dvh bg-slate-50 flex flex-col font-sans relative print-root-container">
       {/* Background Wallpaper Container */}
@@ -466,22 +484,7 @@ export default function App() {
       <div className="relative z-20 no-print">
         <Navbar
           currentStep={currentStep}
-          setCurrentStep={(s) => {
-            if (s > 1 && !isStep1Ready) {
-              return;
-            }
-            if (s >= 3 && (currentStep === 2 || (!hasConfirmedOcrReview && Object.keys(extractedOcrDraft).length > 0))) {
-              setFormData((prev) => mergeExtractedIntoFormData(prev, extractedOcrDraft, true));
-              setHasConfirmedOcrReview(true);
-            }
-            if (s === 5 && !isPaid) {
-              setPendingStepAfterPayment(5);
-              setIsPaymentModalOpen(true);
-              return;
-            }
-            setActiveTab('flow');
-            setCurrentStep(s);
-          }}
+          setCurrentStep={handleNavigateStep}
           isStep1Ready={isStep1Ready}
           isAdmin={isAdmin}
           lang={lang}
@@ -512,6 +515,15 @@ export default function App() {
 
       {/* Main Container + Right Sidebar (Live Viewer Stats + Total Visited + 300x250 Ads) */}
       <main className="flex-1 max-w-7xl w-full mx-auto px-3 sm:px-6 py-4 sm:py-6 relative z-10 print-main-container">
+        {activeTab === 'flow' && (
+          <StepsProgressBar
+            currentStep={currentStep}
+            onSelectStep={handleNavigateStep}
+            isStep1Ready={isStep1Ready}
+            isPaid={isPaid}
+            lang={lang}
+          />
+        )}
         <div className="flex flex-col lg:flex-row items-start justify-center gap-6">
           {/* Primary Content Column */}
           <div className="flex-1 min-w-0 w-full max-w-4xl">
