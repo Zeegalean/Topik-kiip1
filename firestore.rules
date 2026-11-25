@@ -109,6 +109,20 @@ service cloud.firestore {
         (!('countryCode' in data) || (data.countryCode is string && data.countryCode.size() <= 8));
     }
 
+    function isValidRedeemCode(data, codeId) {
+      return data.keys().hasAll(['id', 'code', 'status', 'isPaid', 'source', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'code', 'status', 'isPaid', 'source', 'note', 'assignedTo', 'createdAt', 'updatedAt']) &&
+        data.id is string && data.id == codeId && isValidId(data.id) &&
+        data.code is string && data.code == codeId && data.code.size() >= 4 && data.code.size() <= 64 && data.code.matches('^[A-Z0-9_\\-]+$') &&
+        data.status in ['Unused', 'Used', 'Revoked'] &&
+        data.isPaid is bool &&
+        data.source is string && data.source.size() >= 1 && data.source.size() <= 32 &&
+        data.updatedAt is timestamp &&
+        (!('note' in data) || (data.note is string && data.note.size() <= 200)) &&
+        (!('assignedTo' in data) || (data.assignedTo is string && data.assignedTo.size() <= 120)) &&
+        (!('createdAt' in data) || data.createdAt is timestamp);
+    }
+
     // 4. Collection Rules
 
     // Admins registry (read-only for self check, never client-writable)
@@ -205,6 +219,21 @@ service cloud.firestore {
             incoming().diff(existing()).affectedKeys().hasOnly(['usageCount'])
           )
         );
+      allow delete: if isValidId(codeId) && isAdmin();
+    }
+
+    // Payment-Gated Redeem Codes collection (Admin only: mirrored from Server DB / Google Sheets)
+    match /redeemCodes/{codeId} {
+      allow get: if isValidId(codeId) && isAdmin();
+      allow list: if isRootAdmin();
+      allow create: if isValidId(codeId) && isAdmin() &&
+        isValidRedeemCode(incoming(), codeId) &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(codeId) && isAdmin() &&
+        isValidRedeemCode(incoming(), codeId) &&
+        incoming().id == existing().id &&
+        incoming().code == existing().code &&
+        incoming().updatedAt == request.time;
       allow delete: if isValidId(codeId) && isAdmin();
     }
 

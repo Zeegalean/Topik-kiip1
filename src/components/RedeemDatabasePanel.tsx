@@ -17,7 +17,13 @@ import {
   ChevronLeft,
   ChevronRight,
   X,
+  Lock,
+  Unlock,
+  BadgeCheck,
+  Cloud,
 } from 'lucide-react';
+import { doc, setDoc, deleteDoc, serverTimestamp } from 'firebase/firestore';
+import { db, OperationType, handleFirestoreError } from '../utils/firebase';
 import { Language } from '../types';
 
 function parseCsvRowsClient(csvText: string): string[][] {
@@ -140,6 +146,7 @@ interface RedeemCodeRow {
   id: number;
   code: string;
   status: 'Unused' | 'Used' | 'Revoked';
+  is_paid: boolean;
   source: string;
   note: string;
   assigned_to: string;
@@ -150,6 +157,8 @@ interface RedeemCodeRow {
 interface RedeemStats {
   total: number;
   unusedCount: number;
+  paidUnusedCount: number;
+  unpaidUnusedCount: number;
   usedCount: number;
   revokedCount: number;
   databasePath: string;
@@ -164,11 +173,15 @@ interface RedeemStats {
 
 interface RedeemDatabasePanelProps {
   adminToken: string | null;
+  isFirebaseRootAdmin?: boolean;
   lang?: Language;
 }
 
+const VALID_FIRESTORE_CODE_RE = /^[A-Z0-9_-]{4,64}$/;
+
 export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
   adminToken,
+  isFirebaseRootAdmin = false,
   lang = 'km',
 }) => {
   const isKm = lang === 'km';
@@ -176,6 +189,8 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
   const [stats, setStats] = useState<RedeemStats>({
     total: 0,
     unusedCount: 0,
+    paidUnusedCount: 0,
+    unpaidUnusedCount: 0,
     usedCount: 0,
     revokedCount: 0,
     databasePath: 'data/redeem_codes.sqlite',
@@ -187,7 +202,7 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
     lastRowsRead: 0,
     lastSyncError: null,
   });
-  const [statusFilter, setStatusFilter] = useState<'all' | 'Unused' | 'Used' | 'Revoked'>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'Unused' | 'Paid' | 'Unpaid' | 'Used' | 'Revoked'>('all');
   const [searchInput, setSearchInput] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [page, setPage] = useState(1);
@@ -201,6 +216,12 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
   const [loading, setLoading] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
+
+  // Issue 1 Paid Code from Google Sheet Form
+  const [issueCustomer, setIssueCustomer] = useState('');
+  const [issueNote, setIssueNote] = useState('ABA / Korea Bank Confirmed');
+  const [issuingPaid, setIssuingPaid] = useState(false);
+  const [lastIssuedPaid, setLastIssuedPaid] = useState<RedeemCodeRow | null>(null);
 
   // Generate Batch Form
   const [genCount, setGenCount] = useState(10);
@@ -271,6 +292,148 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
     fetchRedeemDb();
   }, [fetchRedeemDb]);
 
+  const mirrorRedeemCodeToFirestore = useCallback(
+    async (item: {
+      code: string;
+      status: 'Unused' | 'Used' | 'Revoked';
+      is_paid: boolean;
+      source?: string;
+      note?: string;
+      assigned_to?: string;
+    }) => {
+      if (!isFirebaseRootAdmin) return;
+      const codeId = String(item.code || '').trim().toUpperCase();
+      if (!VALID_FIRESTORE_CODE_RE.test(codeId)) return;
+      try {
+        await setDoc(doc(db, 'redeemCodes', codeId), {
+          id: codeId,
+          code: codeId,
+          status: item.status,
+          isPaid: Boolean(item.is_paid),
+          source: String(item.source || 'admin').slice(0, 32) || 'admin',
+          note: String(item.note || '').slice(0, 200),
+          assignedTo: String(item.assigned_to || '').slice(0, 120),
+          updatedAt: serverTimestamp(),
+        });
+      } catch (err) {
+        try {
+          handleFirestoreError(err, OperationType.WRITE, `redeemCodes/${codeId}`);
+        } catch {
+          // Non-blocking audit log
+        }
+      }
+    },
+    [isFirebaseRootAdmin]
+  );
+
+  const deleteRedeemCodeFromFirestore = useCallback(
+    async (code: string) => {
+      if (!isFirebaseRootAdmin) return;
+      const codeId = String(code || '').trim().toUpperCase();
+      if (!VALID_FIRESTORE_CODE_RE.test(codeId)) return;
+      try {
+        await deleteDoc(doc(db, 'redeemCodes', codeId));
+      } catch (err) {
+        try {
+          handleFirestoreError(err, OperationType.DELETE, `redeemCodes/${codeId}`);
+        } catch {
+          // Non-blocking audit log
+        }
+      }
+    },
+    [isFirebaseRootAdmin]
+  );
+
+  const handleIssueNextPaidCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!adminToken) return;
+    setIssuingPaid(true);
+    setFeedback(null);
+    try {
+      const resp = await fetch('/api/admin/redeem-codes/issue-paid', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${adminToken}`,
+        },
+        body: JSON.stringify({
+          assignedTo: issueCustomer.trim() || 'paid_customer',
+          note: issueNote.trim() || 'Admin Payment Confirmed',
+        }),
+      });
+      const json = await resp.json();
+      if (resp.ok && json?.success && json.record) {
+        const rec: RedeemCodeRow = json.record;
+        setLastIssuedPaid(rec);
+        setIssueCustomer('');
+        await mirrorRedeemCodeToFirestore(rec);
+        try {
+          navigator.clipboard.writeText(rec.code);
+          setCopiedCode(rec.code);
+          setTimeout(() => setCopiedCode(null), 2500);
+        } catch {}
+        setFeedback({
+          type: 'success',
+          text: isKm
+            ? `✓ បានបញ្ជាក់បង់ប្រាក់ & ដកកូដ ${rec.code} (${rec.source}) រួចរាល់ (បានចម្លងរួច)! អាចផ្ញើឱ្យអតិថិជនដោះសោបានភ្លាមៗ។`
+            : `✓ Issued & marked Paid: ${rec.code} (${rec.source}) — copied to clipboard! Ready for customer unlock.`,
+        });
+        await fetchRedeemDb();
+      } else {
+        setFeedback({ type: 'error', text: json?.error || 'Failed to issue paid code' });
+      }
+    } catch {
+      setFeedback({ type: 'error', text: 'Network error while issuing paid code' });
+    } finally {
+      setIssuingPaid(false);
+    }
+  };
+
+  const handleTogglePaid = async (row: RedeemCodeRow) => {
+    if (!adminToken) return;
+    const nextPaid = !row.is_paid;
+    try {
+      const resp = await fetch(`/api/admin/redeem-codes/${encodeURIComponent(row.code)}/paid`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${adminToken}`,
+        },
+        body: JSON.stringify({
+          isPaid: nextPaid,
+          assignedTo: nextPaid ? row.assigned_to || 'admin_confirmed' : '',
+          note: nextPaid ? row.note || 'Admin Payment Confirmed' : row.note,
+        }),
+      });
+      const json = await resp.json().catch(() => ({}));
+      if (resp.ok && json?.success) {
+        await mirrorRedeemCodeToFirestore(
+          json.record || {
+            code: row.code,
+            status: row.status,
+            is_paid: nextPaid,
+            source: row.source,
+            note: row.note,
+            assigned_to: nextPaid ? row.assigned_to || 'admin_confirmed' : '',
+          }
+        );
+        setFeedback({
+          type: 'success',
+          text: nextPaid
+            ? isKm
+              ? `✓ បានបើកសិទ្ធិ Paid សម្រាប់កូដ ${row.code} — អតិថិជនអាចប្រើដោះសោបានហើយ!`
+              : `✓ Marked ${row.code} as Paid — ready for customer unlock!`
+            : isKm
+            ? `🔒 បានប្តូរកូដ ${row.code} ទៅ Unpaid (ចាក់សោតម្រូវឱ្យបង់ប្រាក់)`
+            : `🔒 Marked ${row.code} as Unpaid (locked until payment).`,
+        });
+        await fetchRedeemDb();
+      }
+    } catch {
+      // ignore
+    }
+  };
+
   const handleGenerateBatch = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!adminToken) return;
@@ -287,11 +450,16 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
       });
       const json = await resp.json();
       if (resp.ok && json?.success) {
+        if (isFirebaseRootAdmin && Array.isArray(json.created)) {
+          await Promise.all(
+            json.created.slice(0, 50).map((item: RedeemCodeRow) => mirrorRedeemCodeToFirestore(item))
+          );
+        }
         setFeedback({
           type: 'success',
           text: isKm
-            ? `✓ បានបង្កើតលេខកូដថ្មី ${json.createdCount} កូដ (ស្ថានភាព 'Unused') ចូលក្នុង Database រួចរាល់!`
-            : `✓ Generated ${json.createdCount} new 'Unused' redeem codes in the database.`,
+            ? `✓ បានបង្កើតលេខកូដថ្មី ${json.createdCount} កូដ (ស្ថានភាព 'Unused · Unpaid') ចូលក្នុង Server DB${isFirebaseRootAdmin ? ' + Cloud Firestore' : ''} រួចរាល់!`
+            : `✓ Generated ${json.createdCount} new 'Unused (Unpaid)' redeem codes in Server DB${isFirebaseRootAdmin ? ' + Cloud Firestore' : ''}.`,
         });
         await fetchRedeemDb();
       } else {
@@ -310,6 +478,11 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
     setAddingManual(true);
     setFeedback(null);
     try {
+      const rawCodes = manualText
+        .split(/[\n,;]+/)
+        .map((c) => c.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, ''))
+        .filter((c) => c.length >= 4);
+
       const resp = await fetch('/api/admin/redeem-codes/add', {
         method: 'POST',
         headers: {
@@ -320,12 +493,26 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
       });
       const json = await resp.json();
       if (resp.ok && json?.success) {
+        if (isFirebaseRootAdmin && rawCodes.length > 0) {
+          await Promise.all(
+            rawCodes.slice(0, 50).map((code) =>
+              mirrorRedeemCodeToFirestore({
+                code,
+                status: 'Unused',
+                is_paid: false,
+                source: 'admin',
+                note: 'Manual Admin Entry',
+                assigned_to: '',
+              })
+            )
+          );
+        }
         setManualText('');
         setFeedback({
           type: 'success',
           text: isKm
-            ? `✓ បានបញ្ចូល ${json.added} កូដថ្មី (ស្ថានភាព 'Unused') · រំលងកូដជាន់គ្នា ${json.skipped}`
-            : `✓ Added ${json.added} 'Unused' codes (skipped ${json.skipped} duplicates/invalid).`,
+            ? `✓ បានបញ្ចូល ${json.added} កូដថ្មី (Unused · Unpaid) ក្នុង Server DB${isFirebaseRootAdmin ? ' + Cloud Firestore' : ''} · រំលងកូដជាន់គ្នា ${json.skipped}`
+            : `✓ Added ${json.added} 'Unused (Unpaid)' codes (skipped ${json.skipped} duplicates/invalid).`,
         });
         await fetchRedeemDb();
       } else {
@@ -459,10 +646,10 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
     }
   };
 
-  const handleUpdateStatus = async (code: string, status: 'Unused' | 'Used' | 'Revoked') => {
+  const handleUpdateStatus = async (row: RedeemCodeRow, status: 'Unused' | 'Used' | 'Revoked') => {
     if (!adminToken) return;
     try {
-      const resp = await fetch(`/api/admin/redeem-codes/${encodeURIComponent(code)}/status`, {
+      const resp = await fetch(`/api/admin/redeem-codes/${encodeURIComponent(row.code)}/status`, {
         method: 'PATCH',
         headers: {
           'Content-Type': 'application/json',
@@ -471,6 +658,14 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
         body: JSON.stringify({ status }),
       });
       if (resp.ok) {
+        await mirrorRedeemCodeToFirestore({
+          code: row.code,
+          status,
+          is_paid: row.is_paid,
+          source: row.source,
+          note: row.note,
+          assigned_to: row.assigned_to,
+        });
         await fetchRedeemDb();
       }
     } catch {
@@ -486,6 +681,7 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
         headers: { Authorization: `Bearer ${adminToken}` },
       });
       if (resp.ok) {
+        await deleteRedeemCodeFromFirestore(code);
         await fetchRedeemDb();
       }
     } catch {
@@ -505,29 +701,67 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
 
   return (
     <div className="space-y-5">
+      {/* Payment-Gated Architecture Banner + Dual Sync Status */}
+      <div className="p-3.5 rounded-2xl bg-gradient-to-r from-indigo-50 via-sky-50 to-emerald-50 border border-indigo-200 flex flex-wrap items-center justify-between gap-2 text-xs">
+        <div className="flex items-start gap-2 text-slate-800">
+          <Lock className="w-4 h-4 text-indigo-600 shrink-0 mt-0.5" />
+          <span>
+            {isKm
+              ? 'រាល់ 10,000 កូដពី Google Sheet ត្រូវបានចាក់សោតម្រូវឱ្យបង់ប្រាក់ជាមុន (Unpaid)។ នៅពេលអតិថិជនបង់ប្រាក់តាមធនាគារកូរ៉េ / ABA / Telegram Bot ឬ Admin ចុច "បញ្ជាក់បង់ប្រាក់ & ដក ១ កូដ" កូដនឹងប្តូរទៅ Paid ហើយដោះសោ Clean PDF បានភ្លាមៗ!'
+              : 'All 10,000 Google Sheet codes are payment-gated (Unpaid by default). Codes unlock Clean PDF only after payment is verified (Korea Bank, Telegram Bot, or Admin "Issue 1 Paid Code" / Mark Paid).'}
+          </span>
+        </div>
+        <span
+          className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10.5px] font-black border shrink-0 ${
+            isFirebaseRootAdmin
+              ? 'bg-emerald-100 text-emerald-800 border-emerald-300'
+              : 'bg-amber-100 text-amber-800 border-amber-300'
+          }`}
+        >
+          <Cloud className="w-3.5 h-3.5" />
+          <span>
+            {isFirebaseRootAdmin
+              ? 'Server DB + Cloud Firestore Auto-Sync'
+              : isKm
+              ? 'Server DB (ភ្ជាប់ Google Admin ដើម្បី Sync Firestore)'
+              : 'Server DB (Connect Google Admin for Firestore Sync)'}
+          </span>
+        </span>
+      </div>
+
       {/* Header Stats Cards */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
         <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs">
           <p className="text-[11px] font-bold text-slate-500 uppercase">
-            {isKm ? 'លេខកូដសរុប (Total DB)' : 'Total Codes'}
+            {isKm ? 'លេខកូដសរុប (Total)' : 'Total Codes'}
           </p>
           <p className="text-2xl font-black text-slate-900 mt-1 tabular-nums">{stats.total.toLocaleString()}</p>
           <p className="text-[10px] text-slate-400 font-mono mt-0.5 truncate">{stats.databasePath}</p>
         </div>
 
+        <div className="bg-amber-50 p-4 rounded-2xl border border-amber-200 shadow-xs">
+          <p className="text-[11px] font-bold text-amber-800 uppercase">
+            {isKm ? '🔒 មិនទាន់បង់ (Unpaid)' : '🔒 Unpaid Pool'}
+          </p>
+          <p className="text-2xl font-black text-amber-900 mt-1 tabular-nums">{(stats.unpaidUnusedCount ?? stats.unusedCount).toLocaleString()}</p>
+          <p className="text-[10px] text-amber-700 mt-0.5">
+            {isKm ? 'ត្រូវបង់ប្រាក់ទើបដោះសោបាន' : 'Locked until paid'}
+          </p>
+        </div>
+
         <div className="bg-emerald-50 p-4 rounded-2xl border border-emerald-200 shadow-xs">
           <p className="text-[11px] font-bold text-emerald-700 uppercase">
-            {isKm ? 'មិនទាន់ប្រើ (Unused)' : 'Unused (Available)'}
+            {isKm ? '✓ បង់រួច (Paid Ready)' : '✓ Paid (Ready)'}
           </p>
-          <p className="text-2xl font-black text-emerald-800 mt-1 tabular-nums">{stats.unusedCount.toLocaleString()}</p>
+          <p className="text-2xl font-black text-emerald-800 mt-1 tabular-nums">{(stats.paidUnusedCount ?? 0).toLocaleString()}</p>
           <p className="text-[10px] text-emerald-600 mt-0.5">
-            {isKm ? 'រួចរាល់សម្រាប់ចែកជូនអ្នកប្រើ' : 'Ready for auto-unlock / users'}
+            {isKm ? 'រួចរាល់សម្រាប់អតិថិជនដោះសោ' : 'Ready to redeem now'}
           </p>
         </div>
 
         <div className="bg-sky-50 p-4 rounded-2xl border border-sky-200 shadow-xs">
           <p className="text-[11px] font-bold text-sky-700 uppercase">
-            {isKm ? 'ប្រើរួចហើយ (Used)' : 'Used (Redeemed)'}
+            {isKm ? 'ប្រើរួចហើយ (Used)' : 'Used (Burned)'}
           </p>
           <p className="text-2xl font-black text-sky-900 mt-1 tabular-nums">{stats.usedCount.toLocaleString()}</p>
           <p className="text-[10px] text-sky-600 mt-0.5">
@@ -535,16 +769,91 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
           </p>
         </div>
 
-        <div className="bg-rose-50 p-4 rounded-2xl border border-rose-200 shadow-xs">
+        <div className="bg-rose-50 p-4 rounded-2xl border border-rose-200 shadow-xs col-span-2 lg:col-span-1">
           <p className="text-[11px] font-bold text-rose-700 uppercase">
             {isKm ? 'បានផ្អាក (Revoked)' : 'Revoked'}
           </p>
           <p className="text-2xl font-black text-rose-800 mt-1 tabular-nums">{stats.revokedCount.toLocaleString()}</p>
           <p className="text-[10px] text-rose-600 mt-0.5">
-            {stats.googleSheetConfigured ? 'Google Sheet Env: Active' : 'SQLite + CSV (Up to 50,000)'}
+            {stats.googleSheetConfigured ? 'Google Sheet: Active' : 'SQLite + CSV Pool'}
           </p>
         </div>
       </div>
+
+      {/* Quick Admin Action: Issue 1 Paid Code from Google Sheet Pool */}
+      <form
+        onSubmit={handleIssueNextPaidCode}
+        className="bg-gradient-to-r from-emerald-50 via-teal-50 to-white p-4 rounded-2xl border-2 border-emerald-300 shadow-xs space-y-3"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <BadgeCheck className="w-5 h-5 text-emerald-600 shrink-0" />
+            <div>
+              <h4 className="text-xs sm:text-sm font-black text-emerald-950">
+                {isKm
+                  ? 'បញ្ជាក់អតិថិជនបង់ប្រាក់រួច & ដក ១ កូដពី Google Sheet (Issue Paid Redeem Code)'
+                  : 'Confirm Customer Payment & Issue 1 Paid Code from Google Sheet'}
+              </h4>
+              <p className="text-[11px] text-emerald-800">
+                {isKm
+                  ? 'ពេលអតិថិជនផ្ញើ Screenshot បង់ប្រាក់តាម ABA / ធនាគារកូរ៉េមក Facebook/KakaoTalk ចុចប៊ូតុងនេះដើម្បីដក ១ កូដ Paid ហើយផ្ញើជូនគាត់!'
+                  : 'When a customer sends an ABA or Korea Bank receipt, click here to mark & copy the next Google Sheet code as Paid.'}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+          <input
+            type="text"
+            value={issueCustomer}
+            onChange={(e) => setIssueCustomer(e.target.value)}
+            placeholder={isKm ? 'ឈ្មោះអតិថិជន / Telegram / FB (មិនបាច់ដាក់ក៏បាន)' : 'Customer name / Telegram / FB (optional)'}
+            className="px-3 py-2 bg-white border border-emerald-300 rounded-xl text-xs"
+          />
+          <input
+            type="text"
+            value={issueNote}
+            onChange={(e) => setIssueNote(e.target.value)}
+            placeholder={isKm ? 'សម្គាល់ការបង់ប្រាក់ (ឧ. ABA $25)' : 'Payment note (e.g. ABA $25)'}
+            className="px-3 py-2 bg-white border border-emerald-300 rounded-xl text-xs"
+          />
+          <button
+            type="submit"
+            disabled={issuingPaid}
+            className="py-2 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-black text-xs flex items-center justify-center gap-1.5 cursor-pointer shadow-xs disabled:opacity-50"
+          >
+            {issuingPaid ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Unlock className="w-4 h-4" />}
+            <span>
+              {isKm ? 'បញ្ជាក់បង់ប្រាក់ & ដក ១ កូដ Paid' : 'Issue 1 Paid Code'}
+            </span>
+          </button>
+        </div>
+
+        {lastIssuedPaid && (
+          <div className="p-3 rounded-xl bg-white border border-emerald-300 flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div className="flex items-center gap-2">
+              <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-black text-[10px]">
+                PAID READY
+              </span>
+              <span className="font-mono font-black text-base text-slate-900">{lastIssuedPaid.code}</span>
+              <span className="text-[11px] text-slate-500">({lastIssuedPaid.source})</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                navigator.clipboard.writeText(lastIssuedPaid.code);
+                setCopiedCode(lastIssuedPaid.code);
+                setTimeout(() => setCopiedCode(null), 1800);
+              }}
+              className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer"
+            >
+              {copiedCode === lastIssuedPaid.code ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+              <span>{copiedCode === lastIssuedPaid.code ? (isKm ? 'បានចម្លង!' : 'Copied!') : (isKm ? 'ចម្លងកូដផ្ញើអតិថិជន' : 'Copy Code')}</span>
+            </button>
+          </div>
+        )}
+      </form>
 
       {feedback && (
         <div
@@ -760,8 +1069,8 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
             >
               {testCodeResult.found && testCodeResult.record
                 ? isKm
-                  ? `✓ រកឃើញកូដ ${testCodeResult.record.code} · ស្ថានភាព: ${testCodeResult.record.status} · ប្រភព: ${testCodeResult.record.source}`
-                  : `✓ Found ${testCodeResult.record.code} · Status: ${testCodeResult.record.status} · Source: ${testCodeResult.record.source}`
+                  ? `✓ រកឃើញកូដ ${testCodeResult.record.code} · ស្ថានភាព: ${testCodeResult.record.status} · ការបង់ប្រាក់: ${testCodeResult.record.is_paid ? 'Paid (អាចដោះសោបាន)' : 'Unpaid (ត្រូវបង់ប្រាក់ជាមុន)'} · ប្រភព: ${testCodeResult.record.source}`
+                  : `✓ Found ${testCodeResult.record.code} · Status: ${testCodeResult.record.status} · Payment: ${testCodeResult.record.is_paid ? 'Paid (Unlock Ready)' : 'Unpaid (Payment Required)'} · Source: ${testCodeResult.record.source}`
                 : isKm
                 ? `✕ រកមិនឃើញ "${testCodeResult.normalizedInput}" ក្នុង Database ទេ — សូមចុច "អាន & ទាញកូដពី Google Sheets" ឬ Upload .CSV ជាមុនសិន។`
                 : `✕ "${testCodeResult.normalizedInput}" not found in DB — click "Read & Import from Google Sheets" or Upload .CSV first.`}
@@ -805,8 +1114,8 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
               )}
             </div>
 
-            <div className="flex items-center gap-1">
-              {(['all', 'Unused', 'Used', 'Revoked'] as const).map((tab) => (
+            <div className="flex flex-wrap items-center gap-1">
+              {(['all', 'Paid', 'Unpaid', 'Unused', 'Used', 'Revoked'] as const).map((tab) => (
                 <button
                   key={tab}
                   type="button"
@@ -820,7 +1129,19 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
                       : 'bg-white border border-slate-200 text-slate-600 hover:bg-slate-100'
                   }`}
                 >
-                  {tab === 'all' ? (isKm ? 'ទាំងអស់' : 'All') : tab}
+                  {tab === 'all'
+                    ? isKm
+                      ? 'ទាំងអស់'
+                      : 'All'
+                    : tab === 'Paid'
+                    ? isKm
+                      ? '✓ Paid'
+                      : '✓ Paid'
+                    : tab === 'Unpaid'
+                    ? isKm
+                      ? '🔒 Unpaid'
+                      : '🔒 Unpaid'
+                    : tab}
                 </button>
               ))}
               <button
@@ -842,6 +1163,7 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
               <tr>
                 <th className="p-3">Redeem Code</th>
                 <th className="p-3">Status</th>
+                <th className="p-3">{isKm ? 'ការបង់ប្រាក់' : 'Payment'}</th>
                 <th className="p-3">Source</th>
                 <th className="p-3">Assigned / Note</th>
                 <th className="p-3">Used At</th>
@@ -851,7 +1173,7 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
             <tbody className="divide-y divide-slate-100">
               {rows.length === 0 ? (
                 <tr>
-                  <td colSpan={6} className="p-6 text-center text-slate-400">
+                  <td colSpan={7} className="p-6 text-center text-slate-400">
                     {loading
                       ? isKm
                         ? 'កំពុងអានទិន្នន័យពី Database...'
@@ -896,6 +1218,27 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
                         {r.status}
                       </span>
                     </td>
+                    <td className="p-3">
+                      <span
+                        className={`px-2 py-0.5 rounded-full text-[10px] font-black border inline-flex items-center gap-1 ${
+                          r.is_paid
+                            ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                            : 'bg-amber-50 text-amber-800 border-amber-300'
+                        }`}
+                      >
+                        {r.is_paid ? (
+                          <>
+                            <Unlock className="w-2.5 h-2.5" />
+                            <span>{isKm ? 'Paid (បង់រួច)' : 'Paid'}</span>
+                          </>
+                        ) : (
+                          <>
+                            <Lock className="w-2.5 h-2.5" />
+                            <span>{isKm ? 'Unpaid (ជាប់សោ)' : 'Unpaid'}</span>
+                          </>
+                        )}
+                      </span>
+                    </td>
                     <td className="p-3 text-slate-600 font-medium">{r.source}</td>
                     <td className="p-3 text-slate-600">
                       <div className="truncate max-w-[200px]" title={r.note}>
@@ -908,10 +1251,32 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
                     </td>
                     <td className="p-3 text-right">
                       <div className="inline-flex items-center gap-1">
+                        {r.status === 'Unused' && (
+                          <button
+                            type="button"
+                            onClick={() => handleTogglePaid(r)}
+                            className={`px-2 py-1 rounded-lg text-[10px] font-black border cursor-pointer transition-colors ${
+                              r.is_paid
+                                ? 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-200'
+                                : 'bg-emerald-600 hover:bg-emerald-700 text-white border-emerald-600'
+                            }`}
+                            title={
+                              r.is_paid
+                                ? isKm
+                                  ? 'ប្តូរទៅ Unpaid (ចាក់សោវិញ)'
+                                  : 'Mark Unpaid'
+                                : isKm
+                                ? 'បញ្ជាក់បង់ប្រាក់រួច (Mark Paid)'
+                                : 'Confirm Paid'
+                            }
+                          >
+                            {r.is_paid ? (isKm ? 'ចាក់សោ' : 'Unpaid') : isKm ? 'បង់រួច' : 'Mark Paid'}
+                          </button>
+                        )}
                         {r.status !== 'Unused' ? (
                           <button
                             type="button"
-                            onClick={() => handleUpdateStatus(r.code, 'Unused')}
+                            onClick={() => handleUpdateStatus(r, 'Unused')}
                             className="p-1 rounded hover:bg-emerald-50 text-emerald-600 cursor-pointer"
                             title="Reset to Unused"
                           >
@@ -920,7 +1285,7 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
                         ) : (
                           <button
                             type="button"
-                            onClick={() => handleUpdateStatus(r.code, 'Revoked')}
+                            onClick={() => handleUpdateStatus(r, 'Revoked')}
                             className="p-1 rounded hover:bg-amber-50 text-amber-600 cursor-pointer"
                             title="Revoke Code"
                           >

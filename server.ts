@@ -21,10 +21,13 @@ import {
   syncRedeemCodesFromGoogleSheet,
   ensureGoogleSheetSynced,
   checkRedeemCodeStatus,
+  setRedeemCodePaid,
+  issueNextPaidRedeemCode,
   listServerPromoCodes,
   upsertServerPromoCode,
   deleteServerPromoCode,
   verifyAndIncrementServerPromoCode,
+  checkServerPromoCodeExists,
   listAdminAccounts,
   createOrUpdateAdminAccount,
   verifyDbAdminLogin,
@@ -1187,15 +1190,30 @@ interface IssuedUnlockCode {
 }
 const issuedUnlockCodes = new Map<string, IssuedUnlockCode>();
 
-function localizeCodeError(
-  errorCode: 'EMPTY' | 'NOT_FOUND' | 'ALREADY_USED' | 'REVOKED' | 'INACTIVE' | 'EXPIRED' | 'LIMIT_REACHED',
-  lang: string
-): string {
+type UnlockErrorCode =
+  | 'EMPTY'
+  | 'NOT_FOUND'
+  | 'ALREADY_USED'
+  | 'REVOKED'
+  | 'PAYMENT_REQUIRED'
+  | 'INACTIVE'
+  | 'EXPIRED'
+  | 'LIMIT_REACHED'
+  | 'WRONG_BOX_PROMO'
+  | 'WRONG_BOX_REDEEM';
+
+function localizeCodeError(errorCode: UnlockErrorCode, lang: string): string {
   const l = String(lang || 'km').toLowerCase();
   if (l === 'ko') {
     switch (errorCode) {
       case 'EMPTY':
         return '리딤 코드 또는 프로모션 코드를 입력해 주세요.';
+      case 'PAYMENT_REQUIRED':
+        return '결제가 확인되지 않은 Google Sheet 리딤 코드입니다. 계좌이체 또는 ABA 결제 완료 후 코드를 사용해 주세요.';
+      case 'WRONG_BOX_PROMO':
+        return '이 코드는 프로모션 코드입니다. 별도의 "프로모션 코드(Promo Code)" 입력란에 입력해 주세요.';
+      case 'WRONG_BOX_REDEEM':
+        return '이 코드는 결제 완료된 리딤 코드입니다. "리딤 코드(Redeem Code)" 입력란에 입력해 주세요.';
       case 'ALREADY_USED':
         return '이미 사용된 일회용 코드입니다. 새 코드를 입력해 주세요.';
       case 'REVOKED':
@@ -1215,6 +1233,12 @@ function localizeCodeError(
     switch (errorCode) {
       case 'EMPTY':
         return 'Please enter a Redeem Code or Promo Code.';
+      case 'PAYMENT_REQUIRED':
+        return 'Payment required! This Google Sheet Redeem Code has not been paid/activated yet. Please complete payment via Korea Bank or ABA PayWay first.';
+      case 'WRONG_BOX_PROMO':
+        return 'This is a Promo Code. Please enter it in the separate Promo Code box.';
+      case 'WRONG_BOX_REDEEM':
+        return 'This is a Paid Redeem Code. Please enter it in the Redeem Code box.';
       case 'ALREADY_USED':
         return 'This single-use code has already been redeemed.';
       case 'REVOKED':
@@ -1227,13 +1251,19 @@ function localizeCodeError(
         return 'This promo code has reached its maximum usage limit.';
       case 'NOT_FOUND':
       default:
-        return 'Code not found in our Redeem/Promo database. Please check for typos and try again.';
+        return 'Code not found. Please double-check your code and make sure you are using the right box.';
     }
   }
   // Default: Khmer
   switch (errorCode) {
     case 'EMPTY':
       return 'សូមបញ្ចូលលេខកូដ Redeem Code ឬ Promo Code!';
+    case 'PAYMENT_REQUIRED':
+      return 'លេខកូដ Redeem Code (Google Sheet) នេះមិនទាន់បានបង់ប្រាក់ទេ! សូមបង់ប្រាក់តាមធនាគារកូរ៉េ ឬ ABA PayWay ជាមុនសិន ទើបប្រព័ន្ធ ឬ Admin បើកសិទ្ធិដោះសោបាន។';
+    case 'WRONG_BOX_PROMO':
+      return 'នេះជាលេខកូដ Promo Code! សូមយកទៅវាយបញ្ចូលក្នុង "ប្រអប់ Promo Code ផ្សេង" វិញ។';
+    case 'WRONG_BOX_REDEEM':
+      return 'នេះជាលេខកូដ Redeem Code! សូមយកទៅវាយបញ្ចូលក្នុង "ប្រអប់ Redeem Code" វិញ។';
     case 'ALREADY_USED':
       return 'លេខកូដដោះសោនេះត្រូវបានប្រើប្រាស់រួចហើយ (Used)! សូមប្រើលេខកូដថ្មីផ្សេងទៀត។';
     case 'REVOKED':
@@ -1246,7 +1276,7 @@ function localizeCodeError(
       return 'លេខកូដ Promo Code នេះត្រូវបានប្រើអស់ចំនួនកំណត់ហើយ!';
     case 'NOT_FOUND':
     default:
-      return 'រកមិនឃើញលេខកូដនេះក្នុងប្រព័ន្ធ (Redeem DB / Google Sheet / Promo Codes) ឡើយ! សូមពិនិត្យអក្សរ ឬដកឃ្លាឡើងវិញ។';
+      return 'រកមិនឃើញលេខកូដនេះក្នុងប្រព័ន្ធឡើយ! សូមពិនិត្យអក្សរឡើងវិញ ឬបង់ប្រាក់ដើម្បីទទួលលេខកូដ។';
   }
 }
 
@@ -1254,6 +1284,7 @@ app.post('/api/payments/verify-redeem', paymentRateLimiter, async (req, res) => 
   const rawCode = String(req.body?.code || '').trim().toUpperCase();
   const userEmail = String(req.body?.userEmail || '').trim().slice(0, 160);
   const lang = String(req.body?.lang || 'km').trim().toLowerCase();
+  const mode: 'redeem' | 'promo' = req.body?.mode === 'promo' ? 'promo' : 'redeem';
 
   if (!rawCode) {
     return res.status(400).json({
@@ -1263,44 +1294,74 @@ app.post('/api/payments/verify-redeem', paymentRateLimiter, async (req, res) => 
     });
   }
 
-  // 1. Master VIP Promo Codes (instant unlock without prior payment)
-  if (MASTER_PROMO_CODES.has(rawCode)) {
-    grantUnlockCookie(req, res, 'promo', rawCode);
-    return res.json({ success: true, type: 'promo', code: rawCode });
+  // ============================================================================
+  // MODE A: SEPARATE PROMO CODE BOX (Free / Admin Promo Codes ONLY — never bypasses paid Google Sheet codes!)
+  // ============================================================================
+  if (mode === 'promo') {
+    if (MASTER_PROMO_CODES.has(rawCode)) {
+      grantUnlockCookie(req, res, 'promo', rawCode);
+      return res.json({ success: true, type: 'promo', code: rawCode });
+    }
+
+    try {
+      const promoCheck = verifyAndIncrementServerPromoCode(rawCode);
+      if (promoCheck.ok && promoCheck.promo) {
+        grantUnlockCookie(req, res, 'admin_promo', promoCheck.promo.code);
+        return res.json({
+          success: true,
+          type: 'admin_promo',
+          code: promoCheck.promo.code,
+          centerId: promoCheck.promo.centerId,
+          usageCount: promoCheck.promo.usageCount,
+          usageLimit: promoCheck.promo.usageLimit,
+        });
+      }
+      if (
+        promoCheck.errorCode === 'EXPIRED' ||
+        promoCheck.errorCode === 'INACTIVE' ||
+        promoCheck.errorCode === 'LIMIT_REACHED'
+      ) {
+        return res.status(promoCheck.statusCode).json({
+          success: false,
+          errorCode: promoCheck.errorCode,
+          error: localizeCodeError(promoCheck.errorCode, lang),
+        });
+      }
+    } catch (err) {
+      console.error('[PromoDB] Verification error:', err);
+    }
+
+    // Read-only check: if the user pasted a Google Sheet / Redeem DB code into the Promo box, guide them clearly
+    try {
+      const redeemLookup = checkRedeemCodeStatus(rawCode);
+      if (redeemLookup.found && redeemLookup.record) {
+        if (!redeemLookup.record.is_paid) {
+          return res.status(402).json({
+            success: false,
+            errorCode: 'PAYMENT_REQUIRED',
+            error: localizeCodeError('PAYMENT_REQUIRED', lang),
+          });
+        }
+        return res.status(400).json({
+          success: false,
+          errorCode: 'WRONG_BOX_REDEEM',
+          error: localizeCodeError('WRONG_BOX_REDEEM', lang),
+        });
+      }
+    } catch {
+      // ignore read-only diagnostic errors
+    }
+
+    return res.status(404).json({
+      success: false,
+      errorCode: 'NOT_FOUND',
+      error: localizeCodeError('NOT_FOUND', lang),
+    });
   }
 
-  // 2. Server-side Admin Dashboard Promo Codes (works for ALL users — guest, email, OTP, Google — without payment!)
-  try {
-    const promoCheck = verifyAndIncrementServerPromoCode(rawCode);
-    if (promoCheck.ok && promoCheck.promo) {
-      grantUnlockCookie(req, res, 'admin_promo', promoCheck.promo.code);
-      return res.json({
-        success: true,
-        type: 'admin_promo',
-        code: promoCheck.promo.code,
-        centerId: promoCheck.promo.centerId,
-        usageCount: promoCheck.promo.usageCount,
-        usageLimit: promoCheck.promo.usageLimit,
-      });
-    }
-    if (
-      promoCheck.errorCode === 'EXPIRED' ||
-      promoCheck.errorCode === 'INACTIVE' ||
-      promoCheck.errorCode === 'LIMIT_REACHED'
-    ) {
-      return res.status(promoCheck.statusCode).json({
-        success: false,
-        errorCode: promoCheck.errorCode,
-        error: localizeCodeError(promoCheck.errorCode, lang),
-      });
-    }
-  } catch (err) {
-    console.error('[PromoDB] Verification error:', err);
-  }
-
-  // 3. Atomic lookup & burn in persistent SQLite Redeem Codes Database ('Unused' -> 'Used')
-  //    Includes all 10,000 Google Sheet codes, Admin Dashboard Redeem DB codes, and pre-seeded codes.
-  //    If not found yet and a Google Sheet is configured, trigger a throttled auto-sync and retry once.
+  // ============================================================================
+  // MODE B: PAID REDEEM CODE BOX (Google Sheet 10,000 codes & Redeem DB — MUST BE PAID FIRST!)
+  // ============================================================================
   try {
     let dbCheck = verifyAndBurnRedeemCode(rawCode, userEmail || 'web_user');
     if (!dbCheck.ok && dbCheck.statusCode === 404) {
@@ -1323,6 +1384,13 @@ app.post('/api/payments/verify-redeem', paymentRateLimiter, async (req, res) => 
         status: 'Used',
       });
     }
+    if (dbCheck.statusCode === 402 && dbCheck.errorCode === 'PAYMENT_REQUIRED') {
+      return res.status(402).json({
+        success: false,
+        errorCode: 'PAYMENT_REQUIRED',
+        error: localizeCodeError('PAYMENT_REQUIRED', lang),
+      });
+    }
     if (dbCheck.statusCode === 409 || dbCheck.statusCode === 403) {
       const errCode = dbCheck.errorCode === 'REVOKED' ? 'REVOKED' : 'ALREADY_USED';
       return res.status(dbCheck.statusCode).json({
@@ -1335,7 +1403,7 @@ app.post('/api/payments/verify-redeem', paymentRateLimiter, async (req, res) => 
     console.error('[RedeemDB] Verification error:', err);
   }
 
-  // 4. Fallback check in-memory issued unlock codes
+  // Fallback check in-memory issued unlock codes (only created after verified Korea Bank / Telegram payment)
   const issued = issuedUnlockCodes.get(rawCode);
   if (issued) {
     if (issued.used) {
@@ -1349,6 +1417,15 @@ app.post('/api/payments/verify-redeem', paymentRateLimiter, async (req, res) => 
     issued.usedAt = Date.now();
     grantUnlockCookie(req, res, issued.source, issued.code);
     return res.json({ success: true, type: issued.source, code: issued.code });
+  }
+
+  // Guide user if they entered a Promo Code inside the Redeem Code box
+  if (MASTER_PROMO_CODES.has(rawCode) || checkServerPromoCodeExists(rawCode)) {
+    return res.status(400).json({
+      success: false,
+      errorCode: 'WRONG_BOX_PROMO',
+      error: localizeCodeError('WRONG_BOX_PROMO', lang),
+    });
   }
 
   return res.status(404).json({
@@ -2663,8 +2740,12 @@ app.post('/api/telegram/webhook', async (req, res) => {
 app.get('/api/admin/redeem-codes', requireAdminAuth, (req, res) => {
   try {
     const rawStatus = String(req.query?.status || 'all');
-    const filter: 'Unused' | 'Used' | 'Revoked' | 'all' =
-      rawStatus === 'Unused' || rawStatus === 'Used' || rawStatus === 'Revoked'
+    const filter: 'Unused' | 'Used' | 'Revoked' | 'Paid' | 'Unpaid' | 'all' =
+      rawStatus === 'Unused' ||
+      rawStatus === 'Used' ||
+      rawStatus === 'Revoked' ||
+      rawStatus === 'Paid' ||
+      rawStatus === 'Unpaid'
         ? rawStatus
         : 'all';
     const search = String(req.query?.search || '').trim();
@@ -2771,6 +2852,39 @@ app.get('/api/admin/redeem-codes/check', requireAdminAuth, (req, res) => {
   } catch (err) {
     console.error('[Admin RedeemDB] Check code failed:', err);
     return res.status(500).json({ success: false, error: 'Failed to check code' });
+  }
+});
+
+app.post('/api/admin/redeem-codes/issue-paid', requireAdminAuth, (req, res) => {
+  try {
+    const assignedTo = String(req.body?.assignedTo || 'paid_customer').trim().slice(0, 160);
+    const note = String(req.body?.note || 'Admin Payment Confirmed (ABA / Bank)').trim().slice(0, 160);
+    const record = issueNextPaidRedeemCode({ assignedTo, note });
+    return res.json({
+      success: true,
+      record,
+      stats: getRedeemCodeStats(),
+    });
+  } catch (err) {
+    console.error('[Admin RedeemDB] Issue paid code failed:', err);
+    return res.status(500).json({ success: false, error: 'Failed to issue paid redeem code' });
+  }
+});
+
+app.patch('/api/admin/redeem-codes/:code/paid', requireAdminAuth, (req, res) => {
+  try {
+    const code = String(req.params.code || '');
+    const isPaid = Boolean(req.body?.isPaid);
+    const assignedTo = typeof req.body?.assignedTo === 'string' ? req.body.assignedTo : undefined;
+    const note = typeof req.body?.note === 'string' ? req.body.note : undefined;
+    const record = setRedeemCodePaid(code, isPaid, assignedTo, note);
+    if (!record) {
+      return res.status(404).json({ success: false, error: 'Redeem code not found' });
+    }
+    return res.json({ success: true, record, stats: getRedeemCodeStats() });
+  } catch (err) {
+    console.error('[Admin RedeemDB] Update paid status failed:', err);
+    return res.status(500).json({ success: false, error: 'Failed to update paid status' });
   }
 });
 

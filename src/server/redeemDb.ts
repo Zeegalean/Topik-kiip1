@@ -9,6 +9,7 @@ export interface RedeemCodeRecord {
   id: number;
   code: string;
   status: RedeemCodeStatus;
+  is_paid: boolean;
   source: string;
   note: string;
   assigned_to: string;
@@ -19,6 +20,8 @@ export interface RedeemCodeRecord {
 export interface RedeemCodeStats {
   total: number;
   unusedCount: number;
+  paidUnusedCount: number;
+  unpaidUnusedCount: number;
   usedCount: number;
   revokedCount: number;
   databasePath: string;
@@ -95,17 +98,43 @@ function generateSecureCode(prefix = 'KIIP-26'): string {
   return `${cleanPrefix}-${suffix}`;
 }
 
+function mapRedeemRow(r: any): RedeemCodeRecord {
+  return {
+    id: Number(r.id),
+    code: String(r.code),
+    status: r.status as RedeemCodeStatus,
+    is_paid: Number(r.is_paid) === 1,
+    source: String(r.source || 'database'),
+    note: String(r.note || ''),
+    assigned_to: String(r.assigned_to || ''),
+    created_at: String(r.created_at || ''),
+    used_at: r.used_at ? String(r.used_at) : null,
+  };
+}
+
 function ensureRedeemSchemaMigrations(db: DatabaseSync): void {
   const cols = db.prepare('PRAGMA table_info(redeem_codes)').all() as Array<{ name: string }>;
   const hasCompact = cols.some((c) => c.name === 'code_compact');
   if (!hasCompact) {
     db.exec(`ALTER TABLE redeem_codes ADD COLUMN code_compact TEXT NOT NULL DEFAULT '';`);
   }
+  const hasIsPaid = cols.some((c) => c.name === 'is_paid');
+  if (!hasIsPaid) {
+    db.exec(`ALTER TABLE redeem_codes ADD COLUMN is_paid INTEGER NOT NULL DEFAULT 0;`);
+    // Mark codes already issued via verified payment receipts as Paid; keep Google Sheet & pool codes Unpaid until paid!
+    db.exec(`
+      UPDATE redeem_codes
+      SET is_paid = 1
+      WHERE source IN ('kr_receipt', 'telegram_bot', 'admin_paid')
+         OR (assigned_to != '' AND status = 'Unused');
+    `);
+  }
   db.exec(`
     UPDATE redeem_codes
     SET code_compact = REPLACE(REPLACE(UPPER(code), '-', ''), '_', '')
     WHERE code_compact = '' OR code_compact IS NULL;
     CREATE INDEX IF NOT EXISTS idx_redeem_codes_compact ON redeem_codes(code_compact);
+    CREATE INDEX IF NOT EXISTS idx_redeem_codes_paid ON redeem_codes(status, is_paid);
   `);
 }
 
@@ -194,6 +223,7 @@ export function getRedeemDb(): DatabaseSync {
       code TEXT NOT NULL UNIQUE,
       code_compact TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'Unused' CHECK (status IN ('Unused', 'Used', 'Revoked')),
+      is_paid INTEGER NOT NULL DEFAULT 0,
       source TEXT NOT NULL DEFAULT 'database',
       note TEXT NOT NULL DEFAULT '',
       assigned_to TEXT NOT NULL DEFAULT '',
@@ -293,17 +323,26 @@ function seedInitialUnusedCodes(db: DatabaseSync): void {
 export function getRedeemCodeStats(): RedeemCodeStats {
   const db = getRedeemDb();
   const rows = db
-    .prepare('SELECT status, COUNT(*) as cnt FROM redeem_codes GROUP BY status')
-    .all() as Array<{ status: string; cnt: number }>;
+    .prepare('SELECT status, is_paid, COUNT(*) as cnt FROM redeem_codes GROUP BY status, is_paid')
+    .all() as Array<{ status: string; is_paid: number; cnt: number }>;
 
   let unusedCount = 0;
+  let paidUnusedCount = 0;
+  let unpaidUnusedCount = 0;
   let usedCount = 0;
   let revokedCount = 0;
 
   for (const r of rows) {
-    if (r.status === 'Unused') unusedCount = Number(r.cnt) || 0;
-    else if (r.status === 'Used') usedCount = Number(r.cnt) || 0;
-    else if (r.status === 'Revoked') revokedCount = Number(r.cnt) || 0;
+    const cnt = Number(r.cnt) || 0;
+    if (r.status === 'Unused') {
+      unusedCount += cnt;
+      if (Number(r.is_paid) === 1) paidUnusedCount += cnt;
+      else unpaidUnusedCount += cnt;
+    } else if (r.status === 'Used') {
+      usedCount += cnt;
+    } else if (r.status === 'Revoked') {
+      revokedCount += cnt;
+    }
   }
 
   const sheetCfg = getSavedGoogleSheetConfig();
@@ -311,6 +350,8 @@ export function getRedeemCodeStats(): RedeemCodeStats {
   return {
     total: unusedCount + usedCount + revokedCount,
     unusedCount,
+    paidUnusedCount,
+    unpaidUnusedCount,
     usedCount,
     revokedCount,
     databasePath: 'data/redeem_codes.sqlite',
@@ -333,7 +374,7 @@ export interface RedeemCodePageResult {
 }
 
 export function queryRedeemCodes(params?: {
-  statusFilter?: 'Unused' | 'Used' | 'Revoked' | 'all';
+  statusFilter?: 'Unused' | 'Used' | 'Revoked' | 'Paid' | 'Unpaid' | 'all';
   search?: string;
   page?: number;
   pageSize?: number;
@@ -350,6 +391,10 @@ export function queryRedeemCodes(params?: {
   if (statusFilter === 'Unused' || statusFilter === 'Used' || statusFilter === 'Revoked') {
     conditions.push('status = ?');
     whereArgs.push(statusFilter);
+  } else if (statusFilter === 'Paid') {
+    conditions.push(`status = 'Unused' AND is_paid = 1`);
+  } else if (statusFilter === 'Unpaid') {
+    conditions.push(`status = 'Unused' AND is_paid = 0`);
   }
 
   if (rawSearch) {
@@ -369,22 +414,22 @@ export function queryRedeemCodes(params?: {
   const offset = (page - 1) * safePageSize;
 
   const orderSql =
-    statusFilter === 'Unused' || statusFilter === 'Used' || statusFilter === 'Revoked'
-      ? 'id DESC'
-      : "CASE status WHEN 'Unused' THEN 0 WHEN 'Used' THEN 1 ELSE 2 END, id DESC";
+    statusFilter === 'Unused' || statusFilter === 'Used' || statusFilter === 'Revoked' || statusFilter === 'Paid' || statusFilter === 'Unpaid'
+      ? 'is_paid DESC, id DESC'
+      : "CASE status WHEN 'Unused' THEN 0 WHEN 'Used' THEN 1 ELSE 2 END, is_paid DESC, id DESC";
 
-  const codes = db
+  const rawRows = db
     .prepare(
-      `SELECT id, code, status, source, note, assigned_to, created_at, used_at
+      `SELECT id, code, status, is_paid, source, note, assigned_to, created_at, used_at
        FROM redeem_codes
        ${whereSql}
        ORDER BY ${orderSql}
        LIMIT ? OFFSET ?`
     )
-    .all(...whereArgs, safePageSize, offset) as unknown as RedeemCodeRecord[];
+    .all(...whereArgs, safePageSize, offset) as unknown as any[];
 
   return {
-    codes,
+    codes: rawRows.map(mapRedeemRow),
     totalMatched,
     page,
     pageSize: safePageSize,
@@ -415,7 +460,7 @@ export function generateUnusedRedeemCodes(
      VALUES (?, ?, 'Unused', 'admin', ?, '', ?)`
   );
   const selectStmt = db.prepare(
-    `SELECT id, code, status, source, note, assigned_to, created_at, used_at
+    `SELECT id, code, status, is_paid, source, note, assigned_to, created_at, used_at
      FROM redeem_codes WHERE code = ?`
   );
 
@@ -429,8 +474,8 @@ export function generateUnusedRedeemCodes(
       const code = generateSecureCode(prefix);
       const info = insertStmt.run(code, compactCode(code), safeNote, nowIso);
       if (Number(info.changes) > 0) {
-        const row = selectStmt.get(code) as unknown as RedeemCodeRecord | undefined;
-        if (row) created.push(row);
+        const row = selectStmt.get(code) as any;
+        if (row) created.push(mapRedeemRow(row));
       }
     }
     db.exec('COMMIT');
@@ -516,32 +561,32 @@ export function checkRedeemCodeStatus(rawCode: string): {
   const db = getRedeemDb();
   let existing = db
     .prepare(
-      `SELECT id, code, status, source, note, assigned_to, created_at, used_at
+      `SELECT id, code, status, is_paid, source, note, assigned_to, created_at, used_at
        FROM redeem_codes WHERE code = ?`
     )
-    .get(code) as unknown as RedeemCodeRecord | undefined;
+    .get(code) as any;
 
   if (!existing && compact.length >= 4) {
     existing = db
       .prepare(
-        `SELECT id, code, status, source, note, assigned_to, created_at, used_at
+        `SELECT id, code, status, is_paid, source, note, assigned_to, created_at, used_at
          FROM redeem_codes WHERE code_compact = ?
-         ORDER BY CASE status WHEN 'Unused' THEN 0 ELSE 1 END, id ASC
+         ORDER BY CASE status WHEN 'Unused' THEN 0 ELSE 1 END, is_paid DESC, id ASC
          LIMIT 1`
       )
-      .get(compact) as unknown as RedeemCodeRecord | undefined;
+      .get(compact) as any;
   }
 
   return existing
-    ? { found: true, normalizedInput: code, record: existing }
+    ? { found: true, normalizedInput: code, record: mapRedeemRow(existing) }
     : { found: false, normalizedInput: code };
 }
 
 /**
- * Atomically verifies a Redeem Code and marks it 'Used' if its status is 'Unused'.
- * Supports both exact match and hyphen/space-insensitive compact alphanumeric match.
+ * Atomically verifies a Redeem Code and marks it 'Used' ONLY if status is 'Unused' AND is_paid = 1.
+ * Unpaid Google Sheet (10,000) / pool codes require verified payment first (returns 402 PAYMENT_REQUIRED).
  */
-export type RedeemErrorCode = 'EMPTY' | 'NOT_FOUND' | 'ALREADY_USED' | 'REVOKED';
+export type RedeemErrorCode = 'EMPTY' | 'NOT_FOUND' | 'ALREADY_USED' | 'REVOKED' | 'PAYMENT_REQUIRED';
 
 export function verifyAndBurnRedeemCode(
   rawCode: string,
@@ -566,20 +611,20 @@ export function verifyAndBurnRedeemCode(
   try {
     let existing = db
       .prepare(
-        `SELECT id, code, status, source, note, assigned_to, created_at, used_at
+        `SELECT id, code, status, is_paid, source, note, assigned_to, created_at, used_at
          FROM redeem_codes WHERE code = ?`
       )
-      .get(code) as unknown as RedeemCodeRecord | undefined;
+      .get(code) as any;
 
     if (!existing && compact.length >= 4) {
       existing = db
         .prepare(
-          `SELECT id, code, status, source, note, assigned_to, created_at, used_at
+          `SELECT id, code, status, is_paid, source, note, assigned_to, created_at, used_at
            FROM redeem_codes WHERE code_compact = ?
-           ORDER BY CASE status WHEN 'Unused' THEN 0 ELSE 1 END, id ASC
+           ORDER BY CASE status WHEN 'Unused' THEN 0 ELSE 1 END, is_paid DESC, id ASC
            LIMIT 1`
         )
-        .get(compact) as unknown as RedeemCodeRecord | undefined;
+        .get(compact) as any;
     }
 
     if (!existing) {
@@ -612,23 +657,34 @@ export function verifyAndBurnRedeemCode(
       };
     }
 
+    if (Number(existing.is_paid) !== 1) {
+      db.exec('COMMIT');
+      return {
+        ok: false,
+        statusCode: 402,
+        errorCode: 'PAYMENT_REQUIRED',
+        error:
+          'លេខកូដ Redeem Code (Google Sheet) នេះមិនទាន់បានបង់ប្រាក់ទេ! សូមបង់ប្រាក់តាមធនាគារកូរ៉េ ឬ ABA PayWay ជាមុនសិន ទើបអាចដោះសោបាន។',
+      };
+    }
+
     const assignee = existing.assigned_to || safeUser || 'web_user';
     db.prepare(
       `UPDATE redeem_codes
        SET status = 'Used', used_at = ?, assigned_to = ?
-       WHERE id = ? AND status = 'Unused'`
+       WHERE id = ? AND status = 'Unused' AND is_paid = 1`
     ).run(nowIso, assignee, existing.id);
 
     db.exec('COMMIT');
     return {
       ok: true,
       statusCode: 200,
-      record: {
+      record: mapRedeemRow({
         ...existing,
         status: 'Used',
         used_at: nowIso,
         assigned_to: assignee,
-      },
+      }),
     };
   } catch (err) {
     try {
@@ -641,11 +697,12 @@ export function verifyAndBurnRedeemCode(
 }
 
 /**
- * Reserves the next unassigned 'Unused' code from the Database (e.g., for Korea Bank or Telegram Auto-Unlock).
- * If the pool of unassigned 'Unused' codes is empty, mints a fresh code into the Database automatically.
+ * Reserves the next unpaid 'Unused' code from the Database (prioritizing the 10,000 Google Sheet codes!)
+ * and marks it is_paid = 1 upon verified payment (Korea Bank receipt, Telegram Bot, or Admin payment confirmation).
+ * If the pool is empty, mints a fresh paid code directly into the Database.
  */
 export function reserveUnusedRedeemCode(params: {
-  source: 'kr_receipt' | 'telegram_bot';
+  source: 'kr_receipt' | 'telegram_bot' | 'admin_paid';
   assignedTo: string;
   note: string;
   fallbackPrefix?: string;
@@ -659,45 +716,50 @@ export function reserveUnusedRedeemCode(params: {
   try {
     const candidate = db
       .prepare(
-        `SELECT id, code, status, source, note, assigned_to, created_at, used_at
+        `SELECT id, code, status, is_paid, source, note, assigned_to, created_at, used_at
          FROM redeem_codes
-         WHERE status = 'Unused' AND (assigned_to IS NULL OR assigned_to = '')
-         ORDER BY id ASC
+         WHERE status = 'Unused' AND is_paid = 0 AND (assigned_to IS NULL OR assigned_to = '')
+         ORDER BY CASE source WHEN 'google_sheets' THEN 0 ELSE 1 END, id ASC
          LIMIT 1`
       )
-      .get() as unknown as RedeemCodeRecord | undefined;
+      .get() as any;
 
     if (candidate) {
+      const nextSource = candidate.source === 'google_sheets' ? 'google_sheets' : params.source;
+      const nextNote = safeNote || candidate.note || 'Paid';
       db.prepare(
         `UPDATE redeem_codes
-         SET assigned_to = ?, note = ?, source = ?
+         SET is_paid = 1, assigned_to = ?, note = ?, source = ?
          WHERE id = ?`
-      ).run(safeAssignee, safeNote || candidate.note, params.source, candidate.id);
+      ).run(safeAssignee, nextNote, nextSource, candidate.id);
       db.exec('COMMIT');
-      return {
+      return mapRedeemRow({
         ...candidate,
+        is_paid: 1,
         assigned_to: safeAssignee,
-        note: safeNote || candidate.note,
-        source: params.source,
-      };
+        note: nextNote,
+        source: nextSource,
+      });
     }
 
-    // Pool empty -> mint a fresh code directly into the Database with status = 'Unused'
-    const newCode = generateSecureCode(params.fallbackPrefix || (params.source === 'telegram_bot' ? 'KIIP-TG' : 'KIIP-KR'));
+    // Pool empty -> mint a fresh paid code directly into the Database with status = 'Unused' & is_paid = 1
+    const newCode = generateSecureCode(
+      params.fallbackPrefix || (params.source === 'telegram_bot' ? 'KIIP-TG' : params.source === 'admin_paid' ? 'KIIP-PAID' : 'KIIP-KR')
+    );
     db.prepare(
-      `INSERT INTO redeem_codes (code, code_compact, status, source, note, assigned_to, created_at)
-       VALUES (?, ?, 'Unused', ?, ?, ?, ?)`
+      `INSERT INTO redeem_codes (code, code_compact, status, is_paid, source, note, assigned_to, created_at)
+       VALUES (?, ?, 'Unused', 1, ?, ?, ?, ?)`
     ).run(newCode, compactCode(newCode), params.source, safeNote, safeAssignee, nowIso);
 
     const created = db
       .prepare(
-        `SELECT id, code, status, source, note, assigned_to, created_at, used_at
+        `SELECT id, code, status, is_paid, source, note, assigned_to, created_at, used_at
          FROM redeem_codes WHERE code = ?`
       )
-      .get(newCode) as unknown as RedeemCodeRecord;
+      .get(newCode) as any;
 
     db.exec('COMMIT');
-    return created;
+    return mapRedeemRow(created);
   } catch (err) {
     try {
       db.exec('ROLLBACK');
@@ -706,6 +768,56 @@ export function reserveUnusedRedeemCode(params: {
     }
     throw err;
   }
+}
+
+export function setRedeemCodePaid(
+  rawCode: string,
+  isPaid: boolean,
+  assignedTo?: string,
+  note?: string
+): RedeemCodeRecord | null {
+  const code = normalizeCode(rawCode);
+  if (!code) return null;
+  const db = getRedeemDb();
+  const existing = db
+    .prepare(
+      `SELECT id, code, status, is_paid, source, note, assigned_to, created_at, used_at
+       FROM redeem_codes WHERE code = ?`
+    )
+    .get(code) as any;
+  if (!existing) return null;
+
+  const nextPaid = isPaid ? 1 : 0;
+  const nextAssignee = isPaid
+    ? String(assignedTo || existing.assigned_to || 'admin_paid').trim().slice(0, 160)
+    : '';
+  const nextNote = note !== undefined && note.trim()
+    ? String(note).trim().slice(0, 160)
+    : existing.note;
+
+  db.prepare(
+    `UPDATE redeem_codes SET is_paid = ?, assigned_to = ?, note = ? WHERE id = ?`
+  ).run(nextPaid, nextAssignee, nextNote, existing.id);
+
+  const updated = db
+    .prepare(
+      `SELECT id, code, status, is_paid, source, note, assigned_to, created_at, used_at
+       FROM redeem_codes WHERE id = ?`
+    )
+    .get(existing.id) as any;
+  return updated ? mapRedeemRow(updated) : null;
+}
+
+export function issueNextPaidRedeemCode(params?: {
+  assignedTo?: string;
+  note?: string;
+}): RedeemCodeRecord {
+  return reserveUnusedRedeemCode({
+    source: 'admin_paid',
+    assignedTo: String(params?.assignedTo || 'paid_customer').trim().slice(0, 160),
+    note: String(params?.note || 'Admin Payment Confirmed (ABA / Bank)').trim().slice(0, 160),
+    fallbackPrefix: 'KIIP-PAID',
+  });
 }
 
 export function updateRedeemCodeStatus(
@@ -2186,6 +2298,18 @@ export function verifyAndIncrementServerPromoCode(rawCode: string): {
     throw err;
   }
 }
+
+export function checkServerPromoCodeExists(rawCode: string): boolean {
+  const code = normalizeCode(rawCode);
+  const compact = compactCode(rawCode);
+  if (!code || code.length < 3) return false;
+  const db = getRedeemDb();
+  const row = db
+    .prepare(`SELECT code FROM promo_codes WHERE code = ? OR code_compact = ? LIMIT 1`)
+    .get(code, compact) as { code: string } | undefined;
+  return Boolean(row);
+}
+
 
 
 

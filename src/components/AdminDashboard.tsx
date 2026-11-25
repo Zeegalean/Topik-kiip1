@@ -1492,7 +1492,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 )}
                 {/* TAB: REDEEM CODE DATABASE & GOOGLE SHEETS */}
                 {activeTab === 'redeemdb' && (
-                  <RedeemDatabasePanel adminToken={adminToken} lang={lang} />
+                  <RedeemDatabasePanel
+                    adminToken={adminToken}
+                    isFirebaseRootAdmin={isFirebaseRootAdmin}
+                    lang={lang}
+                  />
                 )}
 
                 {/* TAB: ADMIN & STAFF ACCOUNTS (ROOT ADMIN ONLY) */}

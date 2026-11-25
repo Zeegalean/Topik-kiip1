@@ -105,7 +105,7 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
     sizeStr: string;
   } | null>(null);
 
-  // Quick Redeem Code & Separate Promo Code state (no prior payment needed!)
+  // Quick Paid Redeem Code & Separate Free Promo Code state
   const [redeemCodeInput, setRedeemCodeInput] = useState('');
   const [promoCodeInput, setPromoCodeInput] = useState('');
   const [promoCodeMsg, setPromoCodeMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -118,13 +118,15 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
         text:
           lang === 'ko'
             ? mode === 'redeem'
-              ? '리딤 코드를 입력해 주세요.'
+              ? '결제 후 발급받은 리딤 코드를 입력해 주세요.'
               : '프로모션 코드를 입력해 주세요.'
             : lang === 'en'
-            ? 'Please enter a Redeem or Promo Code!'
+            ? mode === 'redeem'
+              ? 'Please enter your Paid Redeem Code!'
+              : 'Please enter an Admin Promo Code!'
             : mode === 'redeem'
-            ? 'សូមបញ្ចូលលេខកូដ Redeem Code!'
-            : 'សូមបញ្ចូលលេខកូដ Promo Code!',
+            ? 'សូមបញ្ចូលលេខកូដ Redeem Code ដែលទទួលបានក្រោយបង់ប្រាក់!'
+            : 'សូមបញ្ចូលលេខកូដ Promo Code ពី Admin!',
       });
       return;
     }
@@ -132,9 +134,10 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
     let isValid = false;
     let matchedCenterId: string | undefined;
     let errorReason: string | null = null;
-    let shouldTryFirestore = true;
+    // ONLY allow Firestore /promoCodes/{CODE} lookup inside the Promo Code box
+    let shouldTryFirestore = mode === 'promo';
 
-    // 1. Verify against backend API (Admin Promo DB, 10,000 Google Sheet Redeem DB, Admin Redeem DB, Master Promo)
+    // 1. Verify against backend API (strict mode separation enforced server-side)
     try {
       const resp = await fetch('/api/payments/verify-redeem', {
         method: 'POST',
@@ -149,6 +152,9 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
       } else {
         if (data?.error) errorReason = data.error;
         if (
+          data?.errorCode === 'PAYMENT_REQUIRED' ||
+          data?.errorCode === 'WRONG_BOX_REDEEM' ||
+          data?.errorCode === 'WRONG_BOX_PROMO' ||
           data?.errorCode === 'ALREADY_USED' ||
           data?.errorCode === 'REVOKED' ||
           data?.errorCode === 'EXPIRED' ||
@@ -159,11 +165,11 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
         }
       }
     } catch {
-      // Fall through to Firestore promo check
+      // Fall through to Firestore promo check only when mode === 'promo'
     }
 
-    // 2. Fallback: Verify against Admin-managed Firestore /promoCodes/{CODE}
-    if (!isValid && shouldTryFirestore) {
+    // 2. Fallback: Verify against Admin-managed Firestore /promoCodes/{CODE} (Promo box only)
+    if (!isValid && shouldTryFirestore && mode === 'promo') {
       const fsCheck = await verifyAndRedeemFirestorePromo(raw);
       if (fsCheck.valid) {
         isValid = true;
@@ -182,7 +188,7 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
         userEmail: '',
         amount: 0,
         currency: 'KRW',
-        method: mode === 'redeem' ? 'Redeem Code' : 'Promo Code',
+        method: mode === 'redeem' ? 'Paid Redeem Code' : 'Promo Code',
         promoCodeUsed: raw,
         centerId: matchedCenterId,
       }).catch(() => {});
@@ -202,10 +208,16 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
         text:
           errorReason ||
           (lang === 'ko'
-            ? '유효하지 않거나 이미 사용된 코드입니다. 코드를 다시 확인해 주세요.'
+            ? mode === 'promo'
+              ? '유효하지 않거나 만료된 프로모션 코드입니다.'
+              : '유효하지 않거나 미결제/이미 사용된 리딤 코드입니다. 결제 후 코드를 발급받아 주세요.'
             : lang === 'en'
-            ? 'Invalid or already used code! Please double-check and try again.'
-            : 'រកមិនឃើញលេខកូដនេះ ឬត្រូវបានប្រើរួចហើយ! សូមពិនិត្យលេខកូដរបស់អ្នកម្តងទៀត។'),
+            ? mode === 'promo'
+              ? 'Invalid or expired Promo Code!'
+              : 'Invalid, unpaid, or already used Redeem Code! Payment is required first.'
+            : mode === 'promo'
+            ? 'រកមិនឃើញ Promo Code នេះ ឬផុតកំណត់ហើយ!'
+            : 'លេខកូដ Redeem Code នេះមិនទាន់បង់ប្រាក់ មិនត្រឹមត្រូវ ឬប្រើរួចហើយ! សូមបង់ប្រាក់ជាមុនសិន។'),
       });
     }
   };
@@ -435,10 +447,10 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
                   )}
                 </button>
 
-                {/* Quick Redeem Code (10,000 Sheet / Admin) & Separate Promo Code inputs */}
+                {/* Quick Paid Redeem Code & Separate Free Promo Code inputs */}
                 <div className="flex flex-col items-end gap-1.5">
                   <div className="flex flex-wrap items-center justify-end gap-1.5">
-                    {/* Redeem Code Box */}
+                    {/* Paid Redeem Code Box */}
                     <div className="flex items-center gap-1 p-1 bg-indigo-50 border border-indigo-300 rounded-2xl shadow-2xs">
                       <span className="flex items-center gap-1 pl-2 pr-0.5 text-indigo-700 font-bold text-[11px] select-none">
                         <Ticket className="w-3.5 h-3.5 text-indigo-600" />
@@ -455,14 +467,14 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
                         onKeyDown={(e) => {
                           if (e.key === 'Enter') handlePromoUnlock(redeemCodeInput, 'redeem');
                         }}
-                        placeholder="Sheet / Admin"
+                        placeholder={lang === 'km' ? 'កូដក្រោយបង់' : 'Paid Code'}
                         className="w-28 sm:w-32 px-2 py-1.5 bg-white border border-indigo-200 rounded-xl text-[11px] font-mono font-bold uppercase text-indigo-950 outline-none placeholder:font-sans placeholder:font-normal placeholder:text-slate-400"
                       />
                       <button
                         type="button"
                         onClick={() => handlePromoUnlock(redeemCodeInput, 'redeem')}
                         className="px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white text-[11px] font-bold rounded-xl shadow-xs cursor-pointer flex items-center gap-1 shrink-0 transition-transform"
-                        title="ដោះសោដោយ Redeem Code (Google Sheet / Admin) ដោយមិនបាច់បង់លុយ"
+                        title="ដោះសោដោយ Redeem Code (Google Sheet 10,000 កូដ — ត្រូវបង់ប្រាក់ជាមុន)"
                       >
                         <Zap className="w-3 h-3 text-amber-300" />
                         <span>{lang === 'km' ? 'ដោះសោ' : lang === 'ko' ? '해제' : 'Unlock'}</span>
@@ -486,14 +498,14 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
                         onKeyDown={(e) => {
                           if (e.key === 'Enter') handlePromoUnlock(promoCodeInput, 'promo');
                         }}
-                        placeholder="Promo / Sheet"
+                        placeholder={lang === 'km' ? 'Promo Admin' : 'Admin Promo'}
                         className="w-28 sm:w-32 px-2 py-1.5 bg-white border border-purple-200 rounded-xl text-[11px] font-mono font-bold uppercase text-purple-950 outline-none placeholder:font-sans placeholder:font-normal placeholder:text-slate-400"
                       />
                       <button
                         type="button"
                         onClick={() => handlePromoUnlock(promoCodeInput, 'promo')}
                         className="px-2.5 py-1.5 bg-purple-600 hover:bg-purple-700 active:scale-95 text-white text-[11px] font-bold rounded-xl shadow-xs cursor-pointer flex items-center gap-1 shrink-0 transition-transform"
-                        title="ដោះសោដោយ Promo Code ឬ Google Sheet ដោយមិនបាច់បង់លុយ"
+                        title="ប្រអប់ផ្សេងសម្រាប់ Promo Code ពី Admin (ដោះសោឥតគិតថ្លៃ)"
                       >
                         <Zap className="w-3 h-3 text-amber-300" />
                         <span>{lang === 'km' ? 'ប្រើកូដ' : lang === 'ko' ? '적용' : 'Apply'}</span>

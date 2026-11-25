@@ -180,8 +180,9 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     }
   };
 
-  // Unified Redeem / Promo Code verification (Instant unlock without prior payment:
-  // checks Master Promo, Server Admin Promo DB, 10,000 Google Sheet + Admin Redeem DB, and Firestore Promo Codes)
+  // Strict Separated Verification:
+  // - source === 'redeem': ONLY unlocks PAID Redeem Codes (Google Sheet 10,000 / Korea Bank / Telegram / Admin Paid)
+  // - source === 'promo': ONLY unlocks Admin Dashboard Promo Codes & Master Promo Codes (never bypasses unpaid Sheet codes)
   const verifyCodeAndUnlock = async (rawInput: string, source: 'promo' | 'redeem') => {
     const trimmed = rawInput.trim().toUpperCase();
     const setErr = source === 'promo' ? setPromoCodeError : setRedeemError;
@@ -191,13 +192,15 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       setErr(
         isKm
           ? source === 'promo'
-            ? 'សូមបញ្ចូលលេខកូដ Promo Code ឬលេខកូដពី Google Sheet!'
-            : 'សូមបញ្ចូលលេខកូដ Redeem Code (ពី Google Sheet ឬ Admin)!'
+            ? 'សូមបញ្ចូលលេខកូដ Promo Code ពី Admin!'
+            : 'សូមបញ្ចូលលេខកូដ Redeem Code ដែលទទួលបានក្រោយបង់ប្រាក់!'
           : isKo
           ? source === 'promo'
-            ? '프로모션 코드 또는 리딤 코드를 입력해 주세요.'
-            : '리딤 코드를 입력해 주세요.'
-          : 'Please enter a valid Redeem / Promo Code!'
+            ? '프로모션 코드를 입력해 주세요.'
+            : '결제 후 발급받은 리딤 코드를 입력해 주세요.'
+          : source === 'promo'
+          ? 'Please enter an Admin Promo Code!'
+          : 'Please enter your Paid Redeem Code!'
       );
       return;
     }
@@ -217,9 +220,10 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     let matchedCenterId: string | undefined;
     let matchedType = source === 'promo' ? 'Promo Code' : 'Redeem Code';
     let serverErrorMsg: string | null = null;
-    let shouldTryFirestore = true;
+    // ONLY allow Firestore /promoCodes/{CODE} lookup inside the Promo Code box
+    let shouldTryFirestore = source === 'promo';
 
-    // 1. Server verification (Admin Promo DB, 10,000 Google Sheet Redeem DB, Admin Redeem DB, Master Promo)
+    // 1. Server verification (strict mode separation enforced server-side)
     try {
       const resp = await fetch('/api/payments/verify-redeem', {
         method: 'POST',
@@ -238,14 +242,17 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         if (data.centerId) matchedCenterId = String(data.centerId);
         if (data.type === 'telegram_bot' || data.type === 'telegram_receipt') matchedType = 'Telegram Auto-Unlock';
         else if (data.type === 'kr_receipt') matchedType = 'Korea Bank Receipt Code';
-        else if (data.type === 'google_sheets') matchedType = 'Google Sheet Redeem Code';
+        else if (data.type === 'google_sheets') matchedType = 'Google Sheet Paid Redeem Code';
         else if (data.type === 'admin_promo') matchedType = 'Admin Promo Code';
-        else if (data.type === 'database' || data.type === 'admin' || data.type === 'redeem') matchedType = 'Admin Redeem Code';
+        else if (data.type === 'database' || data.type === 'admin' || data.type === 'redeem') matchedType = 'Paid Redeem Code';
         else matchedType = 'Promo Code';
       } else {
         serverErrorMsg = data?.error || null;
-        // Do not mask definitive status errors with a Firestore lookup
+        // Never mask definitive status/payment/wrong-box errors with a Firestore lookup
         if (
+          data?.errorCode === 'PAYMENT_REQUIRED' ||
+          data?.errorCode === 'WRONG_BOX_REDEEM' ||
+          data?.errorCode === 'WRONG_BOX_PROMO' ||
           data?.errorCode === 'ALREADY_USED' ||
           data?.errorCode === 'REVOKED' ||
           data?.errorCode === 'EXPIRED' ||
@@ -256,11 +263,11 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         }
       }
     } catch {
-      // Fall through to Firestore check
+      // Fall through to Firestore check only when source === 'promo'
     }
 
-    // 2. Fallback: Firestore Admin-managed Promo Code lookup by exact code ID (for Firebase-signed-in users)
-    if (!verified && shouldTryFirestore) {
+    // 2. Fallback: Firestore Admin-managed Promo Code lookup by exact code ID (Promo box only)
+    if (!verified && shouldTryFirestore && source === 'promo') {
       const fsCheck = await verifyAndRedeemFirestorePromo(trimmed);
       if (fsCheck.valid) {
         verified = true;
@@ -296,10 +303,16 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       setErr(
         serverErrorMsg ||
           (isKm
-            ? 'រកមិនឃើញលេខកូដនេះ ឬត្រូវបានប្រើរួចហើយ! សូមពិនិត្យអក្សរឡើងវិញ ឬយកលេខកូដ Unused ពី Admin Dashboard / Google Sheet។'
+            ? source === 'promo'
+              ? 'រកមិនឃើញ Promo Code នេះ ឬផុតកំណត់ហើយ! សូមពិនិត្យលេខកូដ Promo ពី Admin ឡើងវិញ។'
+              : 'រកមិនឃើញ Redeem Code នេះ មិនទាន់បង់ប្រាក់ ឬប្រើរួចហើយ! សូមបង់ប្រាក់ជាមុនដើម្បីទទួលកូដដោះសោ។'
             : isKo
-            ? '유효하지 않거나 이미 사용된 코드입니다. 코드를 다시 확인해 주세요.'
-            : 'Code not found or already used! Please double-check your Redeem / Promo Code.')
+            ? source === 'promo'
+              ? '유효하지 않거나 만료된 프로모션 코드입니다.'
+              : '유효하지 않거나 미결제/이미 사용된 리딤 코드입니다. 결제 후 발급받은 코드를 입력해 주세요.'
+            : source === 'promo'
+            ? 'Invalid or expired Promo Code! Please double-check your Admin Promo Code.'
+            : 'Invalid, unpaid, or already used Redeem Code! Please complete payment first to unlock.')
       );
     }
   };
@@ -365,12 +378,12 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         verifiedAmount: Number(data.verifiedAmount) || 35000,
       });
 
-      // Automatically burn the single-use code and unlock Clean PDF
+      // Automatically burn the single-use paid code and unlock Clean PDF
       await fetch('/api/payments/verify-redeem', {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: data.unlockCode, userEmail: userEmail || '', lang }),
+        body: JSON.stringify({ code: data.unlockCode, userEmail: userEmail || '', mode: 'redeem', lang }),
       }).catch(() => {});
 
       setTimeout(() => {
@@ -574,11 +587,11 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               </div>
             </div>
 
-            {/* Dual Instant Unlock Boxes (No Prior Payment Required!):
-                1. Redeem Code Box (10,000 Google Sheet & Admin Redeem DB)
-                2. Separate Promo Code Box (Admin Promo Codes + 10,000 Google Sheet Codes) */}
+            {/* Strictly Separated Code Boxes at Payment:
+                1. Paid Redeem Code Box (10,000 Google Sheet codes — requires payment first!)
+                2. Separate Promo Code Box (Admin Dashboard Promo Codes — free unlock) */}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              {/* BOX 1: Redeem Code (10,000 Google Sheet & Admin Dashboard) */}
+              {/* BOX 1: Paid Redeem Code (10,000 Google Sheet — Payment Required) */}
               <div className="p-3.5 bg-gradient-to-br from-indigo-50 via-blue-50 to-slate-50 border-2 border-indigo-300 rounded-2xl space-y-2 shadow-xs">
                 <div className="flex items-start gap-2">
                   <span className="p-1.5 rounded-lg bg-indigo-600 text-white shadow-2xs shrink-0 mt-0.5">
@@ -587,17 +600,17 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                   <div className="min-w-0">
                     <span className="text-xs font-black text-indigo-950 block leading-tight">
                       {isKm
-                        ? 'ប្រអប់ Redeem Code (Google Sheet / Admin)'
+                        ? 'ប្រអប់ Redeem Code (ក្រោយបង់ប្រាក់)'
                         : isKo
-                        ? '리딤 코드 입력 (Redeem Code)'
-                        : 'Redeem Code (Google Sheet / Admin)'}
+                        ? '리딤 코드 입력 (결제 완료 코드)'
+                        : 'Paid Redeem Code (Google Sheet)'}
                     </span>
                     <span className="text-[10.5px] text-indigo-700 leading-snug block mt-0.5">
                       {isKm
-                        ? 'វាយកូដពី Google Sheet (10,000 កូដ) ឬ Admin Dashboard ដើម្បីដោះសោភ្លាមៗដោយមិនបាច់បង់លុយ'
+                        ? 'សម្រាប់លេខកូដ Google Sheet (10,000 កូដ) ដែលទទួលបានក្រោយបង់ប្រាក់តាមធនាគារកូរ៉េ ឬ ABA'
                         : isKo
-                        ? '결제 없이 Google Sheet(10,000개) 또는 관리자 리딤 코드로 즉시 해제'
-                        : 'Unlock instantly without paying using Google Sheet (10,000) or Admin codes'}
+                        ? '결제 확인 후 발급받은 Google Sheet 리딤 코드를 입력하세요'
+                        : 'Requires payment first — enter the paid Google Sheet code issued after payment'}
                     </span>
                   </div>
                 </div>
@@ -617,7 +630,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                         verifyCodeAndUnlock(redeemCode, 'redeem');
                       }
                     }}
-                    placeholder={isKm ? 'ឧ. ZSCE-W5AO-BLCI' : 'e.g. ZSCE-W5AO-BLCI'}
+                    placeholder={isKm ? 'កូដក្រោយបង់ប្រាក់...' : 'Paid Redeem Code...'}
                     className="w-full min-w-0 px-3 py-2 bg-white border border-indigo-300 rounded-xl text-xs font-mono font-bold tracking-wider uppercase text-indigo-950 focus:outline-none focus:ring-2 focus:ring-indigo-400 placeholder:font-sans placeholder:font-normal placeholder:text-slate-400"
                   />
                   <button
@@ -646,7 +659,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                 )}
               </div>
 
-              {/* BOX 2: Separate Promo Code Box (Admin Promo + 10,000 Google Sheet Codes) */}
+              {/* BOX 2: Separate Promo Code Box (Admin Promo Codes Only — Free Unlock) */}
               <div className="p-3.5 bg-gradient-to-br from-purple-50 via-fuchsia-50 to-pink-50 border-2 border-purple-300 rounded-2xl space-y-2 shadow-xs">
                 <div className="flex items-start gap-2">
                   <span className="p-1.5 rounded-lg bg-purple-600 text-white shadow-2xs shrink-0 mt-0.5">
@@ -657,15 +670,15 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                       {isKm
                         ? 'ប្រអប់ Promo Code ផ្សេង (ប្រូម៉ូកូដ)'
                         : isKo
-                        ? '프로모션 코드 입력 (Promo Code)'
-                        : 'Promo Code (Admin & Sheet Codes)'}
+                        ? '프로모션 코드 전용 입력란 (Promo)'
+                        : 'Separate Promo Code Box'}
                     </span>
                     <span className="text-[10.5px] text-purple-700 leading-snug block mt-0.5">
                       {isKm
-                        ? 'ប្រើ Promo Code ពី Admin Dashboard និងអាចដាក់លេខកូដ Google Sheet (10,000 កូដ) បានផងដែរ'
+                        ? 'សម្រាប់វាយបញ្ចូល Promo Code ពី Admin Dashboard / មជ្ឈមណ្ឌល ដោះសោឥតគិតថ្លៃ'
                         : isKo
-                        ? '관리자 프로모션 코드 및 Google Sheet 10,000개 코드 모두 입력 가능'
-                        : 'Accepts Admin Dashboard Promo Codes and all 10,000 Google Sheet codes'}
+                        ? '관리자 대시보드 / 지원센터에서 발급한 무료 프로모션 코드 전용'
+                        : 'Exclusively for Admin Dashboard / Support Center Promo Codes (free unlock)'}
                     </span>
                   </div>
                 </div>
@@ -685,7 +698,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                         verifyCodeAndUnlock(promoCodeInput, 'promo');
                       }
                     }}
-                    placeholder={isKm ? 'ឧ. KIIP-PROMO / Sheet Code' : 'e.g. KIIP-PROMO'}
+                    placeholder={isKm ? 'ឧ. KIIP-PROMO...' : 'e.g. KIIP-PROMO...'}
                     className="w-full min-w-0 px-3 py-2 bg-white border border-purple-300 rounded-xl text-xs font-mono font-bold tracking-wider uppercase text-purple-950 focus:outline-none focus:ring-2 focus:ring-purple-400 placeholder:font-sans placeholder:font-normal placeholder:text-slate-400"
                   />
                   <button
@@ -1083,19 +1096,19 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               </div>
             )}
 
-            {/* TAB 3: REDEEM CODE (10,000 GOOGLE SHEET / ADMIN DB) + SEPARATE PROMO CODE BOX */}
+            {/* TAB 3: PAID REDEEM CODE (10,000 GOOGLE SHEET) + SEPARATE PROMO CODE BOX */}
             {activeTab === 'redeem' && (
               <div className="space-y-4">
                 <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200 text-xs text-slate-700 leading-relaxed">
                   {isKm
-                    ? '🔓 អាចដោះសោទាញយក Clean PDF បានភ្លាមៗដោយមិនចាំបាច់បង់ប្រាក់ជាមុន! អ្នកអាចប្រើលេខកូដពី Google Sheet (10,000 កូដ), Admin Dashboard (Redeem DB) ឬ Promo Code ក្នុងប្រអប់ខាងក្រោម៖'
+                    ? '🔒 លេខកូដ Google Sheet (10,000 កូដ) តម្រូវឱ្យបង់ប្រាក់ជាមុនសិន ទើបអាចដោះសោបាននៅប្រអប់ Redeem Code ខាងឆ្វេង។ ប្រសិនបើអ្នកមាន Promo Code ពី Admin Dashboard សូមវាយបញ្ចូលក្នុងប្រអប់ Promo Code ផ្សេងខាងស្តាំ៖'
                     : isKo
-                    ? '🔓 별도 결제 없이 즉시 잠금 해제할 수 있습니다. Google Sheet 10,000개 리딤 코드, 관리자 대시보드 코드 또는 프로모션 코드를 아래에 입력하세요.'
-                    : '🔓 Unlock Clean PDF immediately without prior payment using any of the 10,000 Google Sheet codes, Admin Dashboard Redeem codes, or Promo Codes below:'}
+                    ? '🔒 Google Sheet 10,000개 리딤 코드는 결제 완료 후 왼쪽 리딤 코드 입력란에서 잠금 해제할 수 있습니다. 관리자 프로모션 코드는 오른쪽 전용 입력란에 입력해 주세요.'
+                    : '🔒 Google Sheet (10,000) Redeem Codes require payment first before unlocking in the Redeem Code box. If you have an Admin Promo Code, enter it in the separate Promo Code box:'}
                 </div>
 
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-                  {/* Card 1: Redeem Code Box */}
+                  {/* Card 1: Paid Redeem Code Box */}
                   <div className="p-4 rounded-2xl bg-indigo-50/70 border border-indigo-200 space-y-3">
                     <div className="flex items-center gap-2">
                       <div className="w-8 h-8 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0 shadow-xs">
@@ -1103,10 +1116,10 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                       </div>
                       <div>
                         <h4 className="text-xs sm:text-sm font-black text-indigo-950">
-                          {isKm ? '1. ប្រអប់ Redeem Code' : isKo ? '1. 리딤 코드 (Redeem)' : '1. Redeem Code'}
+                          {isKm ? '1. ប្រអប់ Redeem Code (ក្រោយបង់ប្រាក់)' : isKo ? '1. 리딤 코드 (결제 완료 후)' : '1. Paid Redeem Code'}
                         </h4>
                         <p className="text-[11px] text-indigo-700">
-                          {isKm ? 'សម្រាប់ 10,000 កូដ Google Sheet & Admin DB' : 'Google Sheet 10,000 & Admin DB'}
+                          {isKm ? '10,000 កូដ Google Sheet (ត្រូវបង់ប្រាក់ជាមុន)' : 'Google Sheet 10,000 (Payment Required)'}
                         </p>
                       </div>
                     </div>
@@ -1127,7 +1140,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                             verifyCodeAndUnlock(redeemCode, 'redeem');
                           }
                         }}
-                        placeholder={isKm ? 'ឧ. ZSCE-W5AO-BLCI' : 'e.g. ZSCE-W5AO-BLCI'}
+                        placeholder={isKm ? 'កូដក្រោយបង់ប្រាក់...' : 'Paid Redeem Code...'}
                         className="w-full pl-9 pr-14 py-2.5 rounded-xl bg-white border border-indigo-300 text-xs sm:text-sm font-mono tracking-wider font-bold uppercase focus:border-indigo-600 focus:ring-2 focus:ring-indigo-100 outline-none"
                       />
                       {redeemCode && (
@@ -1176,10 +1189,10 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                       </div>
                       <div>
                         <h4 className="text-xs sm:text-sm font-black text-purple-950">
-                          {isKm ? '2. ប្រអប់ Promo Code ផ្សេង' : isKo ? '2. 프로모션 코드 (Promo)' : '2. Promo Code Box'}
+                          {isKm ? '2. ប្រអប់ Promo Code ផ្សេង' : isKo ? '2. 프로모션 코드 전용 (Promo)' : '2. Separate Promo Code Box'}
                         </h4>
                         <p className="text-[11px] text-purple-700">
-                          {isKm ? 'Admin Promo Code + 10,000 កូដ Google Sheet' : 'Admin Promo + 10,000 Google Sheet Codes'}
+                          {isKm ? 'Promo Code ពី Admin Dashboard (ដោះសោឥតគិតថ្លៃ)' : 'Admin Dashboard Promo Codes Only (Free)'}
                         </p>
                       </div>
                     </div>
@@ -1200,7 +1213,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                             verifyCodeAndUnlock(promoCodeInput, 'promo');
                           }
                         }}
-                        placeholder={isKm ? 'ឧ. KIIP-PROMO / Sheet Code' : 'e.g. KIIP-PROMO'}
+                        placeholder={isKm ? 'ឧ. KIIP-PROMO...' : 'e.g. KIIP-PROMO...'}
                         className="w-full pl-9 pr-14 py-2.5 rounded-xl bg-white border border-purple-300 text-xs sm:text-sm font-mono tracking-wider font-bold uppercase focus:border-purple-600 focus:ring-2 focus:ring-purple-100 outline-none"
                       />
                       {promoCodeInput && (

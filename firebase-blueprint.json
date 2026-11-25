@@ -248,6 +248,54 @@
         }
       },
       "required": ["sessionId", "maskedIp", "city", "country", "lastSeen"]
+    },
+    "RedeemCode": {
+      "title": "RedeemCode",
+      "description": "Admin-managed payment-gated Redeem Code mirrored between Server SQLite DB and Cloud Firestore.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 64,
+          "pattern": "^[A-Z0-9_\\-]+$"
+        },
+        "code": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 64,
+          "pattern": "^[A-Z0-9_\\-]+$"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["Unused", "Used", "Revoked"]
+        },
+        "isPaid": {
+          "type": "boolean"
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "note": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "assignedTo": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "code", "status", "isPaid", "source", "updatedAt"]
     }
   },
   "firestore": {
@@ -266,6 +314,10 @@
     "/promoCodes/{codeId}": {
       "schema": { "$ref": "#/entities/PromoCode" },
       "description": "Center-specific monthly promotion codes with usage limits and expiry."
+    },
+    "/redeemCodes/{codeId}": {
+      "schema": { "$ref": "#/entities/RedeemCode" },
+      "description": "Admin-only payment-gated Redeem Codes synchronized with Server DB & Google Sheets."
     },
     "/centers/{centerId}": {
       "schema": { "$ref": "#/entities/SupportCenter" },
