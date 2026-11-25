@@ -257,7 +257,7 @@ ${emailBody}`;
             num: '01',
             title: 'ទាញយក File PDF ទុកក្នុងទូរស័ព្ទជាមុនសិន',
             detail:
-              'ប្រសិនបើមិនទាន់ទាញយកទេ សូមចុចត្រឡប់ទៅជំហ៊ានទី ៣ រួចទាញយកឯកសារ PDF Merge។ លើ iPhone សូមចុច Save to Files (រក្សាទុកក្នុង Downloads) ហើយលើ Android File នឹងចូលក្នុងថត Downloads / My Files ដោយស្វ័យប្រវត្តិ។',
+              'ប្រសិនបើមិនទាន់ទាញយកទេ សូមចុចត្រឡប់ទៅជំហ៊ានទី ៤ រួចទាញយកឯកសារ PDF Merge។ លើ iPhone សូមចុច Save to Files (រក្សាទុកក្នុង Downloads) ហើយលើ Android File នឹងចូលក្នុងថត Downloads / My Files ដោយស្វ័យប្រវត្តិ។',
           },
           {
             num: '02',
@@ -284,7 +284,7 @@ ${emailBody}`;
             num: '01',
             title: '스마트폰에 통합 PDF 파일 저장 확인',
             detail:
-              '3단계에서 통합 PDF를 먼저 다운로드하세요. 아이폰(Safari)은 "파일에 저장(Downloads)"을 누르고, 안드로이드(Chrome)는 "내 파일 > 다운로드(Downloads)" 폴더에 자동 저장됩니다.',
+              '4단계에서 통합 PDF를 먼저 다운로드하세요. 아이폰(Safari)은 "파일에 저장(Downloads)"을 누르고, 안드로이드(Chrome)는 "내 파일 > 다운로드(Downloads)" 폴더에 자동 저장됩니다.',
           },
           {
             num: '02',
@@ -310,7 +310,7 @@ ${emailBody}`;
             num: '01',
             title: 'Confirm the merged PDF is saved on your phone',
             detail:
-              'Download the merged PDF in Step 3. On iPhone Safari, tap Save to Files (Downloads). On Android Chrome, it saves automatically to Downloads / My Files.',
+              'Download the merged PDF in Step 4. On iPhone Safari, tap Save to Files (Downloads). On Android Chrome, it saves automatically to Downloads / My Files.',
           },
           {
             num: '02',
@@ -352,7 +352,7 @@ ${emailBody}`;
             num: '01',
             title: 'ពិនិត្យទីតាំង File PDF ក្នុងថត Downloads',
             detail:
-              'នៅជំហ៊ានទី ៣ ក្រោយពេលចុចទាញយក File PDF ឈ្មោះ "사회통합프로그램_연계신청서_통합서류_..." នឹងស្ថិតនៅក្នុងថត Downloads នៃកុំព្យូទ័រ។ អ្នកអាចចុច Ctrl + J (Windows) ឬ Cmd + Shift + J (Mac) ដើម្បីបើកមើលទីតាំង File។',
+              'នៅជំហ៊ានទី ៤ ក្រោយពេលចុចទាញយក File PDF ឈ្មោះ "사회통합프로그램_연계신청서_통합서류_..." នឹងស្ថិតនៅក្នុងថត Downloads នៃកុំព្យូទ័រ។ អ្នកអាចចុច Ctrl + J (Windows) ឬ Cmd + Shift + J (Mac) ដើម្បីបើកមើលទីតាំង File។',
           },
           {
             num: '02',
@@ -379,7 +379,7 @@ ${emailBody}`;
             num: '01',
             title: 'PC 다운로드(Downloads) 폴더에서 PDF 파일 확인',
             detail:
-              '3단계에서 다운로드한 "사회통합프로그램_연계신청서_통합서류_..." PDF 파일이 컴퓨터의 다운로드 폴더에 저장되어 있습니다. 브라우저에서 Ctrl+J(Mac은 Cmd+Shift+J)로 바로 확인할 수 있습니다.',
+              '4단계에서 다운로드한 "사회통합프로그램_연계신청서_통합서류_..." PDF 파일이 컴퓨터의 다운로드 폴더에 저장되어 있습니다. 브라우저에서 Ctrl+J(Mac은 Cmd+Shift+J)로 바로 확인할 수 있습니다.',
           },
           {
             num: '02',
@@ -405,7 +405,7 @@ ${emailBody}`;
             num: '01',
             title: 'Locate the downloaded PDF in your Downloads folder',
             detail:
-              'Your merged PDF from Step 3 is saved in your computer Downloads folder. Press Ctrl+J (Windows) or Cmd+Shift+J (Mac) in Chrome/Edge to view it.',
+              'Your merged PDF from Step 4 is saved in your computer Downloads folder. Press Ctrl+J (Windows) or Cmd+Shift+J (Mac) in Chrome/Edge to view it.',
           },
           {
             num: '02',

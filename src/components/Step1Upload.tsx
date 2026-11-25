@@ -16,9 +16,10 @@ import {
   parsePassportTextOrSvg
 } from '../utils/sanitizers';
 import {
-  extractDocumentsClientSide,
-  mergeExtractedIntoFormData,
-  compressImageForApi
+  ExtractedDocumentData,
+  runFullDocumentOcrPipeline,
+  mergeExtractedDrafts,
+  formDataToExtractedDraft,
 } from '../utils/clientOcrEngine';
 import { 
   Upload, 
@@ -59,6 +60,9 @@ interface Step1UploadProps {
   setDocs: React.Dispatch<React.SetStateAction<UploadedDocuments>>;
   formData: ApplicationFormData;
   setFormData: React.Dispatch<React.SetStateAction<ApplicationFormData>>;
+  extractedDraft: ExtractedDocumentData;
+  setExtractedDraft: React.Dispatch<React.SetStateAction<ExtractedDocumentData>>;
+  onOcrCompleted?: (data: ExtractedDocumentData, rawTextPreview: string, model: string) => void;
   lang: Language;
   onNext: () => void;
   onOpenSocinetNotice?: () => void;
@@ -71,6 +75,9 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
   setDocs,
   formData,
   setFormData,
+  extractedDraft,
+  setExtractedDraft,
+  onOcrCompleted,
   lang,
   onNext,
   onOpenSocinetNotice,
@@ -135,6 +142,7 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
     const draft = getSavedFormDraft();
     if (draft && draft.formData) {
       setFormData(draft.formData);
+      setExtractedDraft(formDataToExtractedDraft(draft.formData));
       setDraftNotice({
         type: 'success',
         text: `បានទាញយកទិន្នន័យព្រាងជោគជ័យ! (${draft.summaryName ? `${draft.summaryName} • ` : ''}${draft.formattedDate})`,
@@ -233,6 +241,10 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
       ...p,
       address: full,
     }));
+    setExtractedDraft((prev) => ({
+      ...prev,
+      address: prev.address || full,
+    }));
     setShowAddressDropdown(false);
     setShowAddressModal(false);
     setSearchQuery(addr.roadAddress);
@@ -242,11 +254,9 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
     setDetailAddress(detail);
     if (!formData.address) return;
     const base = formData.address.replace(/\s+\d+동.*$/, '').trim();
-    if (detail.trim()) {
-      setFormData((p) => ({ ...p, address: `${base} ${detail.trim()}` }));
-    } else {
-      setFormData((p) => ({ ...p, address: base }));
-    }
+    const updated = detail.trim() ? `${base} ${detail.trim()}` : base;
+    setFormData((p) => ({ ...p, address: updated }));
+    setExtractedDraft((prev) => ({ ...prev, address: updated }));
   };
 
   // Local structural extractor for Alien Registration Card (fast fallback)
@@ -451,7 +461,8 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
     docsRef.current = docs;
   }, [docs]);
 
-  // Auto-extract documents using Server AI or Client-Side Tesseract OCR (for GitHub Pages / static hosting)
+  // Auto-extract documents using the hybrid Server Gemini/PDF + Browser Tesseract pipeline
+  // Stages extracted fields into extractedDraft for user verification in Step 2 before committing into formData
   const handleExtractDocuments = async (
     customTopikUrl?: string,
     customArcFront?: string | null,
@@ -474,81 +485,47 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
     setExtractSuccess(false);
 
     try {
-      // 1. Try Server-side Gemini OCR if running on fullstack Node.js server
-      const isStaticGitHubPages = typeof window !== 'undefined' && window.location.hostname.includes('github.io');
-      let serverSucceeded = false;
+      const parsedArc = parseArcTextOrSvg(frontUrl, backUrl) || {};
+      const parsedTopik = topikUrl ? parseTopikTextOrSvg(topikUrl) || {} : {};
+      const parsedPassport = passportUrl ? parsePassportTextOrSvg(passportUrl) || {} : {};
 
-      if (!isStaticGitHubPages) {
-        try {
-          const [cFront, cBack, cTopik, cPassport] = await Promise.all([
-            compressImageForApi(frontUrl),
-            compressImageForApi(backUrl),
-            compressImageForApi(topikUrl),
-            compressImageForApi(passportUrl),
-          ]);
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), 45000);
-          const response = await fetch('/api/extract-documents', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            signal: controller.signal,
-            body: JSON.stringify({
-              arcFront: cFront,
-              arcBack: cBack,
-              topikCert: cTopik,
-              passport: cPassport,
-            }),
-          });
-          clearTimeout(timer);
+      const pipelineRes = await runFullDocumentOcrPipeline({
+        arcFront: frontUrl,
+        arcBack: backUrl,
+        topikCert: topikUrl,
+        passport: passportUrl,
+      });
 
-          if (response.ok) {
-            const resData = await response.json().catch(() => ({}));
-            if (resData.success && resData.data && !resData.fallbackMode) {
-              const ext = resData.data;
-              setFormData((prev) => mergeExtractedIntoFormData(prev, ext));
-              serverSucceeded = true;
-              setExtractSuccess(true);
-              setTimeout(() => setExtractSuccess(false), 8000);
-              return;
-            }
-          }
-        } catch {
-          // Proceed directly to client-side Gemini Vision OCR
-        }
+      const stagedData = mergeExtractedDrafts(
+        {
+          ...parsedArc,
+          ...parsedTopik,
+          ...parsedPassport,
+        },
+        pipelineRes.data
+      );
+
+      if (onOcrCompleted) {
+        onOcrCompleted(stagedData, pipelineRes.rawTextPreview, pipelineRes.model);
+      } else {
+        setExtractedDraft((prev) => mergeExtractedDrafts(prev, stagedData));
       }
 
-      if (!serverSucceeded) {
-        // 2. Run Client-Side Tesseract.js OCR (Korean + English) directly in the browser!
-        const parsedArc = parseArcTextOrSvg(frontUrl, backUrl);
-        const parsedTopik = topikUrl ? parseTopikTextOrSvg(topikUrl) : null;
-        const clientOcrData = await extractDocumentsClientSide({
-          arcFront: frontUrl,
-          arcBack: backUrl,
-          topikCert: topikUrl,
-          passport: passportUrl,
-          skipServer: !isStaticGitHubPages,
-        });
-
-        const combinedExtracted = {
-          ...(parsedArc || {}),
-          ...(parsedTopik || {}),
-          ...clientOcrData,
-        };
-
-        setFormData((prev) => mergeExtractedIntoFormData(prev, combinedExtracted));
-        setExtractSuccess(true);
-        setTimeout(() => setExtractSuccess(false), 8000);
-      }
+      setExtractSuccess(true);
+      setTimeout(() => setExtractSuccess(false), 8000);
     } catch (err: any) {
       console.warn('Extraction notice:', err);
-      const parsedArc = parseArcTextOrSvg(frontUrl, backUrl);
-      const parsedTopik = topikUrl ? parseTopikTextOrSvg(topikUrl) : null;
-      setFormData((prev) =>
-        mergeExtractedIntoFormData(prev, {
-          ...(parsedArc || {}),
-          ...(parsedTopik || {}),
-        })
-      );
+      const parsedArc = parseArcTextOrSvg(frontUrl, backUrl) || {};
+      const parsedTopik = topikUrl ? parseTopikTextOrSvg(topikUrl) || {} : {};
+      const fallbackData: ExtractedDocumentData = {
+        ...parsedArc,
+        ...parsedTopik,
+      };
+      if (onOcrCompleted) {
+        onOcrCompleted(fallbackData, '', 'svg-fallback');
+      } else {
+        setExtractedDraft((prev) => mergeExtractedDrafts(prev, fallbackData));
+      }
       setExtractSuccess(true);
     } finally {
       setIsExtractingTopik(false);
@@ -556,7 +533,7 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
   };
 
   // Address matching hint
-  const matchedOffice = findOfficeByAddress(formData.address);
+  const matchedOffice = findOfficeByAddress(extractedDraft.address || formData.address);
 
   // Handle single file upload for ARC
   const handleArcUpload = async (e: React.ChangeEvent<HTMLInputElement>, side: 'front' | 'back') => {
@@ -1152,14 +1129,13 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
                 </label>
                 <input
                   type="text"
-                  value={formData.name === '0000 0000' ? '' : formData.name}
+                  value={extractedDraft.name || ''}
                   placeholder={isExtractingTopik ? 'កំពុងស្កេនឈ្មោះ...' : 'ឧ. EANG VEASNA'}
                   onChange={(e) => {
                     const val = e.target.value.toUpperCase();
-                    setFormData((prev) => ({
+                    setExtractedDraft((prev) => ({
                       ...prev,
                       name: val,
-                      applicantName: val,
                     }));
                   }}
                   className="w-full px-2.5 py-1.5 text-xs font-bold text-slate-900 uppercase bg-slate-50 border border-slate-300 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:bg-white"
@@ -1175,11 +1151,11 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
                   <input
                     type="text"
                     maxLength={6}
-                    value={formData.regNumber1 === '000000' ? '' : formData.regNumber1}
+                    value={extractedDraft.regNumber1 || ''}
                     placeholder="YYMMDD"
                     onChange={(e) => {
                       const val = e.target.value.replace(/[^0-9]/g, '').slice(0, 6);
-                      setFormData((prev) => ({ ...prev, regNumber1: val }));
+                      setExtractedDraft((prev) => ({ ...prev, regNumber1: val }));
                     }}
                     className="w-full px-2 py-1.5 text-xs font-mono font-bold text-slate-900 text-center bg-slate-50 border border-slate-300 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:bg-white"
                   />
@@ -1187,7 +1163,7 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
                   <input
                     type="text"
                     maxLength={7}
-                    value={formData.regNumber2 === '0000000' ? '' : formData.regNumber2}
+                    value={extractedDraft.regNumber2 || ''}
                     placeholder="5XXXXXX"
                     onChange={(e) => {
                       const val = e.target.value.replace(/[^0-9]/g, '').slice(0, 7);
@@ -1196,8 +1172,8 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
                         ? '여'
                         : ['1', '3', '5', '7'].includes(firstDigit)
                         ? '남'
-                        : formData.gender;
-                      setFormData((prev) => ({ ...prev, regNumber2: val, gender }));
+                        : extractedDraft.gender;
+                      setExtractedDraft((prev) => ({ ...prev, regNumber2: val, gender }));
                     }}
                     className="w-full px-2 py-1.5 text-xs font-mono font-bold text-slate-900 text-center bg-slate-50 border border-slate-300 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:bg-white"
                   />
@@ -1210,17 +1186,17 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
                   ប្រភេទទិដ្ឋាការ (체류자격 / Visa):
                 </label>
                 <select
-                  value={formData.visaStatus || ''}
+                  value={extractedDraft.visaStatus || ''}
                   onChange={(e) =>
-                    setFormData((prev) => ({ ...prev, visaStatus: e.target.value }))
+                    setExtractedDraft((prev) => ({ ...prev, visaStatus: e.target.value }))
                   }
                   className="w-full px-2.5 py-1.5 text-xs font-bold text-slate-800 bg-slate-50 border border-slate-300 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:bg-white cursor-pointer"
                   style={{ fontFamily: "'Noto Sans KR', sans-serif" }}
                   title="체류자격 선택 (ជ្រើសរើសប្រភេទវីសា)"
                 >
                   <option value="">-- 체류자격 선택 (ជ្រើសរើសប្រភេទវីសា) --</option>
-                  {formData.visaStatus && !ALL_VISA_CODES.includes(formData.visaStatus) && (
-                    <option value={formData.visaStatus}>{formData.visaStatus}</option>
+                  {extractedDraft.visaStatus && !ALL_VISA_CODES.includes(extractedDraft.visaStatus) && (
+                    <option value={extractedDraft.visaStatus}>{extractedDraft.visaStatus}</option>
                   )}
                   {KOREAN_VISA_GROUPS.map((group) => (
                     <optgroup key={group.groupName} label={group.groupNameKo}>
@@ -1241,10 +1217,10 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
                 </label>
                 <input
                   type="text"
-                  value={formData.address.startsWith('00000') ? '' : formData.address}
+                  value={extractedDraft.address || ''}
                   placeholder={isExtractingTopik ? 'កំពុងស្កេនអាសយដ្ឋាន...' : 'អាសយដ្ឋាននៅកូរ៉េ'}
                   onChange={(e) =>
-                    setFormData((prev) => ({ ...prev, address: e.target.value }))
+                    setExtractedDraft((prev) => ({ ...prev, address: e.target.value }))
                   }
                   className="w-full px-2.5 py-1.5 text-xs font-bold text-slate-900 bg-slate-50 border border-slate-300 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:bg-white"
                 />
@@ -1341,29 +1317,29 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
                 <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-[11px] bg-white p-2.5 rounded-lg border border-emerald-200">
                   <div>
                     <span className="text-slate-500 block">회차 (លើកទី/ជុំ):</span>
-                    <strong className="text-slate-900 text-xs">{formData.round && formData.round !== '000' ? `${formData.round} 회` : (isExtractingTopik ? 'កំពុងស្កេន...' : '-')}</strong>
+                    <strong className="text-slate-900 text-xs">{extractedDraft.round ? `${extractedDraft.round} 회` : (isExtractingTopik ? 'កំពុងស្កេន...' : '-')}</strong>
                   </div>
                   <div>
                     <span className="text-slate-500 block">수험번호 (លេខកូដ):</span>
-                    <strong className="text-slate-900 text-xs font-mono">{formData.examNumber && formData.examNumber !== '0000000000000' ? formData.examNumber : (isExtractingTopik ? 'កំពុងស្កេន...' : '-')}</strong>
+                    <strong className="text-slate-900 text-xs font-mono">{extractedDraft.examNumber ? extractedDraft.examNumber : (isExtractingTopik ? 'កំពុងស្កេន...' : '-')}</strong>
                   </div>
                   <div>
                     <span className="text-slate-500 block">시험일 (ថ្ងៃប្រឡង):</span>
-                    <strong className="text-slate-900 text-xs">{formData.examDate && formData.examDate !== '0000-00-00' ? formData.examDate : (isExtractingTopik ? 'កំពុងស្កេន...' : '-')}</strong>
+                    <strong className="text-slate-900 text-xs">{extractedDraft.examDate ? extractedDraft.examDate : (isExtractingTopik ? 'កំពុងស្កេន...' : '-')}</strong>
                   </div>
                   <div>
                     <span className="text-slate-500 block">성적유효기간 (សុពលភាព):</span>
-                    <strong className="text-rose-600 text-xs">{formData.validUntil && formData.validUntil !== '0000-00-00' ? formData.validUntil : (isExtractingTopik ? 'កំពុងស្កេន...' : '-')}</strong>
+                    <strong className="text-rose-600 text-xs">{extractedDraft.validUntil ? extractedDraft.validUntil : (isExtractingTopik ? 'កំពុងស្កេន...' : '-')}</strong>
                   </div>
                   <div>
                     <span className="text-slate-500 block">등급 (កម្រិតពិន្ទុ):</span>
-                    <strong className="text-emerald-700 text-xs">{formData.grade && formData.grade !== '0급' ? formData.grade : (isExtractingTopik ? 'កំពុងស្កេន...' : '-')}</strong>
+                    <strong className="text-emerald-700 text-xs">{extractedDraft.grade ? extractedDraft.grade : (isExtractingTopik ? 'កំពុងស្កេន...' : '-')}</strong>
                   </div>
                   <div className="col-span-2 sm:col-span-1">
                     <span className="text-slate-500 block">문서확인번호 (លេខបញ្ជាក់):</span>
                     <strong className="text-blue-700 font-mono text-[10.5px]">
-                      {formData.docVerificationNo && formData.docVerificationNo.join('').replace(/0/g, '').length > 0
-                        ? formData.docVerificationNo.join('-')
+                      {Array.isArray(extractedDraft.docVerificationNo) && extractedDraft.docVerificationNo.join('').replace(/0/g, '').length > 0
+                        ? extractedDraft.docVerificationNo.join('-')
                         : (isExtractingTopik ? 'កំពុងស្កេន...' : '-')}
                     </strong>
                   </div>
@@ -2258,8 +2234,8 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
                   <label className="block font-bold text-slate-700 mb-1">회차 (លើកទី/ជុំ):</label>
                   <input
                     type="text"
-                    value={formData.round}
-                    onChange={(e) => setFormData((p) => ({ ...p, round: e.target.value.replace(/[^0-9]/g, '') }))}
+                    value={extractedDraft.round || ''}
+                    onChange={(e) => setExtractedDraft((p) => ({ ...p, round: e.target.value.replace(/[^0-9]/g, '') }))}
                     placeholder="107"
                     className="w-full px-3 py-2 border border-slate-300 rounded-xl font-bold"
                   />
@@ -2268,8 +2244,8 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
                   <label className="block font-bold text-slate-700 mb-1">수험번호 (លេខកូដប្រឡង):</label>
                   <input
                     type="text"
-                    value={formData.examNumber}
-                    onChange={(e) => setFormData((p) => ({ ...p, examNumber: e.target.value }))}
+                    value={extractedDraft.examNumber || ''}
+                    onChange={(e) => setExtractedDraft((p) => ({ ...p, examNumber: e.target.value }))}
                     placeholder="0010197000017"
                     className="w-full px-3 py-2 border border-slate-300 rounded-xl font-mono font-bold"
                   />
@@ -2281,8 +2257,8 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
                   <label className="block font-bold text-slate-700 mb-1">시험일 (ថ្ងៃប្រឡង):</label>
                   <input
                     type="date"
-                    value={formData.examDate}
-                    onChange={(e) => setFormData((p) => ({ ...p, examDate: e.target.value }))}
+                    value={extractedDraft.examDate || ''}
+                    onChange={(e) => setExtractedDraft((p) => ({ ...p, examDate: e.target.value }))}
                     className="w-full px-3 py-2 border border-slate-300 rounded-xl font-bold"
                   />
                 </div>
@@ -2290,8 +2266,8 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
                   <label className="block font-bold text-slate-700 mb-1">성적유효기간 (សុពលភាព):</label>
                   <input
                     type="date"
-                    value={formData.validUntil}
-                    onChange={(e) => setFormData((p) => ({ ...p, validUntil: e.target.value }))}
+                    value={extractedDraft.validUntil || ''}
+                    onChange={(e) => setExtractedDraft((p) => ({ ...p, validUntil: e.target.value }))}
                     className="w-full px-3 py-2 border border-slate-300 rounded-xl font-bold text-rose-600"
                   />
                 </div>
@@ -2302,32 +2278,38 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
                   문서확인번호 (លេខបញ្ជាក់ឯកសារ ១៦ ខ្ទង់):
                 </label>
                 <div className="grid grid-cols-4 gap-1.5">
-                  {[0, 1, 2, 3].map((idx) => (
-                    <input
-                      key={idx}
-                      type="text"
-                      maxLength={4}
-                      value={formData.docVerificationNo[idx] || ''}
-                      onChange={(e) => {
-                        const val = e.target.value.replace(/[^0-9]/g, '');
-                        const next = [...formData.docVerificationNo];
-                        next[idx] = val;
-                        setFormData((p) => ({ ...p, docVerificationNo: next }));
-                      }}
-                      className="w-full text-center px-2 py-2 border border-slate-300 rounded-lg font-mono font-bold text-xs"
-                      placeholder="0000"
-                    />
-                  ))}
+                  {[0, 1, 2, 3].map((idx) => {
+                    const parts = Array.isArray(extractedDraft.docVerificationNo)
+                      ? extractedDraft.docVerificationNo
+                      : ['', '', '', ''];
+                    return (
+                      <input
+                        key={idx}
+                        type="text"
+                        maxLength={4}
+                        value={parts[idx] || ''}
+                        onChange={(e) => {
+                          const val = e.target.value.replace(/[^0-9]/g, '');
+                          const next = [parts[0] || '', parts[1] || '', parts[2] || '', parts[3] || ''];
+                          next[idx] = val;
+                          setExtractedDraft((p) => ({ ...p, docVerificationNo: next }));
+                        }}
+                        className="w-full text-center px-2 py-2 border border-slate-300 rounded-lg font-mono font-bold text-xs"
+                        placeholder="0000"
+                      />
+                    );
+                  })}
                 </div>
               </div>
 
               <div>
                 <label className="block font-bold text-slate-700 mb-1">등급 (កម្រិតពិន្ទុ):</label>
                 <select
-                  value={formData.grade}
-                  onChange={(e) => setFormData((p) => ({ ...p, grade: e.target.value }))}
+                  value={extractedDraft.grade || ''}
+                  onChange={(e) => setExtractedDraft((p) => ({ ...p, grade: e.target.value }))}
                   className="w-full px-3 py-2 border border-slate-300 rounded-xl font-bold"
                 >
+                  <option value="">-- Select Grade --</option>
                   <option value="1급">1급 (Level 1)</option>
                   <option value="2급">2급 (Level 2)</option>
                   <option value="3급">3급 (Level 3)</option>

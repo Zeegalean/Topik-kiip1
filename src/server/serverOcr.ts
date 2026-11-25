@@ -199,7 +199,7 @@ function findArcRegNumber(text: string): { reg1: string; reg2: string; matchInde
       matchLength: cleanMatch[0].length,
     };
   }
-  const tokenRegex = /\b([0-9OIlSB]{6})\s*[-–~._:/\s]*([1-8OIlSB][0-9OIlSB]{6})\b/g;
+  const tokenRegex = /\b([0-9OIlSB]{6})\s*[-–~._:/\s]+\s*([1-8OIlSB][0-9OIlSB]{6})\b/g;
   let m: RegExpExecArray | null;
   while ((m = tokenRegex.exec(text)) !== null) {
     const fix = (s: string) =>
@@ -552,17 +552,24 @@ function extractTopikDates(topikText: string): { examDate?: string; validUntil?:
 }
 
 export function parseStructuredTextCorpus(params: {
-  arcFrontText: string;
-  arcBackText: string;
-  topikText: string;
-  passportText: string;
+  arcFrontText?: string;
+  arcBackText?: string;
+  topikText?: string;
+  passportText?: string;
 }): Record<string, any> {
-  const { arcFrontText, arcBackText, topikText, passportText } = params;
+  const {
+    arcFrontText = '',
+    arcBackText = '',
+    topikText = '',
+    passportText = '',
+  } = params;
   const combined = `${arcFrontText}\n${arcBackText}\n${topikText}\n${passportText}`;
   const result: Record<string, any> = {};
 
+  const arcAndPassport = `${arcFrontText}\n${arcBackText}\n${passportText}`;
+
   // 1. Name
-  const regFound = findArcRegNumber(arcFrontText) || findArcRegNumber(combined);
+  const regFound = findArcRegNumber(arcFrontText) || findArcRegNumber(arcAndPassport);
   let adjacentName: string | null = null;
   if (regFound) {
     const sourceText = arcFrontText.includes(regFound.reg1) ? arcFrontText : combined;
@@ -703,10 +710,12 @@ export function parseStructuredTextCorpus(params: {
     }
   }
 
-  // 11. Dates (Exam Date 시험일/시행일 & Valid Until 성적유효기간)
-  const topikDates = extractTopikDates(topikText || combined);
-  if (topikDates.examDate) result.examDate = topikDates.examDate;
-  if (topikDates.validUntil) result.validUntil = topikDates.validUntil;
+  // 11. Dates (Exam Date 시험일/시행일 & Valid Until 성적유효기간) — only scan topikText so ARC Back 신고일 dates never leak
+  if (topikText && topikText.trim().length > 0) {
+    const topikDates = extractTopikDates(topikText);
+    if (topikDates.examDate) result.examDate = topikDates.examDate;
+    if (topikDates.validUntil) result.validUntil = topikDates.validUntil;
+  }
 
   // 12. Passport MRZ & Number
   const mrzLine2 = combined.match(/([A-Z0-9<]{9})\d[A-Z]{3}(\d{6})\d([MF<])(\d{6})/);

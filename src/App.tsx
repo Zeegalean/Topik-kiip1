@@ -11,9 +11,16 @@ import { Navbar } from './components/Navbar';
 import { AuthModal } from './components/AuthModal';
 import { TopikKiipGuide } from './components/TopikKiipGuide';
 import { Step1Upload } from './components/Step1Upload';
+import { Step2OcrReview } from './components/Step2OcrReview';
 import { Step2FormTemplate } from './components/Step2FormTemplate';
 import { Step3PdfPreview } from './components/Step3PdfPreview';
 import { Step4EmailSender } from './components/Step4EmailSender';
+import {
+  ExtractedDocumentData,
+  runFullDocumentOcrPipeline,
+  mergeExtractedIntoFormData,
+  formDataToExtractedDraft,
+} from './utils/clientOcrEngine';
 import { BackgroundSettingsModal } from './components/BackgroundSettingsModal';
 import { PaymentModal } from './components/PaymentModal';
 import { SocinetNoticeModal } from './components/SocinetNoticeModal';
@@ -160,6 +167,14 @@ export default function App() {
   });
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
 
+  // Staged OCR Draft & Verification state (between Step 1 Upload and Step 3 Form)
+  const [extractedOcrDraft, setExtractedOcrDraft] = useState<ExtractedDocumentData>({});
+  const [ocrInitialSnapshot, setOcrInitialSnapshot] = useState<ExtractedDocumentData | null>(null);
+  const [ocrRawText, setOcrRawText] = useState<string>('');
+  const [ocrModel, setOcrModel] = useState<string>('');
+  const [isRescanningOcr, setIsRescanningOcr] = useState<boolean>(false);
+  const [hasConfirmedOcrReview, setHasConfirmedOcrReview] = useState<boolean>(false);
+
   // Payment & Watermark Unlock State (Persisted in localStorage)
   const [isPaid, setIsPaid] = useState<boolean>(() => {
     try {
@@ -225,6 +240,12 @@ export default function App() {
     });
 
     setFormData(SAMPLE_FORM_DATA);
+    const sampleDraft = formDataToExtractedDraft(SAMPLE_FORM_DATA);
+    setExtractedOcrDraft(sampleDraft);
+    setOcrInitialSnapshot(sampleDraft);
+    setOcrModel('sample-preset');
+    setOcrRawText('');
+    setHasConfirmedOcrReview(false);
     setActiveTab('flow');
   };
 
@@ -235,7 +256,41 @@ export default function App() {
       handleLoadSample();
     }
     setActiveTab('flow');
+    setCurrentStep(4);
+  };
+
+  const handleOcrCompleted = (data: ExtractedDocumentData, rawTextPreview: string, model: string) => {
+    setExtractedOcrDraft((prev) => ({ ...prev, ...data }));
+    setOcrInitialSnapshot((prev) => ({ ...(prev || {}), ...data }));
+    if (rawTextPreview) setOcrRawText(rawTextPreview);
+    if (model) setOcrModel(model);
+    setHasConfirmedOcrReview(false);
+  };
+
+  const handleRescanOcrFromReview = async () => {
+    setIsRescanningOcr(true);
+    try {
+      const res = await runFullDocumentOcrPipeline({
+        arcFront: docs.arcFront,
+        arcBack: docs.arcBack,
+        topikCert: docs.topikCertList[0]?.dataUrl || null,
+        passport: docs.passportList[0]?.dataUrl || null,
+      });
+      setExtractedOcrDraft((prev) => ({ ...prev, ...res.data }));
+      setOcrInitialSnapshot((prev) => ({ ...(prev || {}), ...res.data }));
+      if (res.rawTextPreview) setOcrRawText(res.rawTextPreview);
+      if (res.model) setOcrModel(res.model);
+    } finally {
+      setIsRescanningOcr(false);
+    }
+  };
+
+  const handleConfirmOcrInjection = (confirmedDraft: ExtractedDocumentData) => {
+    setExtractedOcrDraft(confirmedDraft);
+    setFormData((prev) => mergeExtractedIntoFormData(prev, confirmedDraft, true));
+    setHasConfirmedOcrReview(true);
     setCurrentStep(3);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const handleReset = () => {
@@ -258,6 +313,11 @@ export default function App() {
         threshold: 55,
       });
       setFormData(INITIAL_FORM_DATA);
+      setExtractedOcrDraft({});
+      setOcrInitialSnapshot(null);
+      setOcrRawText('');
+      setOcrModel('');
+      setHasConfirmedOcrReview(false);
       setCurrentStep(1);
     }
   };
@@ -302,21 +362,50 @@ export default function App() {
         setCurrentStep(isStep1Ready ? 2 : 1);
         window.scrollTo({ top: 0, behavior: 'smooth' });
         break;
-      case 'step3':
-        setActiveTab('flow');
-        setCurrentStep(isStep1Ready ? 3 : 1);
+    case 'step3':
+        if (isStep1Ready) {
+          if (currentStep === 2 || (!hasConfirmedOcrReview && Object.keys(extractedOcrDraft).length > 0)) {
+            setFormData((prev) => mergeExtractedIntoFormData(prev, extractedOcrDraft, true));
+            setHasConfirmedOcrReview(true);
+          }
+          setActiveTab('flow');
+          setCurrentStep(3);
+        } else {
+          setActiveTab('flow');
+          setCurrentStep(1);
+        }
         window.scrollTo({ top: 0, behavior: 'smooth' });
         break;
       case 'step4':
+        if (isStep1Ready) {
+          if (currentStep === 2 || (!hasConfirmedOcrReview && Object.keys(extractedOcrDraft).length > 0)) {
+            setFormData((prev) => mergeExtractedIntoFormData(prev, extractedOcrDraft, true));
+            setHasConfirmedOcrReview(true);
+          }
+          setActiveTab('flow');
+          setCurrentStep(4);
+        } else {
+          setActiveTab('flow');
+          setCurrentStep(1);
+        }
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+        break;
+      case 'step5':
         if (!isStep1Ready) {
           setActiveTab('flow');
           setCurrentStep(1);
-        } else if (!isPaid) {
-          setPendingStepAfterPayment(4);
-          setIsPaymentModalOpen(true);
         } else {
-          setActiveTab('flow');
-          setCurrentStep(4);
+          if (currentStep === 2 || (!hasConfirmedOcrReview && Object.keys(extractedOcrDraft).length > 0)) {
+            setFormData((prev) => mergeExtractedIntoFormData(prev, extractedOcrDraft, true));
+            setHasConfirmedOcrReview(true);
+          }
+          if (!isPaid) {
+            setPendingStepAfterPayment(5);
+            setIsPaymentModalOpen(true);
+          } else {
+            setActiveTab('flow');
+            setCurrentStep(5);
+          }
         }
         window.scrollTo({ top: 0, behavior: 'smooth' });
         break;
@@ -360,8 +449,12 @@ export default function App() {
             if (s > 1 && !isStep1Ready) {
               return;
             }
-            if (s === 4 && !isPaid) {
-              setPendingStepAfterPayment(4);
+            if (s >= 3 && (currentStep === 2 || (!hasConfirmedOcrReview && Object.keys(extractedOcrDraft).length > 0))) {
+              setFormData((prev) => mergeExtractedIntoFormData(prev, extractedOcrDraft, true));
+              setHasConfirmedOcrReview(true);
+            }
+            if (s === 5 && !isPaid) {
+              setPendingStepAfterPayment(5);
               setIsPaymentModalOpen(true);
               return;
             }
@@ -426,6 +519,9 @@ export default function App() {
                     setDocs={setDocs}
                     formData={formData}
                     setFormData={setFormData}
+                    extractedDraft={extractedOcrDraft}
+                    setExtractedDraft={setExtractedOcrDraft}
+                    onOcrCompleted={handleOcrCompleted}
                     lang={lang}
                     onNext={() => setCurrentStep(2)}
                     onOpenSocinetNotice={() => setIsSocinetNoticeOpen(true)}
@@ -435,6 +531,22 @@ export default function App() {
                 )}
 
                 {currentStep === 2 && (
+                  <Step2OcrReview
+                    lang={lang}
+                    docs={docs}
+                    draft={extractedOcrDraft}
+                    setDraft={setExtractedOcrDraft}
+                    initialSnapshot={ocrInitialSnapshot}
+                    rawTextPreview={ocrRawText}
+                    ocrModel={ocrModel}
+                    isScanning={isRescanningOcr}
+                    onRescanOcr={handleRescanOcrFromReview}
+                    onBack={() => setCurrentStep(1)}
+                    onConfirmInject={handleConfirmOcrInjection}
+                  />
+                )}
+
+                {currentStep === 3 && (
                   <Step2FormTemplate
                     formData={formData}
                     setFormData={setFormData}
@@ -443,16 +555,17 @@ export default function App() {
                     sigSettings={sigSettings}
                     setSigSettings={setSigSettings}
                     lang={lang}
-                    onNext={() => setCurrentStep(3)}
-                    onPrev={() => setCurrentStep(1)}
+                    onNext={() => setCurrentStep(4)}
+                    onPrev={() => setCurrentStep(2)}
                     formRef={formRef}
                     isPaid={isPaid}
                     setIsPaid={setIsPaid}
                     onOpenPayment={() => setIsPaymentModalOpen(true)}
+                    hasConfirmedOcrReview={hasConfirmedOcrReview}
                   />
                 )}
 
-                {currentStep === 3 && (
+                {currentStep === 4 && (
                   <Step3PdfPreview
                     formData={formData}
                     setFormData={setFormData}
@@ -463,13 +576,13 @@ export default function App() {
                     lang={lang}
                     onNext={() => {
                       if (!isPaid) {
-                        setPendingStepAfterPayment(4);
+                        setPendingStepAfterPayment(5);
                         setIsPaymentModalOpen(true);
                       } else {
-                        setCurrentStep(4);
+                        setCurrentStep(5);
                       }
                     }}
-                    onPrev={() => setCurrentStep(2)}
+                    onPrev={() => setCurrentStep(3)}
                     formRef={formRef}
                     isPaid={isPaid}
                     setIsPaid={setIsPaid}
@@ -480,11 +593,11 @@ export default function App() {
                   />
                 )}
 
-                {currentStep === 4 && (
+                {currentStep === 5 && (
                   <Step4EmailSender
                     formData={formData}
                     lang={lang}
-                    onPrev={() => setCurrentStep(3)}
+                    onPrev={() => setCurrentStep(4)}
                     onRestart={() => {
                       setCurrentStep(1);
                     }}
@@ -510,8 +623,8 @@ export default function App() {
         onPaymentSuccess={() => {
           setIsPaid(true);
           setIsPaymentModalOpen(false);
-          if (pendingStepAfterPayment === 4) {
-            setCurrentStep(4);
+          if (pendingStepAfterPayment === 5) {
+            setCurrentStep(5);
             setPendingStepAfterPayment(null);
           }
         }}

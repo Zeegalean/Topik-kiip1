@@ -37,7 +37,11 @@ import {
   type AdminAccountRole,
   type PublicUserRecord,
 } from './src/server/redeemDb.ts';
-import { runServerSideOcrFallback } from './src/server/serverOcr.ts';
+import {
+  runServerSideOcrFallback,
+  parseStructuredTextCorpus,
+  parseFlexibleDate,
+} from './src/server/serverOcr.ts';
 
 dotenv.config();
 dns.setDefaultResultOrder('ipv4first');
@@ -412,11 +416,12 @@ function sanitizeExtractedData(raw: any): Record<string, any> {
     }
   }
 
-  // 5. Round (preserve extracted number)
+  // 5. Round (preserve extracted number 1..300)
   if (raw?.round) {
     const rawRound = String(raw.round).replace(/[^0-9]/g, '');
-    if (rawRound && !/^0+$/.test(rawRound)) {
-      result.round = rawRound;
+    const roundNum = parseInt(rawRound, 10);
+    if (!Number.isNaN(roundNum) && roundNum >= 1 && roundNum <= 300) {
+      result.round = String(roundNum);
     }
   }
 
@@ -462,12 +467,16 @@ function sanitizeExtractedData(raw: any): Record<string, any> {
     result.address = String(raw.address).trim();
   }
   if (raw?.examDate && !String(raw.examDate).startsWith('0000')) {
-    const dm = String(raw.examDate).match(/(\d{4})[.\-\s년/]+(\d{1,2})[.\-\s월/]+(\d{1,2})/);
-    if (dm) result.examDate = `${dm[1]}-${dm[2].padStart(2, '0')}-${dm[3].padStart(2, '0')}`;
+    const parsedExam = parseFlexibleDate(String(raw.examDate), 2012, 2035);
+    if (parsedExam) result.examDate = parsedExam;
   }
   if (raw?.validUntil && !String(raw.validUntil).startsWith('0000')) {
-    const vm = String(raw.validUntil).match(/(\d{4})[.\-\s년/]+(\d{1,2})[.\-\s월/]+(\d{1,2})/);
-    if (vm) result.validUntil = `${vm[1]}-${vm[2].padStart(2, '0')}-${vm[3].padStart(2, '0')}`;
+    const rawValid = String(raw.validUntil).trim();
+    const endPart = rawValid.includes('~') || rawValid.includes('～')
+      ? (rawValid.split(/[~～]/).pop() || rawValid)
+      : rawValid;
+    const parsedValid = parseFlexibleDate(endPart, 2014, 2040) || parseFlexibleDate(rawValid, 2014, 2040);
+    if (parsedValid) result.validUntil = parsedValid;
   }
 
   // 9. Passport Number (여권번호 / លេខលិខិតឆ្លងដែន)
@@ -479,12 +488,12 @@ function sanitizeExtractedData(raw: any): Record<string, any> {
   }
 
   // 10. Passport Expiry Date (여권 유효기간 / ថ្ងៃខែផុតកំណត់)
-  if (raw?.passportExpiry) {
+  if (raw?.passportExpiry && !String(raw.passportExpiry).startsWith('0000')) {
     const rawExp = String(raw.passportExpiry).trim();
-    const dateMatch = rawExp.match(/(\d{4})[.\-\s년/]+(\d{1,2})[.\-\s월/]+(\d{1,2})/);
-    if (dateMatch) {
-      result.passportExpiry = `${dateMatch[1]}-${dateMatch[2].padStart(2, "0")}-${dateMatch[3].padStart(2, "0")}`;
-    } else if (rawExp && !rawExp.startsWith('0000')) {
+    const parsedExp = parseFlexibleDate(rawExp, 2015, 2045);
+    if (parsedExp) {
+      result.passportExpiry = parsedExp;
+    } else if (rawExp) {
       result.passportExpiry = rawExp;
     }
   }
@@ -641,9 +650,9 @@ function extractFromSvgOrText(textCorpus: string): Record<string, any> {
     result.examNumber = examNumMatch[1];
   }
 
-  // Exam date: YYYY. MM. DD or YYYY-MM-DD or YYYY년 MM월 DD일
+  // Exam date: YYYY. MM. DD or YYYY-MM-DD or YYYY년 MM월 DD일 (including 시행일/응시일)
   const examDateMatch =
-    textCorpus.match(/(?:시\s*험\s*일(?:\s*자)?|Test\s*Date)[^\d]*(\d{4})[.\-\s년]+(\d{1,2})[.\-\s월]+(\d{1,2})/i) ||
+    textCorpus.match(/(?:시\s*험\s*일(?:\s*자|\s*시)?|시\s*행\s*일(?:\s*자)?|응\s*시\s*일(?:\s*자)?|Test\s*Date|Exam\s*Date)[\s\S]{0,40}?(\d{4})[.\-\s년/]+(\d{1,2})[.\-\s월/]+(\d{1,2})/i) ||
     textCorpus.match(/(\d{4})[.\-\s]+(\d{2})[.\-\s]+(\d{2})\s*\([제\s]*\d+회/);
   if (examDateMatch) {
     const y = examDateMatch[1];
@@ -652,18 +661,22 @@ function extractFromSvgOrText(textCorpus: string): Record<string, any> {
     result.examDate = `${y}-${m}-${d}`;
   }
 
-  // Round: 제 107 회 or 107회 or 회    차: 107 (handles arbitrary spacing in 회    차)
+  // Round: 제 107 회 or 107회 or 시행회차/회차: 107
   const roundMatch =
     textCorpus.match(/(?:제\s*)?(\d{1,3})\s*회/i) ||
-    textCorpus.match(/(?:회\s*차|회\s{1,8}차|Test\s*Held|Round)[^\d]*(\d{1,3})/i) ||
-    textCorpus.match(/(\d{2,3})th/i);
+    textCorpus.match(/(?:시\s*행\s*회\s*차|시\s*험\s*회\s*차|회\s*차|Test\s*Held|Round)[\s\S]{0,30}?(\d{1,3})/i) ||
+    textCorpus.match(/(\d{2,3})(?:st|nd|rd|th)/i);
   if (roundMatch) {
     result.round = roundMatch[1];
   }
 
-  // Valid until: 2028. 08. 12 or 2028-08-12
+  // Valid until: 2028. 08. 12 or START ~ END range
+  const validRangeMatch = textCorpus.match(
+    /(?:성\s*적\s*유\s*효\s*기\s*간|유\s*효\s*기\s*간|Valid\s*(?:Until|Period))[\s\S]{0,60}?[~～]\s*(\d{4})[.\-\s년/]+(\d{1,2})[.\-\s월/]+(\d{1,2})/i
+  );
   const validMatch =
-    textCorpus.match(/(?:성\s*적\s*유\s*효\s*기\s*간|유\s*효\s*기\s*간|Valid\s*Until)[^\d]*(\d{4})[.\-\s년]+(\d{1,2})[.\-\s월]+(\d{1,2})/i);
+    validRangeMatch ||
+    textCorpus.match(/(?:성\s*적\s*유\s*효\s*기\s*간|유\s*효\s*기\s*간|Valid\s*Until)[\s\S]{0,40}?(\d{4})[.\-\s년/]+(\d{1,2})[.\-\s월/]+(\d{1,2})/i);
   if (validMatch) {
     const y = validMatch[1];
     const m = validMatch[2].padStart(2, '0');
@@ -850,22 +863,35 @@ CRITICAL INSTRUCTIONS FOR ALIEN REGISTRATION CARD (외국인등록증) & PASSPOR
 4. gender: "남" (Male) or "여" (Female).
 5. nationality: Country/region name in English as printed on the card or passport.
 6. visaStatus: 체류자격 Visa code if visible on the card.
-7. address: Latest Korean residence address on the back of the card (체류지), choosing the row with the most recent report date (신고일) or bottom-most entry.
+7. address: Latest Korean residence address on the back of the card (체류지 / 체류지 변경사항 table). Read EVERY row carefully (including road name 도로명, building number 건물번호, and multi-line wrapped 동/호 details), ignore the printed fine notice ("새로운 체류지... 14일 이내..."), and return ONLY the row with the MOST RECENT 신고일 (Report Date) or bottom-most entered row.
 8. passportNo: Passport Number (여권번호 / Passport No.) if a passport is uploaded.
 9. passportExpiry: Passport Date of Expiry formatted as YYYY-MM-DD.
 
 CRITICAL INSTRUCTIONS FOR TOPIK SCORE CERTIFICATE (한국어능력시험 성적증명서):
 1. docVerificationNo: 문서확인번호 (16 digits at top-right header, returned as array of 4 strings of 4 digits each).
 2. examNumber: 수험번호 (10 to 16 numeric digits in the table).
-3. round: 회차 numeric round only.
-4. examDate: 시험일자 formatted as YYYY-MM-DD.
-5. validUntil: 성적유효기간 formatted as YYYY-MM-DD.
+3. round: 회 / 회차 / 시행회차 numeric digits ONLY (e.g. from "제 93 회", "107회", or "The 93rd Test" extract "93" or "107").
+4. examDate: 시험일 / 시행일 / Test Date formatted STRICTLY as YYYY-MM-DD (NEVER return 생년월일 Birth Date or 발급일 Issue Date).
+5. validUntil: 성적유효기간 / Valid Until formatted STRICTLY as YYYY-MM-DD. If printed as a range like "2024.05.30 ~ 2026.05.30", ALWAYS return the END/EXPIRATION date ("2026-05-30").
 6. grade: 등급 (1급, 2급, 3급, 4급, 5급, or 6급).
 
 Return ONLY structured JSON according to the schema.
 `;
 
     parts.push({ text: extractionPrompt });
+
+    // Also parse digital PDF texts upfront as a structured safety net
+    const parsedFromPdfTexts =
+      pdfTexts && typeof pdfTexts === 'object'
+        ? sanitizeExtractedData(
+            parseStructuredTextCorpus({
+              arcFrontText: String(pdfTexts.arcFront || ''),
+              arcBackText: String(pdfTexts.arcBack || ''),
+              topikText: String(pdfTexts.topikCert || ''),
+              passportText: String(pdfTexts.passport || ''),
+            })
+          )
+        : {};
 
     // Multi-model resilience using supported @google/genai models: gemini-4-hydrogen primary, gemini-3.1-flash-lite fallback
     const candidateModels = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'] as const;
@@ -893,9 +919,9 @@ Return ONLY structured JSON according to the schema.
           description: "문서확인번호: 4 groups of 4 digits if visible on TOPIK certificate",
         },
         examNumber: { type: Type.STRING, description: "수험번호 digits if visible on TOPIK certificate" },
-        examDate: { type: Type.STRING, description: "YYYY-MM-DD" },
-        round: { type: Type.STRING, description: "회차 numeric only" },
-        validUntil: { type: Type.STRING, description: "YYYY-MM-DD" },
+        examDate: { type: Type.STRING, description: "TOPIK 시험일 / 시행일 / Test Date in YYYY-MM-DD format (not birth date)" },
+        round: { type: Type.STRING, description: "TOPIK 제XX회 / 시행회차 numeric digits only (e.g. 93 or 107)" },
+        validUntil: { type: Type.STRING, description: "TOPIK 성적유효기간 / Valid Until END date in YYYY-MM-DD format" },
         grade: { type: Type.STRING, description: "등급 (1급~6급)" },
         passportNo: { type: Type.STRING, description: "Passport Number if visible" },
         passportExpiry: { type: Type.STRING, description: "Passport Expiry Date YYYY-MM-DD if visible" },
@@ -956,13 +982,47 @@ Return ONLY structured JSON according to the schema.
       console.log('[OCR] GEMINI_API_KEY not configured, falling back to structural/client OCR.');
     }
 
+    // Merge Gemini output with PDF digital text parse + raw preview
+    const pdfRawPreview = pdfTexts && typeof pdfTexts === 'object'
+      ? Object.entries(pdfTexts)
+          .filter(([, v]) => typeof v === 'string' && v.trim())
+          .map(([k, v]) => `[${k} PDF Text]\n${String(v).trim()}`)
+          .join('\n\n')
+          .slice(0, 2000)
+      : '';
+
     if (extractedData) {
-      const sanitized = sanitizeExtractedData(extractedData);
-      if (Object.keys(sanitized).length > 0) {
+      let merged = { ...parsedFromPdfTexts, ...sanitizeExtractedData(extractedData) };
+      const needsBackFill = Boolean(arcBack && !merged.address);
+      const needsTopikFill = Boolean(
+        firstTopikUrl &&
+          (!merged.examDate || !merged.validUntil || !merged.round || !merged.examNumber || !merged.grade)
+      );
+      let rawTextPreview = pdfRawPreview;
+
+      if (needsBackFill || needsTopikFill) {
+        try {
+          const targetedOcr = await runServerSideOcrFallback({
+            arcBack: needsBackFill ? arcBack : null,
+            topikCert: needsTopikFill ? firstTopikUrl : null,
+            pdfTexts: pdfTexts && typeof pdfTexts === 'object' ? pdfTexts : undefined,
+          });
+          const sanitizedTargeted = sanitizeExtractedData(targetedOcr.data);
+          merged = { ...sanitizedTargeted, ...merged };
+          if (targetedOcr.rawTextPreview) {
+            rawTextPreview = [rawTextPreview, targetedOcr.rawTextPreview].filter(Boolean).join('\n\n').slice(0, 3500);
+          }
+        } catch (gapErr) {
+          console.warn('[OCR] Targeted gap-fill notice:', gapErr);
+        }
+      }
+
+      if (Object.keys(merged).length > 0) {
         return res.json({
           success: true,
-          data: sanitized,
+          data: merged,
           model: successfulModel,
+          ...(rawTextPreview ? { rawTextPreview } : {}),
         });
       }
     }
@@ -977,14 +1037,14 @@ Return ONLY structured JSON according to the schema.
         pdfTexts: pdfTexts && typeof pdfTexts === 'object' ? pdfTexts : undefined,
       });
 
-      const sanitizedServerOcr = sanitizeExtractedData(ocrFallback.data);
+      const sanitizedServerOcr = { ...parsedFromPdfTexts, ...sanitizeExtractedData(ocrFallback.data) };
       if (Object.keys(sanitizedServerOcr).length > 0) {
         console.log('[OCR] Successfully extracted document fields via server-side Tesseract/PDF parser.');
         return res.json({
           success: true,
           data: sanitizedServerOcr,
           model: 'server-ocr-tesseract',
-          rawTextPreview: ocrFallback.rawTextPreview,
+          rawTextPreview: ocrFallback.rawTextPreview || pdfRawPreview,
         });
       }
 
@@ -2663,36 +2723,38 @@ function buildWebsiteGuideSystemInstruction(ctx: {
     '- Keep responses concise, structured, friendly, and directly actionable (short paragraphs or crisp bullet points).',
     '',
     'LIVE USER SESSION CONTEXT:',
-    `- Current View: ${ctx.activeTab === 'about' ? 'About Me & Contact page' : ctx.activeTab === 'guide' ? 'TOPIK-to-KIIP Official Guide tab' : `Application Workflow — Step ${ctx.currentStep} of 4`}`,
-    `- Step 1 Mandatory Checklist Ready: ${ctx.isStep1Ready ? 'Yes (Steps 2 & 3 unlocked)' : 'No'}`,
+    `- Current View: ${ctx.activeTab === 'about' ? 'About Me & Contact page' : ctx.activeTab === 'guide' ? 'TOPIK-to-KIIP Official Guide tab' : `Application Workflow — Step ${ctx.currentStep} of 5`}`,
+    `- Step 1 Mandatory Checklist Ready: ${ctx.isStep1Ready ? 'Yes (Steps 2–4 unlocked)' : 'No'}`,
     `- Missing Step 1 Items: ${missingSummary}`,
-    `- PDF/Step 4 Unlock Status: ${ctx.isPaid ? 'Unlocked (Watermark removed & Step 4 enabled)' : 'Locked (Requires Korea Bank transfer receipt, Telegram bot code, or Redeem/Promo code in Step 3)'}`,
+    `- PDF/Step 5 Unlock Status: ${ctx.isPaid ? 'Unlocked (Watermark removed & Step 5 enabled)' : 'Locked (Requires Korea Bank transfer receipt, Telegram bot code, or Redeem/Promo code in Step 4)'}`,
     '',
     'ACCURATE WEBSITE MAP & WORKFLOW:',
     '1. Guide Tab (TOPIK → KIIP Linkage Guide): Explains eligibility, official TOPIK-to-KIIP level conversion (TOPIK Level 2 → KIIP Level 3, TOPIK Level 3 → KIIP Level 4, TOPIK Level 4 → KIIP Level 5 Basic, TOPIK Level 5–6 → KIIP Level 5 exam track), validity rules, and submission tips.',
-    '2. Step 1 — Upload Documents & Info (Mandatory 6 items to unlock Steps 2–4):',
-    '   (1) ARC Front & Back (외국인등록증 앞·뒷면) — supports automatic AI OCR extraction of Name, ARC number, Visa, and Nationality.',
-    '   (2) TOPIK Score Certificate (성적증명서) — supports automatic AI OCR extraction of Exam number, Score, Level, and Verification number.',
+    '2. Step 1 — Upload Documents & Info (Mandatory 6 items to unlock Steps 2–5):',
+    '   (1) ARC Front & Back (외국인등록증 앞·뒷면) — supports automatic AI OCR extraction of Name, ARC number, Visa, Nationality, and Residence Address (체류지).',
+    '   (2) TOPIK Score Certificate (성적증명서) — supports automatic AI OCR extraction of Exam number, Exam date, Round (회), Validity date, Grade, and Verification number.',
     '   (3) Passport Copy (여권 사본).',
     '   (4) Signature (서명) — draw directly on screen or upload photo with automatic background removal.',
     '   (5) Socinet Account ID & Password (사회통합정보망 아이디/비밀번호 — required by immigration officers to link your TOPIK score on socinet.go.kr; note: must already have a registered Socinet account).',
     '   (6) Korean Phone Number (전화번호).',
     '   Tip: Users who just want to preview how the portal works can click "Load Sample" to populate demo documents in 1 click.',
-    '3. Step 2 — Official Application Form & Signature Placement: Review/edit the auto-filled Ministry of Justice KIIP-TOPIK linkage application form (사회통합프로그램 연계신청서) and drag/resize the signature inside the signature box.',
-    '4. Step 3 — Merged PDF Preview & Unlock: Combines the filled application form + ARC + Passport + TOPIK certificate into one print-ready official PDF. To remove the watermark and unlock Step 4, users can:',
+    '3. Step 2 — Verify & Edit OCR Extracted Results: Lets users compare uploaded document previews side-by-side with all OCR-extracted text fields (ARC 체류지 address, TOPIK 시험일/회/성적유효기간/등급/수험번호/문서확인번호, Passport, and Identity) and edit or re-scan any field before confirming injection into the official form.',
+    '4. Step 3 — Official Application Form & Signature Placement: Review/edit the Ministry of Justice KIIP-TOPIK linkage application form (사회통합프로그램 연계신청서) populated from Step 2 and drag/resize the signature inside the signature box.',
+    '5. Step 4 — Merged PDF Preview & Unlock: Combines the filled application form + ARC + Passport + TOPIK certificate into one print-ready official PDF. To remove the watermark and unlock Step 5, users can:',
     '   - Transfer via Korea Bank and upload the transfer receipt screenshot for instant AI verification & auto-unlock,',
     '   - Use the Telegram bot auto-unlock receipt flow, or',
     '   - Enter a valid Redeem Code / Center Promo Code.',
-    '5. Step 4 — Immigration Center Email Submission: Matches the applicant region/address to the jurisdiction Immigration / KIIP Operation Center email (출입국·외국인청 / 사회통합운영기관) and prepares the email with ready-to-paste subject & body so the user can attach their merged PDF and send.',
-    '6. About Me & Contact Page: Introduces the portal creator (Eang Veasna), explains the 1-minute private PDF workflow, and provides direct channels to send payment screenshots for fast Unlock / Redeem Code delivery: Facebook Page (https://www.facebook.com/eang.veasna.667/) and KakaoTalk ID: 9111veasna.',
-    '7. Extra Portal Tools: 50+ Language Selector in the top bar, Socinet Account Notice popup, Background Wallpaper Settings, and automatic draft saving.',
+    '6. Step 5 — Immigration Center Email Submission: Matches the applicant region/address to the jurisdiction Immigration / KIIP Operation Center email (출입국·외국인청 / 사회통합운영기관) and prepares the email with ready-to-paste subject & body so the user can attach their merged PDF and send.',
+    '7. About Me & Contact Page: Introduces the portal creator (Eang Veasna), explains the 1-minute private PDF workflow, and provides direct channels to send payment screenshots for fast Unlock / Redeem Code delivery: Facebook Page (https://www.facebook.com/eang.veasna.667/) and KakaoTalk ID: 9111veasna.',
+    '8. Extra Portal Tools: 50+ Language Selector in the top bar, Socinet Account Notice popup, Background Wallpaper Settings, and automatic draft saving.',
     '',
     'INTERACTIVE NAVIGATION SHORTCUTS:',
     'When guiding the user to open a specific step or dialog on this website, you may append up to 2 action tags on a new line at the very end of your reply using ONLY these exact tokens:',
     '  [[NAV:step1]] — Jump to Step 1 (Upload Documents)',
-    '  [[NAV:step2]] — Jump to Step 2 (Application Form)',
-    '  [[NAV:step3]] — Jump to Step 3 (PDF Preview & Download)',
-    '  [[NAV:step4]] — Jump to Step 4 (Send Email to Immigration)',
+    '  [[NAV:step2]] — Jump to Step 2 (Verify & Edit OCR Data)',
+    '  [[NAV:step3]] — Jump to Step 3 (Official Application Form)',
+    '  [[NAV:step4]] — Jump to Step 4 (PDF Preview & Download)',
+    '  [[NAV:step5]] — Jump to Step 5 (Send Email to Immigration)',
     '  [[NAV:guide]] — Open TOPIK → KIIP Official Guide tab',
     '  [[NAV:about]] — Open About Me & Contact page (Facebook / KakaoTalk)',
     '  [[NAV:socinet]] — Open Socinet ID/Password Notice',

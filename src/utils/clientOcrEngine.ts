@@ -64,8 +64,8 @@ const NON_NAME_WORDS = new Set([
  */
 export async function compressImageForApi(
   dataUrl: string | null | undefined,
-  maxDim: number = 1200,
-  quality: number = 0.78
+  maxDim: number = 1800,
+  quality: number = 0.88
 ): Promise<string | null | undefined> {
   if (!dataUrl || typeof dataUrl !== 'string') return dataUrl;
   if (dataUrl.startsWith('data:image/svg+xml') || isPdfDataUrl(dataUrl)) {
@@ -347,7 +347,129 @@ function normalizeKoreanAdminSpacing(text: string): string {
     .replace(/광\s*주\s*광\s*역\s*시/g, '광주광역시')
     .replace(/대\s*전\s*광\s*역\s*시/g, '대전광역시')
     .replace(/울\s*산\s*광\s*역\s*시/g, '울산광역시')
-    .replace(/세\s*종\s*특\s*별\s*자\s*치\s*시/g, '세종특별자치시');
+    .replace(/세\s*종\s*특\s*별\s*자\s*치\s*시/g, '세종특별자치시')
+    .replace(/번\s+길/g, '번길')
+    .replace(/체\s*류\s*지/g, '체류지');
+}
+
+const MONTH_NAME_MAP: Record<string, string> = {
+  jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
+  jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12',
+};
+
+function isValidYmd(y: number, m: number, d: number, minYear = 1920, maxYear = 2045): boolean {
+  return y >= minYear && y <= maxYear && m >= 1 && m <= 12 && d >= 1 && d <= 31;
+}
+
+export function parseFlexibleDateClient(raw: string, minYear = 1920, maxYear = 2045): string | null {
+  if (!raw) return null;
+  const s = String(raw).trim();
+
+  const ymd = s.match(/(\d{4})\s*[.\-년/]\s*(\d{1,2})\s*[.\-월/]\s*(\d{1,2})/);
+  if (ymd) {
+    const y = parseInt(ymd[1], 10);
+    const m = parseInt(ymd[2], 10);
+    const d = parseInt(ymd[3], 10);
+    if (isValidYmd(y, m, d, minYear, maxYear)) {
+      return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    }
+  }
+
+  const ymdSpace = s.match(/\b(\d{4})\s+(\d{1,2})\s+(\d{1,2})\b/);
+  if (ymdSpace) {
+    const y = parseInt(ymdSpace[1], 10);
+    const m = parseInt(ymdSpace[2], 10);
+    const d = parseInt(ymdSpace[3], 10);
+    if (isValidYmd(y, m, d, minYear, maxYear)) {
+      return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    }
+  }
+
+  const dmyEn = s.match(/\b(\d{1,2})\s+([A-Za-z]{3,9})[.,]?\s+(\d{4})\b/);
+  if (dmyEn) {
+    const mm = MONTH_NAME_MAP[dmyEn[2].toLowerCase().slice(0, 3)];
+    const y = parseInt(dmyEn[3], 10);
+    const d = parseInt(dmyEn[1], 10);
+    if (mm && isValidYmd(y, parseInt(mm, 10), d, minYear, maxYear)) {
+      return `${y}-${mm}-${String(d).padStart(2, '0')}`;
+    }
+  }
+
+  const mdyEn = s.match(/\b([A-Za-z]{3,9})[.,]?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b/);
+  if (mdyEn) {
+    const mm = MONTH_NAME_MAP[mdyEn[1].toLowerCase().slice(0, 3)];
+    const y = parseInt(mdyEn[3], 10);
+    const d = parseInt(mdyEn[2], 10);
+    if (mm && isValidYmd(y, parseInt(mm, 10), d, minYear, maxYear)) {
+      return `${y}-${mm}-${String(d).padStart(2, '0')}`;
+    }
+  }
+
+  const compact = s.match(/\b((?:19|20)\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\b/);
+  if (compact) {
+    const y = parseInt(compact[1], 10);
+    const m = parseInt(compact[2], 10);
+    const d = parseInt(compact[3], 10);
+    if (isValidYmd(y, m, d, minYear, maxYear)) {
+      return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    }
+  }
+
+  return null;
+}
+
+function extractAllDatesInTextClient(
+  text: string,
+  minYear = 2010,
+  maxYear = 2040
+): { date: string; ts: number; index: number; endIndex: number }[] {
+  if (!text) return [];
+  const found: { date: string; ts: number; index: number; endIndex: number }[] = [];
+  const patterns = [
+    /(\d{4})\s*[.\-년/]\s*(\d{1,2})\s*[.\-월/]\s*(\d{1,2})(?:\s*일)?/g,
+    /\b(\d{1,2})\s+([A-Za-z]{3,9})[.,]?\s+(\d{4})\b/g,
+    /\b([A-Za-z]{3,9})[.,]?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b/g,
+    /\b((?:19|20)\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\b/g,
+  ];
+
+  for (const regex of patterns) {
+    let m: RegExpExecArray | null;
+    while ((m = regex.exec(text)) !== null) {
+      const parsed = parseFlexibleDateClient(m[0], minYear, maxYear);
+      if (parsed) {
+        const [y, mo, da] = parsed.split('-').map((v) => parseInt(v, 10));
+        const ts = new Date(y, mo - 1, da).getTime();
+        const overlap = found.some((f) => Math.abs(f.index - m!.index) < 4 && f.date === parsed);
+        if (!overlap) {
+          found.push({
+            date: parsed,
+            ts,
+            index: m.index,
+            endIndex: m.index + m[0].length,
+          });
+        }
+      }
+    }
+  }
+
+  found.sort((a, b) => a.index - b.index);
+  return found;
+}
+
+const ARC_BACK_BOILERPLATE_REGEX =
+  /시[·.\s]*군[·.\s]*구|출입국|외국인(?:관서|청|사무소|등록증)|새로운\s*체류지|신고하여야|신고하지|범칙금|과태료|지방출입국|14일\s*이내|변경된\s*날|전입신고|관할|허가기간|체류기간\s*연장|확인\s*인|담당자/;
+
+function parseArcReportDateTsClient(line: string): number {
+  const m = line.match(/(\d{4}|\d{2})\s*[.\-년/]\s*(\d{1,2})\s*[.\-월/]\s*(\d{1,2})/);
+  if (!m) return 0;
+  let y = parseInt(m[1], 10);
+  if (y < 100) y += 2000;
+  const mo = parseInt(m[2], 10);
+  const da = parseInt(m[3], 10);
+  if (y >= 2010 && y <= 2035 && mo >= 1 && mo <= 12 && da >= 1 && da <= 31) {
+    return new Date(y, mo - 1, da).getTime();
+  }
+  return 0;
 }
 
 /**
@@ -363,104 +485,81 @@ export function extractKoreanAddressFromText(rawCorpus: string): string | null {
     .map((l) => l.trim())
     .filter((l) => l.length > 0);
 
-  const datePattern = /(\d{4}|\d{2})[.\-\s년/]+(\d{1,2})[.\-\s월/]+(\d{1,2})/;
+  const addrStartRegex =
+    /((?:서울특별시|서울시|서울|부산광역시|부산시|부산|대구광역시|대구시|대구|인천광역시|인천시|인천|광주광역시|광주시|광주|대전광역시|대전시|대전|울산광역시|울산시|울산|세종특별자치시|세종시|세종|경기도|경기|강원특별자치도|강원도|강원|충청북도|충북|충청남도|충남|전북특별자치도|전라북도|전북|전라남도|전남|경상북도|경북|경상남도|경남|제주특별자치도|제주도|제주)\s*[가-힣0-9][가-힣0-9\s\-~,()./]+|[가-힣]{2,6}(?:시|군)\s+[가-힣]{1,12}(?:구|읍|면|동|로|길|가)\s*[가-힣0-9\s\-~,()./]*)/;
 
-  // Matches Korean province/city start OR city/county/district + road/dong
-  const addrStartRegex = /((?:서울|부산|대구|인천|광주|대전|울산|세종|경기|강원|충북|충남|충청북도|충청남도|전북|전남|전라북도|전라남도|전북특별자치도|강원특별자치도|경북|경남|경상북도|경상남도|제주)[가-힣]*\s+[가-힣0-9\s\-~,().]+|[가-힣]{2,6}(?:시|군|구)\s+[가-힣]{1,12}(?:구|읍|면|동|로|길|가)\s*[가-힣0-9\s\-~,().]*)/;
-
-  interface AddrCandidate {
-    address: string;
-    timestamp: number;
-    lineIndex: number;
-  }
-
-  const candidates: AddrCandidate[] = [];
+  const candidates: { address: string; timestamp: number; lineIndex: number }[] = [];
 
   for (let i = 0; i < rawLines.length; i++) {
     const line = rawLines[i];
-    if (line.length < 4) continue;
-
-    // Skip administrative notice lines
-    if (
-      line.includes('시·군·구청') ||
-      line.includes('출입국·외국인') ||
-      line.includes('새로운 체류지') ||
-      line.includes('신고하여야') ||
-      line.includes('범칙금') ||
-      line.includes('지방출입국')
-    ) {
+    if (line.length < 4 || ARC_BACK_BOILERPLATE_REGEX.test(line)) {
       continue;
     }
 
-    const match = line.match(addrStartRegex);
+    const sameLineTs = parseArcReportDateTsClient(line);
+    const strippedLine = line
+      .replace(/^[\s|[\]()·•\-]*(?:\d{4}|\d{2})\s*[.\-년/]\s*\d{1,2}\s*[.\-월/]\s*\d{1,2}\s*[.\-일]?\s*/, '')
+      .replace(/^(?:체류지|국내거소|주소|변경사항|신고일|신고일자|거소지|Address)\s*[:：|]?\s*/gi, '')
+      .trim();
+
+    const match = strippedLine.match(addrStartRegex);
     if (!match) continue;
 
     let cleanAddr = match[1]
       .replace(/^(?:체류지|국내거소|주소|변경사항|신고일|신고일자)\s*[:：]?\s*/g, '')
+      .replace(/\s+(?:확인|담당|인|서명|신고|접수)\s*$/, '')
       .replace(/\s+/g, ' ')
       .trim();
 
-    if (cleanAddr.length < 5) continue;
-    if (cleanAddr.includes('출입국') || cleanAddr.includes('외국인청') || cleanAddr.includes('사무소')) continue;
+    const looksLikeKoreanAddr =
+      /(?:시|군|구|읍|면|동|리|로|길|가|번지|번길|\d+)/.test(cleanAddr) && cleanAddr.length >= 6;
+    if (!looksLikeKoreanAddr || ARC_BACK_BOILERPLATE_REGEX.test(cleanAddr)) continue;
 
-    // Check if the next line is a wrapped continuation of this address (e.g. "85-9 (수석동)" or "101동 203호")
-    if (i + 1 < rawLines.length) {
-      const nextLine = rawLines[i + 1];
-      const nextHasDate = datePattern.test(nextLine);
-      const nextHasNewProvince = addrStartRegex.test(nextLine);
-      const nextIsBoilerplate =
-        nextLine.includes('시·군·구') ||
-        nextLine.includes('출입국') ||
-        nextLine.includes('체류지') ||
-        nextLine.includes('변경사항') ||
-        nextLine.includes('확인');
+    for (let contOffset = 1; contOffset <= 2; contOffset++) {
+      if (i + contOffset >= rawLines.length) break;
+      const nextLine = rawLines[i + contOffset];
+      if (!nextLine || nextLine.length < 2 || nextLine.length > 45) break;
+      if (parseArcReportDateTsClient(nextLine) > 0) break;
+      if (addrStartRegex.test(nextLine)) break;
+      if (ARC_BACK_BOILERPLATE_REGEX.test(nextLine)) break;
+      if (/^(?:체류지|변경사항|신고일|신고일자|확인|국내거소|체류기간|만료일자)/.test(nextLine)) break;
 
-      if (
-        !nextHasDate &&
-        !nextHasNewProvince &&
-        !nextIsBoilerplate &&
-        nextLine.length >= 2 &&
-        nextLine.length <= 35 &&
-        /(?:\d+|번길|로|길|동|호|층|읍|면|리|\([가-힣0-9]+\))/.test(nextLine)
-      ) {
-        const cleanedCont = nextLine.replace(/[^가-힣0-9\s\-~,().]/g, '').trim();
-        if (cleanedCont.length >= 2) {
-          cleanAddr = `${cleanAddr} ${cleanedCont}`.replace(/\s+/g, ' ').trim();
+      if (/(?:\d+|번길|로|길|동|호|층|읍|면|리|아파트|빌라|오피스텔|원룸|기숙사|\([가-힣0-9\s]+\))/.test(nextLine)) {
+        const cont = nextLine
+          .replace(/[^가-힣0-9A-Za-z\s\-~,().]/g, ' ')
+          .replace(/\s+(?:확인|담당|인)\s*$/, '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (cont.length >= 2 && !cleanAddr.includes(cont)) {
+          cleanAddr = `${cleanAddr} ${cont}`.replace(/\s+/g, ' ').trim();
         }
+      } else {
+        break;
       }
     }
 
-    // Check for report date (신고일) on same line or nearby lines
-    let ts = 0;
-    for (let offset = -1; offset <= 1; offset++) {
-      const idx = i + offset;
-      if (idx >= 0 && idx < rawLines.length) {
-        const dMatch = rawLines[idx].match(datePattern);
-        if (dMatch) {
-          let y = parseInt(dMatch[1], 10);
-          if (y < 100) y += 2000;
-          const mo = parseInt(dMatch[2], 10);
-          const da = parseInt(dMatch[3], 10);
-          if (y >= 2010 && y <= 2035 && mo >= 1 && mo <= 12 && da >= 1 && da <= 31) {
-            ts = new Date(y, mo - 1, da).getTime();
+    let ts = sameLineTs;
+    if (!ts) {
+      for (const off of [-1, 1, -2]) {
+        const idx = i + off;
+        if (idx >= 0 && idx < rawLines.length) {
+          const foundTs = parseArcReportDateTsClient(rawLines[idx]);
+          if (foundTs > 0) {
+            ts = foundTs;
             break;
           }
         }
       }
     }
 
-    candidates.push({
-      address: cleanAddr,
-      timestamp: ts,
-      lineIndex: i,
-    });
+    candidates.push({ address: cleanAddr, timestamp: ts, lineIndex: i });
   }
 
   if (candidates.length === 0) return null;
 
   const withDates = candidates.filter((c) => c.timestamp > 0);
   if (withDates.length > 0) {
-    withDates.sort((a, b) => b.timestamp - a.timestamp);
+    withDates.sort((a, b) => (b.timestamp - a.timestamp) || (b.lineIndex - a.lineIndex));
     return withDates[0].address;
   }
 
@@ -681,6 +780,146 @@ export function extractApplicantNameFromText(textCorpus: string): string | null 
   );
 }
 
+function extractTopikRoundClient(topikText: string, combined: string): string | null {
+  const isValidRound = (val: string): string | null => {
+    const num = parseInt(val.replace(/[^0-9]/g, ''), 10);
+    if (!Number.isNaN(num) && num >= 1 && num <= 300) return String(num);
+    return null;
+  };
+
+  const sources = [topikText, combined].filter(Boolean);
+  for (const src of sources) {
+    const jeMatch = src.match(/제\s*(\d{1,3})\s*[회희외화]/i);
+    if (jeMatch) {
+      const v = isValidRound(jeMatch[1]);
+      if (v) return v;
+    }
+
+    const huiMatch = src.match(/(?<!\d)(\d{2,3})\s*[회희](?!\s*원|\s*사|\s*의)/);
+    if (huiMatch) {
+      const v = isValidRound(huiMatch[1]);
+      if (v) return v;
+    }
+
+    const labelRegex =
+      /(?:시\s*행\s*회\s*차|시\s*험\s*회\s*차|응\s*시\s*회\s*차|회\s*차|차\s*수|Test\s*(?:Held|Number|No\.?)|Round|Edition)/gi;
+    let lm: RegExpExecArray | null;
+    while ((lm = labelRegex.exec(src)) !== null) {
+      const windowStr = src.slice(lm.index + lm[0].length, lm.index + lm[0].length + 60);
+      const cutWindow = windowStr.split(/(?:수\s*험\s*번\s*호|생\s*년\s*월\s*일|문\s*서\s*확\s*인|Registration|Birth)/i)[0];
+      const valMatch = cutWindow.match(/(?:제\s*)?(\d{1,3})(?:\s*[회희외화]|(?:\s*(?:st|nd|rd|th))?\b)/i);
+      if (valMatch) {
+        const v = isValidRound(valMatch[1]);
+        if (v) return v;
+      }
+    }
+
+    const enMatch =
+      src.match(/The\s*(\d{1,3})(?:st|nd|rd|th)\s*(?:Test|TOPIK|Korean)?/i) ||
+      src.match(/\b(\d{2,3})(?:st|nd|rd|th)\s*(?:Test|TOPIK)\b/i);
+    if (enMatch) {
+      const v = isValidRound(enMatch[1]);
+      if (v) return v;
+    }
+  }
+  return null;
+}
+
+function extractTopikDatesClient(topikText: string): { examDate?: string; validUntil?: string } {
+  const out: { examDate?: string; validUntil?: string } = {};
+  if (!topikText) return out;
+
+  const examLabelRegex =
+    /(?:시\s*험\s*일(?:\s*자|\s*시)?|시\s*행\s*일(?:\s*자)?|응\s*시\s*일(?:\s*자)?|Test\s*Date|Date\s*of\s*Test|Exam\s*Date)/gi;
+  let em: RegExpExecArray | null;
+  while ((em = examLabelRegex.exec(topikText)) !== null) {
+    const windowStr = topikText.slice(em.index + em[0].length, em.index + em[0].length + 85);
+    const cutWindow = windowStr.split(
+      /(?:성\s*적\s*유\s*효|유\s*효\s*기\s*간|Valid\s*Until|Expiration|생\s*년\s*월\s*일|Birth|발\s*급\s*일|Issue\s*Date)/i
+    )[0];
+    const dates = extractAllDatesInTextClient(cutWindow, 2012, 2035);
+    if (dates.length > 0) {
+      out.examDate = dates[0].date;
+      break;
+    }
+  }
+
+  if (!out.examDate) {
+    const paired1 = topikText.match(/(\d{4}[.\-\s/]+\d{1,2}[.\-\s/]+\d{1,2})\s*\([제\s]*\d{1,3}\s*회/);
+    const paired2 = topikText.match(/제\s*\d{1,3}\s*회[^\n]{0,25}?(\d{4}[.\-\s/]+\d{1,2}[.\-\s/]+\d{1,2})/);
+    const parsed = parseFlexibleDateClient((paired1?.[1] || paired2?.[1] || ''), 2012, 2035);
+    if (parsed) out.examDate = parsed;
+  }
+
+  const validLabelRegex =
+    /(?:성\s*적\s*유\s*효\s*기\s*간|유\s*효\s*기\s*간|유\s*효\s*일(?:\s*자)?|만\s*료\s*일(?:\s*자)?|Valid\s*(?:Until|Period|Thru|Through|Date)|Date\s*of\s*Expiration|Expiration\s*Date)/gi;
+  let vm: RegExpExecArray | null;
+  while ((vm = validLabelRegex.exec(topikText)) !== null) {
+    const windowStr = topikText.slice(vm.index + vm[0].length, vm.index + vm[0].length + 100);
+    const cutWindow = windowStr.split(
+      /(?:취\s*득\s*등\s*급|등\s*급|총\s*점|발\s*급\s*일|발\s*행\s*일|Issue\s*Date|Print\s*Date|수\s*험\s*번\s*호|생\s*년\s*월\s*일|Birth)/i
+    )[0];
+    const dates = extractAllDatesInTextClient(cutWindow, 2014, 2040);
+    if (dates.length > 0) {
+      out.validUntil = dates[dates.length - 1].date;
+      break;
+    }
+  }
+
+  if (!out.validUntil) {
+    const tildeMatch = topikText.match(/[~～]\s*(\d{4}\s*[.\-년/]\s*\d{1,2}\s*[.\-월/]\s*\d{1,2})(?:\s*일)?(?:\s*까지)?/);
+    if (tildeMatch) {
+      const parsed = parseFlexibleDateClient(tildeMatch[1], 2014, 2040);
+      if (parsed) out.validUntil = parsed;
+    }
+  }
+
+  if (!out.examDate || !out.validUntil) {
+    const allDates = extractAllDatesInTextClient(topikText, 2015, 2040).filter((d) => {
+      const before = topikText.slice(Math.max(0, d.index - 28), d.index);
+      if (/(?:생\s*년\s*월\s*일|Date\s*of\s*Birth|Birth|발\s*급\s*일|발\s*행\s*일|출\s*력\s*일|Issue\s*Date|Print\s*Date)/i.test(before)) {
+        return false;
+      }
+      return true;
+    });
+
+    const uniqueByDate = Array.from(new Map(allDates.map((d) => [d.date, d])).values()).sort((a, b) => a.ts - b.ts);
+    const DAY_MS = 24 * 60 * 60 * 1000;
+
+    if (out.examDate && !out.validUntil) {
+      const [ey, em2, ed] = out.examDate.split('-').map((n) => parseInt(n, 10));
+      const examTs = new Date(ey, em2 - 1, ed).getTime();
+      const matchValid = uniqueByDate.find((d) => {
+        const diffDays = (d.ts - examTs) / DAY_MS;
+        return diffDays >= 500 && diffDays <= 900;
+      });
+      if (matchValid) out.validUntil = matchValid.date;
+    } else if (!out.examDate && out.validUntil) {
+      const [vy, vm2, vd] = out.validUntil.split('-').map((n) => parseInt(n, 10));
+      const validTs = new Date(vy, vm2 - 1, vd).getTime();
+      const matchExam = uniqueByDate.find((d) => {
+        const diffDays = (validTs - d.ts) / DAY_MS;
+        return diffDays >= 500 && diffDays <= 900;
+      });
+      if (matchExam) out.examDate = matchExam.date;
+    } else if (!out.examDate && !out.validUntil && uniqueByDate.length >= 2) {
+      for (let i = 0; i < uniqueByDate.length; i++) {
+        for (let j = i + 1; j < uniqueByDate.length; j++) {
+          const diffDays = (uniqueByDate[j].ts - uniqueByDate[i].ts) / DAY_MS;
+          if (diffDays >= 500 && diffDays <= 900) {
+            out.examDate = uniqueByDate[i].date;
+            out.validUntil = uniqueByDate[j].date;
+            break;
+          }
+        }
+        if (out.examDate && out.validUntil) break;
+      }
+    }
+  }
+
+  return out;
+}
+
 /**
  * Parse combined OCR text from ARC Front, ARC Back, TOPIK Certificate, and Passport
  */
@@ -709,9 +948,10 @@ export function parseOcrCorpusToData(
   }
 
   // 2. Alien Registration Number (6 digits - 7 digits) with OCR digit typo tolerance
+  const arcAndPassport = `${arcFrontText}\n${arcBackText}\n${passportText}`;
   const regFound =
     findArcRegNumberInText(arcFrontText) ||
-    findArcRegNumberInText(combined);
+    findArcRegNumberInText(arcAndPassport);
   if (regFound) {
     result.regNumber1 = regFound.reg1;
     result.regNumber2 = regFound.reg2;
@@ -815,8 +1055,7 @@ export function parseOcrCorpusToData(
 
   // 8. TOPIK Exam Registration Number (수험번호: 10~16 digits, usually 12-14 digits)
   const examNumMatch =
-    topikText.match(/(?:수\s*험\s*번\s*호|수\s*험\s*번호|Registration\s*(?:No\.?)?|Examinee(?:\s*No\.?)?|Application\s*(?:No\.?)?)[^\d\n]{0,25}(\d{8,16})/i) ||
-    topikText.match(/(?:수\s*험\s*번\s*호|Registration\s*No)[^\d]{0,40}\n[^\d]{0,10}(\d{8,16})/i) ||
+    topikText.match(/(?:수\s*험\s*번\s*호|Registration\s*(?:No\.?)?|Examinee(?:\s*No\.?)?|Application\s*(?:No\.?)?)[\s\S]{0,45}?(\d{8,16})/i) ||
     topikText.match(/\b(0\d{10,14})\b/) ||
     combined.match(/\b(00\d{11,13})\b/) ||
     topikText.match(/\b(\d{11,14})\b/);
@@ -828,24 +1067,16 @@ export function parseOcrCorpusToData(
     }
   }
 
-  // 9. TOPIK Round (회차: e.g. 제 89 회, 92회, 107회)
-  const roundMatch =
-    topikText.match(/(?:제\s*)?(\d{1,3})\s*회/i) ||
-    topikText.match(/(?:회\s*차|회\s{1,8}차|Test\s*(?:Held|Number|No\.?)|Round|Edition)[^\d\n]{0,20}(\d{1,3})/i) ||
-    topikText.match(/The\s*(\d{1,3})(?:st|nd|rd|th)\s*(?:Test|TOPIK)/i) ||
-    topikText.match(/(\d{2,3})(?:st|nd|rd|th)/i) ||
-    combined.match(/(?:제\s*)?(\d{2,3})\s*회/);
-
-  if (roundMatch) {
-    const r = roundMatch[1].replace(/[^0-9]/g, '');
-    if (r && r !== '0' && r !== '000') {
-      result.round = r;
-    }
+  // 9. TOPIK Round (회차: e.g. 제 89 회, 92회, 107회, 시행회차 across newlines)
+  const detectedRound = extractTopikRoundClient(topikText, combined);
+  if (detectedRound) {
+    result.round = detectedRound;
   }
 
   // 10. TOPIK Grade (취득등급 / 등급: 1급 ~ 6급)
   const gradeMatch =
-    topikText.match(/(?:취\s*득\s*등\s*급|합\s*격\s*등\s*급|등\s*급|Grade|Level|Evaluation)[^\d\n]{0,15}([1-6])\s*급?/i) ||
+    topikText.match(/(?:취\s*득\s*등\s*급|합\s*격\s*등\s*급|등\s*급|Grade|Level|Evaluation)[\s\S]{0,35}?([1-6])\s*급/i) ||
+    topikText.match(/(?:취\s*득\s*등\s*급|합\s*격\s*등\s*급|등\s*급|Grade|Level)[^\d\n]{0,20}([1-6])\b/i) ||
     topikText.match(/(?:TOPIK\s*[I|II]{1,2})[^\d\n]{0,15}([1-6])\s*급/i) ||
     topikText.match(/([1-6])\s*급/) ||
     combined.match(/(?:취득등급|합격등급|등급)[^\d\n]{0,12}([1-6])/i) ||
@@ -854,8 +1085,7 @@ export function parseOcrCorpusToData(
   if (gradeMatch) {
     result.grade = `${gradeMatch[1]}급`;
   } else {
-    // Score inference if total score (총점) is visible:
-    const scoreMatch = topikText.match(/(?:총\s*점|Total\s*Score|점\s*수)[^\d\n]{0,15}(\d{2,3})/i);
+    const scoreMatch = topikText.match(/(?:총\s*점|Total\s*Score|점\s*수)[\s\S]{0,25}?(\d{2,3})/i);
     if (scoreMatch) {
       const score = parseInt(scoreMatch[1], 10);
       const isTopikI = /\bTOPIK\s*I\b(?!I)/i.test(topikText);
@@ -872,24 +1102,15 @@ export function parseOcrCorpusToData(
     }
   }
 
-  // 11. TOPIK Exam Date & Valid Until Date
-  const examDateMatch =
-    topikText.match(/(?:시\s*험\s*일(?:\s*자)?|Test\s*Date)[^\d\n]{0,20}(\d{4})[.\-\s년/]+(\d{1,2})[.\-\s월/]+(\d{1,2})/i) ||
-    topikText.match(/(\d{4})[.\-\s/]+(\d{1,2})[.\-\s/]+(\d{1,2})\s*\([제\s]*\d+회/);
-  if (examDateMatch) {
-    const y = examDateMatch[1];
-    const m = examDateMatch[2].padStart(2, '0');
-    const d = examDateMatch[3].padStart(2, '0');
-    result.examDate = `${y}-${m}-${d}`;
-  }
-
-  const validMatch =
-    topikText.match(/(?:성\s*적\s*유\s*효\s*기\s*간|유\s*효\s*기\s*간|Valid\s*Until|Expiration)[^\d\n]{0,25}(\d{4})[.\-\s년/]+(\d{1,2})[.\-\s월/]+(\d{1,2})/i);
-  if (validMatch) {
-    const y = validMatch[1];
-    const m = validMatch[2].padStart(2, '0');
-    const d = validMatch[3].padStart(2, '0');
-    result.validUntil = `${y}-${m}-${d}`;
+  // 11. TOPIK Exam Date (시험일 / 시행일) & Valid Until Date (성적유효기간 END date)
+  if (topikText && topikText.trim().length > 0) {
+    const topikDates = extractTopikDatesClient(topikText);
+    if (topikDates.examDate) {
+      result.examDate = topikDates.examDate;
+    }
+    if (topikDates.validUntil) {
+      result.validUntil = topikDates.validUntil;
+    }
   }
 
   // 12. Name & Birth Date from TOPIK Certificate (if not already found on ARC)
@@ -971,7 +1192,7 @@ export function countExtractedFields(data: ExtractedDocumentData | null | undefi
 
 /**
  * Prepares any document DataURL (Raster Image, SVG, or PDF) for /api/extract-documents:
- * converts PDFs to both extracted digital text + rasterized Page 1 JPEG so server-side
+ * converts PDFs to both extracted digital text + high-res rasterized Page 1 JPEG so server-side
  * OCR & Gemini Vision work seamlessly on both scanned and digital PDFs.
  */
 export async function prepareDocumentForOcrApi(
@@ -979,9 +1200,9 @@ export async function prepareDocumentForOcrApi(
 ): Promise<{ apiUrl: string | null | undefined; pdfText: string }> {
   if (!dataUrl) return { apiUrl: dataUrl, pdfText: '' };
   if (isPdfDataUrl(dataUrl)) {
-    const parsed = await extractPdfTextAndImageFromDataUrl(dataUrl, 1600);
+    const parsed = await extractPdfTextAndImageFromDataUrl(dataUrl, 1900);
     const compressedImg = parsed.imageUrl
-      ? await compressImageForApi(parsed.imageUrl, 1400, 0.85)
+      ? await compressImageForApi(parsed.imageUrl, 1800, 0.88)
       : dataUrl;
     return {
       apiUrl: compressedImg || dataUrl,
@@ -989,8 +1210,239 @@ export async function prepareDocumentForOcrApi(
     };
   }
   return {
-    apiUrl: await compressImageForApi(dataUrl),
+    apiUrl: await compressImageForApi(dataUrl, 1800, 0.88),
     pdfText: '',
+  };
+}
+
+export interface OcrPipelineResult {
+  data: ExtractedDocumentData;
+  rawTextPreview: string;
+  model: string;
+}
+
+export function mergeExtractedDrafts(
+  primary: ExtractedDocumentData | null | undefined,
+  secondary: ExtractedDocumentData | null | undefined
+): ExtractedDocumentData {
+  const a = primary || {};
+  const b = secondary || {};
+  const hasRealStr = (v?: string | null) => Boolean(v && v.trim() && !/^0+$/.test(v.trim()) && v !== '0000 0000' && v !== '0000-00-00' && v !== '000000' && v !== '0000000' && v !== '000' && v !== '0급');
+  const hasRealDocVer = (v?: string[] | string | null) =>
+    Array.isArray(v)
+      ? v.some((p) => p && p !== '0000')
+      : typeof v === 'string' && v.replace(/0|-|\s/g, '').length > 0;
+
+  return {
+    name: hasRealStr(a.name) ? a.name : (b.name || ''),
+    regNumber1: hasRealStr(a.regNumber1) ? a.regNumber1 : (b.regNumber1 || ''),
+    regNumber2: hasRealStr(a.regNumber2) ? a.regNumber2 : (b.regNumber2 || ''),
+    gender: a.gender || b.gender || '',
+    nationality: hasRealStr(a.nationality) ? a.nationality : (b.nationality || ''),
+    visaStatus: hasRealStr(a.visaStatus) ? a.visaStatus : (b.visaStatus || ''),
+    passportNo: hasRealStr(a.passportNo) ? a.passportNo : (b.passportNo || ''),
+    passportExpiry: hasRealStr(a.passportExpiry) ? a.passportExpiry : (b.passportExpiry || ''),
+    address: hasRealStr(a.address) ? a.address : (b.address || ''),
+    docVerificationNo: hasRealDocVer(a.docVerificationNo) ? a.docVerificationNo : (b.docVerificationNo || ['', '', '', '']),
+    examNumber: hasRealStr(a.examNumber) ? a.examNumber : (b.examNumber || ''),
+    examDate: hasRealStr(a.examDate) ? a.examDate : (b.examDate || ''),
+    round: hasRealStr(a.round) ? a.round : (b.round || ''),
+    validUntil: hasRealStr(a.validUntil) ? a.validUntil : (b.validUntil || ''),
+    grade: hasRealStr(a.grade) ? a.grade : (b.grade || ''),
+  };
+}
+
+/**
+ * Full hybrid OCR pipeline (Server Gemini/Tesseract + Targeted Client PDF/Tesseract Gap-Fill).
+ * Always fills missing ARC `address` (체류지) and TOPIK `examDate` / `validUntil` / `round`
+ * locally if the primary server pass left gaps.
+ */
+export async function runFullDocumentOcrPipeline(params: {
+  arcFront?: string | null;
+  arcBack?: string | null;
+  topikCert?: string | null;
+  passport?: string | null;
+  pdfTexts?: {
+    arcFront?: string;
+    arcBack?: string;
+    topikCert?: string;
+    passport?: string;
+  };
+  skipServer?: boolean;
+}): Promise<OcrPipelineResult> {
+  const [pFront, pBack, pTopik, pPassport] = await Promise.all([
+    prepareDocumentForOcrApi(params.arcFront),
+    prepareDocumentForOcrApi(params.arcBack),
+    prepareDocumentForOcrApi(params.topikCert),
+    prepareDocumentForOcrApi(params.passport),
+  ]);
+
+  const mergedPdfTexts = {
+    arcFront: [params.pdfTexts?.arcFront || '', pFront.pdfText].filter(Boolean).join('\n'),
+    arcBack: [params.pdfTexts?.arcBack || '', pBack.pdfText].filter(Boolean).join('\n'),
+    topikCert: [params.pdfTexts?.topikCert || '', pTopik.pdfText].filter(Boolean).join('\n'),
+    passport: [params.pdfTexts?.passport || '', pPassport.pdfText].filter(Boolean).join('\n'),
+  };
+
+  let serverData: ExtractedDocumentData = {};
+  let serverRawPreview = '';
+  let serverModel = '';
+
+  const isStaticGitHubPages = typeof window !== 'undefined' && window.location.hostname.includes('github.io');
+  if (!params.skipServer && !isStaticGitHubPages) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 45000);
+      const res = await fetch('/api/extract-documents', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({
+          arcFront: pFront.apiUrl,
+          arcBack: pBack.apiUrl,
+          topikCert: pTopik.apiUrl,
+          passport: pPassport.apiUrl,
+          pdfTexts: mergedPdfTexts,
+        }),
+      });
+      clearTimeout(timer);
+      if (res.ok) {
+        const result = await res.json().catch(() => ({}));
+        if (result?.rawTextPreview) {
+          serverRawPreview = String(result.rawTextPreview);
+        }
+        if (result?.model) {
+          serverModel = String(result.model);
+        }
+        if (result?.success && result?.data && !result?.fallbackMode) {
+          serverData = result.data as ExtractedDocumentData;
+        }
+      }
+    } catch (err) {
+      console.warn('[Client OCR] Server extraction failed, running local OCR:', err);
+    }
+  }
+
+  const frontSource = isPdfDataUrl(params.arcFront) ? (pFront.apiUrl || params.arcFront) : params.arcFront;
+  const backSource = isPdfDataUrl(params.arcBack) ? (pBack.apiUrl || params.arcBack) : params.arcBack;
+  const topikSource = isPdfDataUrl(params.topikCert) ? (pTopik.apiUrl || params.topikCert) : params.topikCert;
+  const passportSource = isPdfDataUrl(params.passport) ? (pPassport.apiUrl || params.passport) : params.passport;
+
+  // Determine which documents still need local structural / Tesseract OCR gap-fill
+  const needFrontOcr = Boolean(frontSource && (!serverData.name || !serverData.regNumber1 || !serverData.regNumber2 || !serverData.visaStatus));
+  const needBackOcr = Boolean(backSource && !serverData.address);
+  const needTopikOcr = Boolean(
+    topikSource &&
+      (!serverData.examDate ||
+        !serverData.validUntil ||
+        !serverData.round ||
+        !serverData.examNumber ||
+        !serverData.grade ||
+        !serverData.docVerificationNo ||
+        (Array.isArray(serverData.docVerificationNo) && serverData.docVerificationNo.every((p) => !p || p === '0000')))
+  );
+  const needPassportOcr = Boolean(passportSource && (!serverData.passportNo || !serverData.passportExpiry || !serverData.name));
+
+  let arcFrontText = mergedPdfTexts.arcFront;
+  let arcBackText = mergedPdfTexts.arcBack;
+  let topikText = mergedPdfTexts.topikCert;
+  let passportText = mergedPdfTexts.passport;
+
+  // Always parse any available PDF/SVG digital text immediately
+  const digitalParsed = parseOcrCorpusToData(arcFrontText, arcBackText, topikText, passportText);
+  let merged = mergeExtractedDrafts(serverData, digitalParsed);
+
+  const stillNeedFront = Boolean(frontSource && !isPdfDataUrl(frontSource) && (!merged.name || !merged.regNumber1 || !merged.regNumber2 || !merged.visaStatus));
+  const stillNeedBack = Boolean(backSource && !isPdfDataUrl(backSource) && !merged.address);
+  const stillNeedTopik = Boolean(
+    topikSource &&
+      !isPdfDataUrl(topikSource) &&
+      (!merged.examDate ||
+        !merged.validUntil ||
+        !merged.round ||
+        !merged.examNumber ||
+        !merged.grade ||
+        !merged.docVerificationNo ||
+        (Array.isArray(merged.docVerificationNo) && merged.docVerificationNo.every((p) => !p || p === '0000')))
+  );
+  const stillNeedPassport = Boolean(passportSource && !isPdfDataUrl(passportSource) && (!merged.passportNo || !merged.passportExpiry || !merged.name));
+
+  if (needFrontOcr && stillNeedFront && frontSource) {
+    const tFront = await runBrowserOcrOnImage(frontSource, 'eng', false);
+    if (tFront) arcFrontText = [arcFrontText, tFront].filter(Boolean).join('\n');
+  }
+  if (needPassportOcr && stillNeedPassport && passportSource) {
+    const tPass = await runBrowserOcrOnImage(passportSource, 'eng', false);
+    if (tPass) passportText = [passportText, tPass].filter(Boolean).join('\n');
+  }
+  if (needBackOcr && stillNeedBack && backSource) {
+    // Use kor+eng on ARC Back so road numbers, dash digits, and Hangul district names stay crisp
+    const tBack = await runBrowserOcrOnImage(backSource, 'kor+eng', false);
+    if (tBack) arcBackText = [arcBackText, tBack].filter(Boolean).join('\n');
+  }
+  if (needTopikOcr && stillNeedTopik && topikSource) {
+    const tTopik = await runBrowserOcrOnImage(topikSource, 'kor+eng', false);
+    if (tTopik) topikText = [topikText, tTopik].filter(Boolean).join('\n');
+  }
+
+  let localParsed = parseOcrCorpusToData(arcFrontText, arcBackText, topikText, passportText);
+  merged = mergeExtractedDrafts(merged, localParsed);
+
+  // Targeted high-contrast / MRZ second-pass if key fields are still missing
+  let ranSecondPass = false;
+  if (stillNeedFront && frontSource && (!merged.regNumber1 || !merged.name || !merged.visaStatus)) {
+    const hcFront = await runBrowserOcrOnImage(frontSource, 'eng', true);
+    if (hcFront) {
+      arcFrontText = [arcFrontText, hcFront].filter(Boolean).join('\n');
+      ranSecondPass = true;
+    }
+  }
+  if (stillNeedBack && backSource && !merged.address) {
+    const hcBack = await runBrowserOcrOnImage(backSource, 'kor+eng', true);
+    if (hcBack) {
+      arcBackText = [arcBackText, hcBack].filter(Boolean).join('\n');
+      ranSecondPass = true;
+    }
+  }
+  if (stillNeedPassport && passportSource && (!merged.passportNo || !merged.name)) {
+    const mrzCropUrl = await cropPassportMrzForOcr(passportSource);
+    const mrzText = await runBrowserOcrOnImage(mrzCropUrl, 'eng', false);
+    if (mrzText) {
+      passportText = [passportText, mrzText].filter(Boolean).join('\n');
+      ranSecondPass = true;
+    }
+  }
+  if (stillNeedTopik && topikSource && (!merged.examNumber || !merged.examDate || !merged.validUntil || !merged.round)) {
+    const hcTopik = await runBrowserOcrOnImage(topikSource, 'kor+eng', true);
+    if (hcTopik) {
+      topikText = [topikText, hcTopik].filter(Boolean).join('\n');
+      ranSecondPass = true;
+    }
+  }
+
+  if (ranSecondPass) {
+    localParsed = parseOcrCorpusToData(arcFrontText, arcBackText, topikText, passportText);
+    merged = mergeExtractedDrafts(merged, localParsed);
+  }
+
+  const localRawBlocks = [
+    arcFrontText ? `[ARC Front]\n${arcFrontText}` : '',
+    arcBackText ? `[ARC Back]\n${arcBackText}` : '',
+    topikText ? `[TOPIK]\n${topikText}` : '',
+    passportText ? `[Passport]\n${passportText}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+
+  const rawTextPreview = [serverRawPreview, localRawBlocks]
+    .filter(Boolean)
+    .join('\n\n')
+    .slice(0, 4000);
+
+  return {
+    data: merged,
+    rawTextPreview,
+    model: serverModel || 'browser-ocr',
   };
 }
 
@@ -1010,105 +1462,47 @@ export async function extractDocumentsClientSide(params: {
   };
   skipServer?: boolean;
 }): Promise<ExtractedDocumentData> {
-  // Prepare PDF texts & rasterized PDF pages upfront
-  const [pFront, pBack, pTopik, pPassport] = await Promise.all([
-    prepareDocumentForOcrApi(params.arcFront),
-    prepareDocumentForOcrApi(params.arcBack),
-    prepareDocumentForOcrApi(params.topikCert),
-    prepareDocumentForOcrApi(params.passport),
-  ]);
-
-  const mergedPdfTexts = {
-    arcFront: [params.pdfTexts?.arcFront || '', pFront.pdfText].filter(Boolean).join('\n'),
-    arcBack: [params.pdfTexts?.arcBack || '', pBack.pdfText].filter(Boolean).join('\n'),
-    topikCert: [params.pdfTexts?.topikCert || '', pTopik.pdfText].filter(Boolean).join('\n'),
-    passport: [params.pdfTexts?.passport || '', pPassport.pdfText].filter(Boolean).join('\n'),
-  };
-
-  // 1. Try server-side Gemini / Node Tesseract OCR endpoint first unless caller already attempted it
-  if (!params.skipServer) {
-    try {
-      const res = await fetch('/api/extract-documents', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          arcFront: pFront.apiUrl,
-          arcBack: pBack.apiUrl,
-          topikCert: pTopik.apiUrl,
-          passport: pPassport.apiUrl,
-          pdfTexts: mergedPdfTexts,
-        }),
-      });
-      if (res.ok) {
-        const result = await res.json();
-        if (result.success && result.data && countExtractedFields(result.data) > 0) {
-          return result.data as ExtractedDocumentData;
-        }
-      }
-    } catch (err) {
-      console.warn('[Client OCR] Server-side extraction attempt failed, falling back to local OCR:', err);
-    }
-  }
-
-  // 2. Fallback to local browser Tesseract.js OCR + PDF digital text
-  const frontSource = isPdfDataUrl(params.arcFront) ? (pFront.apiUrl || params.arcFront) : params.arcFront;
-  const backSource = isPdfDataUrl(params.arcBack) ? (pBack.apiUrl || params.arcBack) : params.arcBack;
-  const topikSource = isPdfDataUrl(params.topikCert) ? (pTopik.apiUrl || params.topikCert) : params.topikCert;
-  const passportSource = isPdfDataUrl(params.passport) ? (pPassport.apiUrl || params.passport) : params.passport;
-
-  let arcFrontText = mergedPdfTexts.arcFront;
-  if (frontSource && !isPdfDataUrl(frontSource)) {
-    arcFrontText = [arcFrontText, await runBrowserOcrOnImage(frontSource, 'eng', false)].filter(Boolean).join('\n');
-  }
-
-  let passportText = mergedPdfTexts.passport;
-  if (passportSource && !isPdfDataUrl(passportSource)) {
-    passportText = [passportText, await runBrowserOcrOnImage(passportSource, 'eng', false)].filter(Boolean).join('\n');
-  }
-
-  let arcBackText = mergedPdfTexts.arcBack;
-  if (backSource && !isPdfDataUrl(backSource)) {
-    arcBackText = [arcBackText, await runBrowserOcrOnImage(backSource, 'kor', false)].filter(Boolean).join('\n');
-  }
-
-  let topikText = mergedPdfTexts.topikCert;
-  if (topikSource && !isPdfDataUrl(topikSource) && topikText.trim().length < 80) {
-    topikText = [topikText, await runBrowserOcrOnImage(topikSource, 'kor+eng', false)].filter(Boolean).join('\n');
-  }
-
-  let parsed = parseOcrCorpusToData(arcFrontText, arcBackText, topikText, passportText);
-
-  // 3. Targeted high-contrast / MRZ / kor+eng second-pass if primary pass missed key fields
-  if (frontSource && !isPdfDataUrl(frontSource) && (!parsed.regNumber1 || !parsed.name || !parsed.visaStatus)) {
-    const hcFront = await runBrowserOcrOnImage(frontSource, 'eng', true);
-    if (hcFront) arcFrontText = `${arcFrontText}\n${hcFront}`;
-  }
-  if (backSource && !isPdfDataUrl(backSource) && !parsed.address) {
-    const hcBack = await runBrowserOcrOnImage(backSource, 'kor', true);
-    if (hcBack) arcBackText = `${arcBackText}\n${hcBack}`;
-  }
-  if (passportSource && !isPdfDataUrl(passportSource) && (!parsed.passportNo || !parsed.name)) {
-    const mrzCropUrl = await cropPassportMrzForOcr(passportSource);
-    const mrzText = await runBrowserOcrOnImage(mrzCropUrl, 'eng', false);
-    if (mrzText) passportText = `${passportText}\n${mrzText}`;
-  }
-  if (topikSource && !isPdfDataUrl(topikSource) && (!parsed.examNumber || !parsed.docVerificationNo)) {
-    const hcTopik = await runBrowserOcrOnImage(topikSource, 'kor+eng', true);
-    if (hcTopik) topikText = `${topikText}\n${hcTopik}`;
-  }
-
-  parsed = parseOcrCorpusToData(arcFrontText, arcBackText, topikText, passportText);
-  return parsed;
+  const res = await runFullDocumentOcrPipeline(params);
+  return res.data;
 }
 
 /**
- * Smartly merges newly extracted OCR fields into existing ApplicationFormData,
- * replacing initial '0000' placeholders while preserving already-extracted real fields.
- * NEVER rejects real user data.
+ * Converts existing ApplicationFormData into an editable ExtractedDocumentData draft.
+ */
+export function formDataToExtractedDraft(data: ApplicationFormData): ExtractedDocumentData {
+  const cleanStr = (v: string, placeholders: string[]) =>
+    placeholders.includes(v.trim()) ? '' : v;
+
+  return {
+    name: cleanStr(data.name, ['0000 0000', '0000']),
+    regNumber1: cleanStr(data.regNumber1, ['000000']),
+    regNumber2: cleanStr(data.regNumber2, ['0000000', '1000000']),
+    gender: data.gender || '',
+    nationality: data.nationality || 'Cambodia',
+    visaStatus: data.visaStatus || '',
+    passportNo: data.passportNo || '',
+    passportExpiry: cleanStr(data.passportExpiry, ['0000-00-00']),
+    address: cleanStr(data.address, ['00000 0000 000', '00000']),
+    docVerificationNo: Array.isArray(data.docVerificationNo)
+      ? data.docVerificationNo.map((p) => (p === '0000' ? '' : p))
+      : ['', '', '', ''],
+    examNumber: cleanStr(data.examNumber, ['0000000000000']),
+    examDate: cleanStr(data.examDate, ['0000-00-00']),
+    round: cleanStr(data.round, ['000', '0']),
+    validUntil: cleanStr(data.validUntil, ['0000-00-00']),
+    grade: cleanStr(data.grade, ['0급']),
+  };
+}
+
+/**
+ * Smartly merges newly extracted or user-verified OCR fields into existing ApplicationFormData.
+ * When `forceOverwrite` is true (used when user confirms Step 2 OCR Verification), any edits—
+ * including intentional overrides—are committed cleanly into the official form.
  */
 export function mergeExtractedIntoFormData(
   prev: ApplicationFormData,
-  ext: ExtractedDocumentData
+  ext: ExtractedDocumentData,
+  forceOverwrite: boolean = false
 ): ApplicationFormData {
   const isPlaceholderName = (v?: string | null) =>
     !v || !v.trim() || /^0+(\s+0+)*$/.test(v.trim()) || v.trim() === '0000 0000' || v.trim() === '0000';
@@ -1127,30 +1521,38 @@ export function mergeExtractedIntoFormData(
   const isPlaceholderGrade = (v?: string | null) =>
     !v || !v.trim() || v.trim() === '0급';
 
-  const rawName =
-    ext.name && !isPlaceholderName(ext.name)
-      ? ext.name
-      : !isPlaceholderName(prev.name)
-      ? prev.name
-      : '';
-  const finalName = rawName ? cleanName(rawName) : prev.name;
+  const rawName = forceOverwrite
+    ? (ext.name || '')
+    : ext.name && !isPlaceholderName(ext.name)
+    ? ext.name
+    : !isPlaceholderName(prev.name)
+    ? prev.name
+    : '';
+  const finalName = rawName ? cleanName(rawName) : (forceOverwrite ? '' : prev.name);
 
-  const rawReg1 =
-    ext.regNumber1 && !isPlaceholderReg1(ext.regNumber1)
-      ? ext.regNumber1
-      : !isPlaceholderReg1(prev.regNumber1)
-      ? prev.regNumber1
-      : '';
-  const rawReg2 =
-    ext.regNumber2 && !isPlaceholderReg2(ext.regNumber2)
-      ? ext.regNumber2
-      : !isPlaceholderReg2(prev.regNumber2)
-      ? prev.regNumber2
-      : '';
+  const rawReg1 = forceOverwrite
+    ? (ext.regNumber1 || '')
+    : ext.regNumber1 && !isPlaceholderReg1(ext.regNumber1)
+    ? ext.regNumber1
+    : !isPlaceholderReg1(prev.regNumber1)
+    ? prev.regNumber1
+    : '';
+  const rawReg2 = forceOverwrite
+    ? (ext.regNumber2 || '')
+    : ext.regNumber2 && !isPlaceholderReg2(ext.regNumber2)
+    ? ext.regNumber2
+    : !isPlaceholderReg2(prev.regNumber2)
+    ? prev.regNumber2
+    : '';
   const reg = normalizeRegNumbers(rawReg1, rawReg2);
 
-  const finalAddress =
-    ext.address && !isPlaceholderAddr(ext.address) ? ext.address : (isPlaceholderAddr(prev.address) ? '' : prev.address);
+  const finalAddress = forceOverwrite
+    ? (ext.address !== undefined ? (ext.address || '') : prev.address)
+    : ext.address && !isPlaceholderAddr(ext.address)
+    ? ext.address
+    : isPlaceholderAddr(prev.address)
+    ? ''
+    : prev.address;
 
   const hasNewDocVer = Array.isArray(ext.docVerificationNo)
     ? ext.docVerificationNo.length === 4 &&
@@ -1158,48 +1560,55 @@ export function mergeExtractedIntoFormData(
       ext.docVerificationNo.join('') !== '0000000000000000'
     : typeof ext.docVerificationNo === 'string' &&
       ext.docVerificationNo.replace(/0|-|\s/g, '').length > 0;
-  
+
   let docParts = prev.docVerificationNo;
-  if (hasNewDocVer && ext.docVerificationNo) {
+  if (forceOverwrite && Array.isArray(ext.docVerificationNo)) {
+    docParts = [0, 1, 2, 3].map((idx) => (ext.docVerificationNo?.[idx] || '').replace(/[^0-9]/g, '').slice(0, 4));
+  } else if (hasNewDocVer && ext.docVerificationNo) {
     docParts = normalizeDocVerificationNo(ext.docVerificationNo, prev.docVerificationNo);
-  } else if (Array.isArray(prev.docVerificationNo) && prev.docVerificationNo.every(p => !p || p === '0000')) {
+  } else if (Array.isArray(prev.docVerificationNo) && prev.docVerificationNo.every((p) => !p || p === '0000')) {
     docParts = ['', '', '', ''];
   }
 
-  const finalExamNo =
-    ext.examNumber && !isPlaceholderExamNo(ext.examNumber)
-      ? cleanExamNumber(ext.examNumber)
-      : isPlaceholderExamNo(prev.examNumber)
-      ? ''
-      : prev.examNumber;
+  const finalExamNo = forceOverwrite
+    ? cleanExamNumber(ext.examNumber || '')
+    : ext.examNumber && !isPlaceholderExamNo(ext.examNumber)
+    ? cleanExamNumber(ext.examNumber)
+    : isPlaceholderExamNo(prev.examNumber)
+    ? ''
+    : prev.examNumber;
 
-  const finalExamDate =
-    ext.examDate && !isPlaceholderDate(ext.examDate)
-      ? ext.examDate
-      : isPlaceholderDate(prev.examDate)
-      ? ''
-      : prev.examDate;
+  const finalExamDate = forceOverwrite
+    ? (ext.examDate || '')
+    : ext.examDate && !isPlaceholderDate(ext.examDate)
+    ? ext.examDate
+    : isPlaceholderDate(prev.examDate)
+    ? ''
+    : prev.examDate;
 
-  const finalRound =
-    ext.round && !isPlaceholderRound(ext.round)
-      ? cleanRound(ext.round)
-      : isPlaceholderRound(prev.round)
-      ? ''
-      : prev.round;
+  const finalRound = forceOverwrite
+    ? cleanRound(ext.round || '')
+    : ext.round && !isPlaceholderRound(ext.round)
+    ? cleanRound(ext.round)
+    : isPlaceholderRound(prev.round)
+    ? ''
+    : prev.round;
 
-  const finalValidUntil =
-    ext.validUntil && !isPlaceholderDate(ext.validUntil)
-      ? ext.validUntil
-      : isPlaceholderDate(prev.validUntil)
-      ? ''
-      : prev.validUntil;
+  const finalValidUntil = forceOverwrite
+    ? (ext.validUntil || '')
+    : ext.validUntil && !isPlaceholderDate(ext.validUntil)
+    ? ext.validUntil
+    : isPlaceholderDate(prev.validUntil)
+    ? ''
+    : prev.validUntil;
 
-  const finalGrade =
-    ext.grade && !isPlaceholderGrade(ext.grade)
-      ? cleanGrade(ext.grade)
-      : isPlaceholderGrade(prev.grade)
-      ? ''
-      : prev.grade;
+  const finalGrade = forceOverwrite
+    ? (ext.grade ? cleanGrade(ext.grade) : '')
+    : ext.grade && !isPlaceholderGrade(ext.grade)
+    ? cleanGrade(ext.grade)
+    : isPlaceholderGrade(prev.grade)
+    ? ''
+    : prev.grade;
 
   return {
     ...prev,
@@ -1215,10 +1624,18 @@ export function mergeExtractedIntoFormData(
         : !isPlaceholderReg2(reg.regNumber2)
         ? reg.gender
         : prev.gender,
-    nationality: ext.nationality || prev.nationality || 'Cambodia',
-    visaStatus: ext.visaStatus ? cleanVisaStatus(ext.visaStatus) : prev.visaStatus,
-    passportNo: (ext.passportNo || prev.passportNo || '').toUpperCase().trim(),
-    passportExpiry: ext.passportExpiry || prev.passportExpiry || '',
+    nationality: forceOverwrite ? (ext.nationality || prev.nationality || 'Cambodia') : (ext.nationality || prev.nationality || 'Cambodia'),
+    visaStatus: forceOverwrite
+      ? (ext.visaStatus ? cleanVisaStatus(ext.visaStatus) : '')
+      : ext.visaStatus
+      ? cleanVisaStatus(ext.visaStatus)
+      : prev.visaStatus,
+    passportNo: forceOverwrite
+      ? (ext.passportNo || '').toUpperCase().trim()
+      : (ext.passportNo || prev.passportNo || '').toUpperCase().trim(),
+    passportExpiry: forceOverwrite
+      ? (ext.passportExpiry || '')
+      : ext.passportExpiry || prev.passportExpiry || '',
     address: finalAddress,
     docVerificationNo: docParts,
     examNumber: finalExamNo,

@@ -1,6 +1,6 @@
 import dns from 'dns';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
-import { parseStructuredTextCorpus } from '../src/server/serverOcr.ts';
+import { parseStructuredTextCorpus, parseFlexibleDate } from '../src/server/serverOcr.ts';
 
 dns.setDefaultResultOrder('ipv4first');
 
@@ -138,8 +138,9 @@ function sanitizeExtractedData(raw: any): Record<string, any> {
 
   if (raw?.round) {
     const rawRound = String(raw.round).replace(/[^0-9]/g, '');
-    if (rawRound && !/^0+$/.test(rawRound)) {
-      result.round = rawRound;
+    const roundNum = parseInt(rawRound, 10);
+    if (rawRound && !/^0+$/.test(rawRound) && roundNum >= 1 && roundNum <= 300) {
+      result.round = String(roundNum);
     }
   }
 
@@ -182,12 +183,19 @@ function sanitizeExtractedData(raw: any): Record<string, any> {
     result.address = String(raw.address).trim();
   }
   if (raw?.examDate && !String(raw.examDate).startsWith('0000')) {
-    const dm = String(raw.examDate).match(/(\d{4})[.\-\s년/]+(\d{1,2})[.\-\s월/]+(\d{1,2})/);
-    if (dm) result.examDate = `${dm[1]}-${dm[2].padStart(2, '0')}-${dm[3].padStart(2, '0')}`;
+    const parsedExamDate = parseFlexibleDate(String(raw.examDate), 2012, 2035);
+    if (parsedExamDate) {
+      result.examDate = parsedExamDate;
+    }
   }
   if (raw?.validUntil && !String(raw.validUntil).startsWith('0000')) {
-    const vm = String(raw.validUntil).match(/(\d{4})[.\-\s년/]+(\d{1,2})[.\-\s월/]+(\d{1,2})/);
-    if (vm) result.validUntil = `${vm[1]}-${vm[2].padStart(2, '0')}-${vm[3].padStart(2, '0')}`;
+    const validRaw = String(raw.validUntil);
+    const rangeParts = validRaw.split(/[~～〜]/);
+    const candidate = rangeParts.length >= 2 ? rangeParts[rangeParts.length - 1] : validRaw;
+    const parsedValid = parseFlexibleDate(candidate, 2015, 2040) || parseFlexibleDate(validRaw, 2015, 2040);
+    if (parsedValid) {
+      result.validUntil = parsedValid;
+    }
   }
 
   if (raw?.passportNo) {
@@ -199,9 +207,9 @@ function sanitizeExtractedData(raw: any): Record<string, any> {
 
   if (raw?.passportExpiry) {
     const rawExp = String(raw.passportExpiry).trim();
-    const dateMatch = rawExp.match(/(\d{4})[.\-\s년/]+(\d{1,2})[.\-\s월/]+(\d{1,2})/);
-    if (dateMatch) {
-      result.passportExpiry = `${dateMatch[1]}-${dateMatch[2].padStart(2, '0')}-${dateMatch[3].padStart(2, '0')}`;
+    const parsedExp = parseFlexibleDate(rawExp, 2018, 2050);
+    if (parsedExp) {
+      result.passportExpiry = parsedExp;
     } else if (rawExp && !rawExp.startsWith('0000')) {
       result.passportExpiry = rawExp;
     }
@@ -383,16 +391,16 @@ CRITICAL INSTRUCTIONS FOR ALIEN REGISTRATION CARD (외국인등록증) & PASSPOR
 4. gender: "남" (Male) or "여" (Female).
 5. nationality: Country/region name in English as printed on the card or passport.
 6. visaStatus: 체류자격 Visa code if visible on the card.
-7. address: Latest Korean residence address on the back of the card (체류지), choosing the row with the most recent report date (신고일) or bottom-most entry.
+7. address: Latest Korean residence address on the back of the card (체류지 / 체류지 변경사항 table). Read EVERY row carefully (including road name 도로명, building number 건물번호, and multi-line wrapped 동/호 details), ignore the printed fine notice ("새로운 체류지... 14일 이내..."), and return ONLY the row with the MOST RECENT 신고일 (Report Date) or bottom-most entered row.
 8. passportNo: Passport Number (여권번호 / Passport No.) if a passport is uploaded.
 9. passportExpiry: Passport Date of Expiry formatted as YYYY-MM-DD.
 
 CRITICAL INSTRUCTIONS FOR TOPIK SCORE CERTIFICATE (한국어능력시험 성적증명서):
 1. docVerificationNo: 문서확인번호 (16 digits at top-right header, returned as array of 4 strings of 4 digits each).
 2. examNumber: 수험번호 (10 to 16 numeric digits in the table).
-3. round: 회차 numeric round only.
-4. examDate: 시험일자 formatted as YYYY-MM-DD.
-5. validUntil: 성적유효기간 formatted as YYYY-MM-DD.
+3. round: 회 / 회차 / 시행회차 numeric digits ONLY (e.g. from "제 93 회", "107회", or "The 93rd Test" extract "93" or "107").
+4. examDate: 시험일 / 시행일 / Test Date formatted STRICTLY as YYYY-MM-DD (NEVER return 생년월일 Birth Date or 발급일 Issue Date).
+5. validUntil: 성적유효기간 / Valid Until formatted STRICTLY as YYYY-MM-DD. If printed as a range like "2024.05.30 ~ 2026.05.30", ALWAYS return the END/EXPIRATION date ("2026-05-30").
 6. grade: 등급 (1급, 2급, 3급, 4급, 5급, or 6급).
 
 Return ONLY structured JSON according to the schema.
@@ -415,15 +423,18 @@ Return ONLY structured JSON according to the schema.
         gender: { type: Type.STRING },
         nationality: { type: Type.STRING },
         visaStatus: { type: Type.STRING },
-        address: { type: Type.STRING },
+        address: {
+          type: Type.STRING,
+          description: "LATEST residence address (체류지 주소) from ARC back based on most recent 신고일 or bottom-most row.",
+        },
         docVerificationNo: {
           type: Type.ARRAY,
           items: { type: Type.STRING },
         },
         examNumber: { type: Type.STRING },
-        examDate: { type: Type.STRING },
-        round: { type: Type.STRING },
-        validUntil: { type: Type.STRING },
+        examDate: { type: Type.STRING, description: "TOPIK 시험일 / 시행일 YYYY-MM-DD (not birth date)" },
+        round: { type: Type.STRING, description: "TOPIK 제XX회 / 시행회차 numeric digits only" },
+        validUntil: { type: Type.STRING, description: "TOPIK 성적유효기간 END date YYYY-MM-DD" },
         grade: { type: Type.STRING },
         passportNo: { type: Type.STRING },
         passportExpiry: { type: Type.STRING },
@@ -473,13 +484,22 @@ Return ONLY structured JSON according to the schema.
       }
     }
 
+    const pdfRawPreview = pdfTexts && typeof pdfTexts === 'object'
+      ? Object.entries(pdfTexts)
+          .filter(([, v]) => typeof v === 'string' && v.trim())
+          .map(([k, v]) => `[${k} PDF Text]\n${String(v).trim()}`)
+          .join('\n\n')
+          .slice(0, 2000)
+      : '';
+
     if (extractedData) {
-      const sanitized = sanitizeExtractedData(extractedData);
-      if (Object.keys(sanitized).length > 0) {
+      const merged = { ...parsedFromPdfTexts, ...sanitizeExtractedData(extractedData) };
+      if (Object.keys(merged).length > 0) {
         return res.status(200).json({
           success: true,
-          data: sanitized,
+          data: merged,
           model: successfulModel,
+          ...(pdfRawPreview ? { rawTextPreview: pdfRawPreview } : {}),
         });
       }
     }
@@ -489,6 +509,7 @@ Return ONLY structured JSON according to the schema.
         success: true,
         data: parsedFromPdfTexts,
         model: 'pdf-text-parser',
+        ...(pdfRawPreview ? { rawTextPreview: pdfRawPreview } : {}),
       });
     }
 

@@ -21,7 +21,11 @@ import {
   cleanName,
   parsePassportTextOrSvg
 } from '../utils/sanitizers';
-import { extractDocumentsClientSide, mergeExtractedIntoFormData, compressImageForApi } from '../utils/clientOcrEngine';
+import {
+  runFullDocumentOcrPipeline,
+  mergeExtractedIntoFormData,
+  mergeExtractedDrafts,
+} from '../utils/clientOcrEngine';
 import { saveFormDraft } from '../utils/draftStorage';
 import { 
   Sparkles, 
@@ -66,6 +70,7 @@ interface Step2FormTemplateProps {
   isPaid?: boolean;
   setIsPaid?: (paid: boolean) => void;
   onOpenPayment?: () => void;
+  hasConfirmedOcrReview?: boolean;
 }
 
 export const Step2FormTemplate: React.FC<Step2FormTemplateProps> = ({
@@ -82,6 +87,7 @@ export const Step2FormTemplate: React.FC<Step2FormTemplateProps> = ({
   isPaid = false,
   setIsPaid,
   onOpenPayment,
+  hasConfirmedOcrReview = false,
 }) => {
   const [showRightClickNotice, setShowRightClickNotice] = useState(false);
   const [showStep2SocinetPw, setShowStep2SocinetPw] = useState(false);
@@ -394,62 +400,32 @@ export const Step2FormTemplate: React.FC<Step2FormTemplateProps> = ({
     }
 
     try {
-      const isStaticGitHubPages = typeof window !== 'undefined' && window.location.hostname.includes('github.io');
-      let extractedFromServer = false;
+      const parsedArc = parseLocalArcData(frontToUse, backToUse) || {};
+      const parsedTopik = firstTopik ? parseLocalTopikData(firstTopik) || {} : {};
+      const parsedPassport = docs.passportList[0]?.dataUrl
+        ? parsePassportTextOrSvg(docs.passportList[0].dataUrl) || {}
+        : {};
 
-      if (!isStaticGitHubPages) {
-        try {
-          const [cFront, cBack, cTopik, cPassport] = await Promise.all([
-            compressImageForApi(frontToUse),
-            compressImageForApi(backToUse),
-            compressImageForApi(firstTopik),
-            compressImageForApi(docs.passportList[0]?.dataUrl || null),
-          ]);
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), 45000);
-          const response = await fetch('/api/extract-documents', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            signal: controller.signal,
-            body: JSON.stringify({
-              arcFront: cFront,
-              arcBack: cBack,
-              topikCert: cTopik,
-              passport: cPassport,
-            }),
-          });
-          clearTimeout(timer);
+      const pipelineRes = await runFullDocumentOcrPipeline({
+        arcFront: frontToUse,
+        arcBack: backToUse,
+        topikCert: firstTopik,
+        passport: docs.passportList[0]?.dataUrl || null,
+      });
 
-          if (response.ok) {
-            const resData = await response.json().catch(() => ({}));
-            if (resData && resData.data && !resData.fallbackMode) {
-              const ext = resData.data;
-              setFormData((prev) => mergeExtractedIntoFormData(prev, ext));
-              extractedFromServer = true;
-              setExtractSuccess(true);
-              setExtractSuccessMsg('✓ បានបំពេញ និងផ្ទៀងផ្ទាត់ពាក្យសុំ (신청서 작성) ដោយស្វ័យប្រវត្តិជោគជ័យ ១០០%!');
-              setTimeout(() => setExtractSuccess(false), 9000);
-            }
-          }
-        } catch {
-          // Fall back directly to client-side OCR below
-        }
-      }
+      const mergedExt = mergeExtractedDrafts(
+        {
+          ...parsedArc,
+          ...parsedTopik,
+          ...parsedPassport,
+        },
+        pipelineRes.data
+      );
 
-      if (!extractedFromServer) {
-        const clientResult = await extractDocumentsClientSide({
-          arcFront: frontToUse,
-          arcBack: backToUse,
-          topikCert: firstTopik,
-          passport: docs.passportList[0]?.dataUrl || null,
-          skipServer: !isStaticGitHubPages,
-        });
-
-        setFormData((prev) => mergeExtractedIntoFormData(prev, clientResult));
-        setExtractSuccess(true);
-        setExtractSuccessMsg('✓ បានបំពេញ និងផ្ទៀងផ្ទាត់ពាក្យសុំ (신청서 작성) ដោយស្វ័យប្រវត្តិតាមរយៈប្រព័ន្ធស្កេន OCR!');
-        setTimeout(() => setExtractSuccess(false), 8000);
-      }
+      setFormData((prev) => mergeExtractedIntoFormData(prev, mergedExt));
+      setExtractSuccess(true);
+      setExtractSuccessMsg('✓ បានបំពេញ និងផ្ទៀងផ្ទាត់ពាក្យសុំ (신청서 작성) ដោយស្វ័យប្រវត្តិជោគជ័យ ១០០%!');
+      setTimeout(() => setExtractSuccess(false), 9000);
     } catch (err: any) {
       console.warn('Extraction notice:', err);
 
@@ -520,8 +496,9 @@ export const Step2FormTemplate: React.FC<Step2FormTemplateProps> = ({
     }
   }, [docs.passportList]);
 
-  // Run auto-fill & verification automatically on mount or if documents are uploaded and form still has placeholders
+  // Run auto-fill & verification automatically on mount ONLY if user has NOT already confirmed Step 2 OCR Review
   useEffect(() => {
+    if (hasConfirmedOcrReview) return;
     const hasUploadedDocs = Boolean(
       docs.arcFront ||
       docs.arcBack ||
@@ -537,7 +514,7 @@ export const Step2FormTemplate: React.FC<Step2FormTemplateProps> = ({
     if (hasUploadedDocs && needsExtraction) {
       handleExtractWithAi();
     }
-  }, [docs.arcFront, docs.arcBack, docs.topikCertList.length, docs.passportList.length]);
+  }, [hasConfirmedOcrReview, docs.arcFront, docs.arcBack, docs.topikCertList.length, docs.passportList.length]);
 
   const matchedOffice = findOfficeByAddress(formData.address);
   const chiefTitle = matchedOffice
@@ -612,7 +589,7 @@ export const Step2FormTemplate: React.FC<Step2FormTemplateProps> = ({
           <div>
             <div className="flex items-center gap-2 mb-1">
               <span className="text-xs font-bold uppercase tracking-wider text-indigo-700 bg-indigo-50 px-2.5 py-0.5 rounded-full border border-indigo-200">
-                ជំហ៊ានទី ២ (Step 2)
+                {lang === 'km' ? 'ជំហ៊ានទី ៣ (Step 3)' : lang === 'ko' ? '3단계 (Step 3)' : 'Step 3'}
               </span>
             </div>
             <h2 className="text-xl sm:text-2xl font-bold text-slate-900">

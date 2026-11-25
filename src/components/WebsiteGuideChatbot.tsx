@@ -16,6 +16,7 @@ export type NavActionId =
   | 'step2'
   | 'step3'
   | 'step4'
+  | 'step5'
   | 'guide'
   | 'about'
   | 'socinet'
@@ -45,6 +46,7 @@ const VALID_NAV_ACTIONS = new Set<NavActionId>([
   'step2',
   'step3',
   'step4',
+  'step5',
   'guide',
   'about',
   'socinet',
@@ -80,9 +82,9 @@ function getUiCopy(lang: Language) {
       title: 'ជំនួយការណែនាំវេបសាយ',
       subtitleGuide: 'កំពុងមើលមគ្គុទ្ទេសក៍ TOPIK → KIIP',
       subtitleStep: (step: number, missing: number) =>
-        missing > 0 ? `ជំហានទី ${step} / 4 · ខ្វះ ${missing} ចំណុច` : `ជំហានទី ${step} / 4 · ឯកសារគ្រប់លក្ខខណ្ឌ`,
+        missing > 0 ? `ជំហានទី ${step} / 5 · ខ្វះ ${missing} ចំណុច` : `ជំហានទី ${step} / 5 · ឯកសារគ្រប់លក្ខខណ្ឌ`,
       welcome:
-        'សួស្តី! ខ្ញុំជាជំនួយការណែនាំការប្រើប្រាស់វេបសាយ KIIP & TOPIK។ សួរខ្ញុំបានគ្រប់យ៉ាងអំពីការបង្ហោះឯកសារ ការបំពេញទម្រង់ ការដោះសោ PDF ឬការផ្ញើអ៊ីមែលទៅការិយាល័យអន្តោប្រវេសន៍។',
+        'សួស្តី! ខ្ញុំជាជំនួយការណែនាំការប្រើប្រាស់វេបសាយ KIIP & TOPIK។ សួរខ្ញុំបានគ្រប់យ៉ាងអំពីការបង្ហោះឯកសារ ការផ្ទៀងផ្ទាត់ OCR ការបំពេញទម្រង់ ការដោះសោ PDF ឬការផ្ញើអ៊ីមែលទៅការិយាល័យអន្តោប្រវេសន៍។',
       placeholder: 'សួរពីរបៀបប្រើវេបសាយ...',
       sendLabel: 'ផ្ញើ',
       resetLabel: 'ចាប់ផ្តើមការសន្ទនាថ្មី',
@@ -97,9 +99,10 @@ function getUiCopy(lang: Language) {
       ],
       navLabels: {
         step1: 'ទៅជំហានទី ១ (បង្ហោះឯកសារ)',
-        step2: 'ទៅជំហានទី ២ (ពិនិត្យទម្រង់)',
-        step3: 'ទៅជំហានទី ៣ (មើល PDF)',
-        step4: 'ទៅជំហានទី ៤ (ផ្ញើអ៊ីមែល)',
+        step2: 'ទៅជំហានទី ២ (ផ្ទៀងផ្ទាត់ OCR)',
+        step3: 'ទៅជំហានទី ៣ (ពិនិត្យទម្រង់)',
+        step4: 'ទៅជំហានទី ៤ (មើល PDF)',
+        step5: 'ទៅជំហានទី ៥ (ផ្ញើអ៊ីមែល)',
         guide: 'បើកមគ្គុទ្ទេសក៍ TOPIK → KIIP',
         about: 'មើលទំព័រ About Me & ទំនាក់ទំនង',
         socinet: 'មើលសេចក្តីណែនាំ Socinet',
@@ -116,9 +119,9 @@ function getUiCopy(lang: Language) {
       title: '웹사이트 이용 도우미',
       subtitleGuide: 'TOPIK → KIIP 안내 보는 중',
       subtitleStep: (step: number, missing: number) =>
-        missing > 0 ? `${step}/4단계 · 필수 항목 ${missing}개 남음` : `${step}/4단계 · 서류 준비 완료`,
+        missing > 0 ? `${step}/5단계 · 필수 항목 ${missing}개 남음` : `${step}/5단계 · 서류 준비 완료`,
       welcome:
-        '안녕하세요! KIIP·TOPIK 성적 연계 신청 포털 이용 도우미입니다. 서류 업로드, 신청서 작성, PDF 병합·잠금해제, 관할 출입국 이메일 제출까지 무엇이든 물어보세요.',
+        '안녕하세요! KIIP·TOPIK 성적 연계 신청 포털 이용 도우미입니다. 서류 업로드, OCR 확인·수정, 신청서 작성, PDF 병합·잠금해제, 관할 출입국 이메일 제출까지 무엇이든 물어보세요.',
       placeholder: '웹사이트 이용 방법을 물어보세요...',
       sendLabel: '전송',
       resetLabel: '대화 초기화',
@@ -133,9 +136,10 @@ function getUiCopy(lang: Language) {
       ],
       navLabels: {
         step1: '1단계로 이동 (서류 업로드)',
-        step2: '2단계로 이동 (신청서 확인)',
-        step3: '3단계로 이동 (PDF 미리보기)',
-        step4: '4단계로 이동 (이메일 제출)',
+        step2: '2단계로 이동 (OCR 확인/수정)',
+        step3: '3단계로 이동 (신청서 확인)',
+        step4: '4단계로 이동 (PDF 미리보기)',
+        step5: '5단계로 이동 (이메일 제출)',
         guide: 'TOPIK → KIIP 가이드 열기',
         about: 'About Me / 연락처 보기',
         socinet: '사회통합정보망 안내 보기',
@@ -151,9 +155,9 @@ function getUiCopy(lang: Language) {
     title: 'Website Guide Assistant',
     subtitleGuide: 'Viewing TOPIK → KIIP Guide',
     subtitleStep: (step: number, missing: number) =>
-      missing > 0 ? `Step ${step} of 4 · ${missing} items left` : `Step ${step} of 4 · Ready`,
+      missing > 0 ? `Step ${step} of 5 · ${missing} items left` : `Step ${step} of 5 · Ready`,
     welcome:
-      'Hello! I can help you navigate this KIIP & TOPIK application portal — from uploading your documents and filling out the official form to unlocking your merged PDF and emailing your immigration center.',
+      'Hello! I can help you navigate this KIIP & TOPIK application portal — from uploading your documents and verifying OCR text to filling out the official form, unlocking your merged PDF, and emailing your immigration center.',
     placeholder: 'Ask how to use any step or feature...',
     sendLabel: 'Send',
     resetLabel: 'Reset conversation',
@@ -168,9 +172,10 @@ function getUiCopy(lang: Language) {
     ],
     navLabels: {
       step1: 'Go to Step 1 (Upload)',
-      step2: 'Go to Step 2 (Form)',
-      step3: 'Go to Step 3 (PDF Preview)',
-      step4: 'Go to Step 4 (Send Email)',
+      step2: 'Go to Step 2 (Verify OCR)',
+      step3: 'Go to Step 3 (Form)',
+      step4: 'Go to Step 4 (PDF Preview)',
+      step5: 'Go to Step 5 (Send Email)',
       guide: 'Open TOPIK → KIIP Guide',
       about: 'Open About Me & Contact',
       socinet: 'View Socinet Notice',

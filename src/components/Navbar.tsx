@@ -19,7 +19,8 @@ import {
   User,
   Image as ImageIcon,
   Lock,
-  CheckCircle
+  CheckCircle,
+  ScanText
 } from 'lucide-react';
 
 interface NavbarProps {
@@ -66,11 +67,25 @@ export const Navbar: React.FC<NavbarProps> = ({
   const t = getTranslation(lang);
   const [aboutAvatarError, setAboutAvatarError] = useState(false);
 
+  const formatOtherLangLabel = (rawLabel: string, stepNum: number) => {
+    if (lang === 'km' || lang === 'ko' || lang === 'en') return rawLabel;
+    const stripped = rawLabel.replace(/^[^\s:]+\s*\d+\s*[:：]\s*/, '').trim();
+    return `${stepNum}. ${stripped || rawLabel}`;
+  };
+
   const steps = [
     { num: 1, label: t.step1Tab, icon: Upload },
-    { num: 2, label: t.step2Tab, icon: CheckSquare },
-    { num: 3, label: t.step3Tab, icon: Download },
-    { num: 4, label: t.step4Tab, icon: Mail },
+    {
+      num: 2,
+      label:
+        lang === 'km' || lang === 'ko' || lang === 'en'
+          ? (t.step2OcrTab || 'Step 2: Verify OCR Data')
+          : '2. OCR Verification',
+      icon: ScanText,
+    },
+    { num: 3, label: formatOtherLangLabel(t.step2Tab, 3), icon: CheckSquare },
+    { num: 4, label: formatOtherLangLabel(t.step3Tab, 4), icon: Download },
+    { num: 5, label: formatOtherLangLabel(t.step4Tab, 5), icon: Mail },
   ];
 
   return (
@@ -281,12 +296,12 @@ export const Navbar: React.FC<NavbarProps> = ({
       {activeTab === 'flow' && (
         <div className="bg-slate-50 border-t border-slate-200/80 py-2">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div className="grid grid-cols-4 gap-1 sm:gap-3">
+            <div className="grid grid-cols-5 gap-1 sm:gap-2.5">
               {steps.map((s) => {
                 const isActive = currentStep === s.num;
                 const isCompleted = currentStep > s.num;
                 const isLocked = s.num > 1 && !isStep1Ready;
-                const isPayLocked = s.num === 4 && !isPaid;
+                const isPayLocked = s.num === 5 && !isPaid;
 
                 return (
                   <button
@@ -300,7 +315,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                       isLocked
                         ? (t.stepLockedAlert || 'សូមបំពេញឯកសាចាំបាច់ទាំងអស់ក្នុងជំហ៊ានទី ១ ជាមុនសិន')
                         : isPayLocked
-                        ? 'តម្រូវឱ្យបង់ប្រាក់ជាមុនសិន ទើបអាចបន្តទៅជំហានទី ៤ បាន'
+                        ? 'តម្រូវឱ្យបង់ប្រាក់ជាមុនសិន ទើបអាចបន្តទៅជំហានទី ៥ បាន'
                         : undefined
                     }
                     className={`flex items-center justify-center sm:justify-start gap-1.5 sm:gap-2.5 px-2 sm:px-3 py-1.5 rounded-lg text-xs font-medium transition-all ${
