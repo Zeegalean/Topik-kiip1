@@ -105,16 +105,26 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
     sizeStr: string;
   } | null>(null);
 
-  // Quick VIP Promo Code state
+  // Quick Redeem Code & Separate Promo Code state (no prior payment needed!)
+  const [redeemCodeInput, setRedeemCodeInput] = useState('');
   const [promoCodeInput, setPromoCodeInput] = useState('');
   const [promoCodeMsg, setPromoCodeMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
-  const handlePromoUnlock = async (overrideCode?: string) => {
-    const raw = (overrideCode || promoCodeInput).trim().toUpperCase();
+  const handlePromoUnlock = async (overrideCode?: string, mode: 'redeem' | 'promo' = 'promo') => {
+    const raw = (overrideCode ?? (mode === 'redeem' ? redeemCodeInput : promoCodeInput)).trim().toUpperCase();
     if (!raw) {
       setPromoCodeMsg({
         type: 'error',
-        text: 'សូមបញ្ចូលលេខកូដ Promo Code!',
+        text:
+          lang === 'ko'
+            ? mode === 'redeem'
+              ? '리딤 코드를 입력해 주세요.'
+              : '프로모션 코드를 입력해 주세요.'
+            : lang === 'en'
+            ? 'Please enter a Redeem or Promo Code!'
+            : mode === 'redeem'
+            ? 'សូមបញ្ចូលលេខកូដ Redeem Code!'
+            : 'សូមបញ្ចូលលេខកូដ Promo Code!',
       });
       return;
     }
@@ -122,26 +132,38 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
     let isValid = false;
     let matchedCenterId: string | undefined;
     let errorReason: string | null = null;
+    let shouldTryFirestore = true;
 
-    // 1. Verify against backend API (Master Promo, single-use Korea Bank / Telegram codes, REDEEM_CODES)
+    // 1. Verify against backend API (Admin Promo DB, 10,000 Google Sheet Redeem DB, Admin Redeem DB, Master Promo)
     try {
       const resp = await fetch('/api/payments/verify-redeem', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: raw }),
+        body: JSON.stringify({ code: raw, mode, lang }),
       });
       const data = await resp.json().catch(() => ({}));
       if (resp.ok && data?.success) {
         isValid = true;
-      } else if (data?.error) {
-        errorReason = data.error;
+        if (data.centerId) matchedCenterId = String(data.centerId);
+      } else {
+        if (data?.error) errorReason = data.error;
+        if (
+          data?.errorCode === 'ALREADY_USED' ||
+          data?.errorCode === 'REVOKED' ||
+          data?.errorCode === 'EXPIRED' ||
+          data?.errorCode === 'LIMIT_REACHED' ||
+          data?.errorCode === 'INACTIVE'
+        ) {
+          shouldTryFirestore = false;
+        }
       }
     } catch {
       // Fall through to Firestore promo check
     }
 
-    // 2. Verify against Admin-managed Firestore /promoCodes/{CODE}
-    if (!isValid) {
+    // 2. Fallback: Verify against Admin-managed Firestore /promoCodes/{CODE}
+    if (!isValid && shouldTryFirestore) {
       const fsCheck = await verifyAndRedeemFirestorePromo(raw);
       if (fsCheck.valid) {
         isValid = true;
@@ -160,19 +182,30 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
         userEmail: '',
         amount: 0,
         currency: 'KRW',
-        method: 'Promo / Unlock Code',
+        method: mode === 'redeem' ? 'Redeem Code' : 'Promo Code',
         promoCodeUsed: raw,
         centerId: matchedCenterId,
       }).catch(() => {});
       confetti({ particleCount: 160, spread: 90, origin: { y: 0.5 } });
       setPromoCodeMsg({
         type: 'success',
-        text: '✓ កូដ Promo Code ត្រឹមត្រូវ! បានដោះសោទាញយក Clean PDF ដោយជោគជ័យ!',
+        text:
+          lang === 'ko'
+            ? '✓ 코드 인증 완료! Clean PDF가 잠금 해제되었습니다!'
+            : lang === 'en'
+            ? '✓ Code verified! Clean PDF unlocked successfully!'
+            : '✓ លេខកូដត្រឹមត្រូវ! បានដោះសោទាញយក Clean PDF ដោយជោគជ័យ!',
       });
     } else {
       setPromoCodeMsg({
         type: 'error',
-        text: errorReason || 'កូដមិនត្រឹមត្រូវ ឬផុតសុពលភាព! សូមពិនិត្យលេខកូដរបស់អ្នកម្តងទៀត។',
+        text:
+          errorReason ||
+          (lang === 'ko'
+            ? '유효하지 않거나 이미 사용된 코드입니다. 코드를 다시 확인해 주세요.'
+            : lang === 'en'
+            ? 'Invalid or already used code! Please double-check and try again.'
+            : 'រកមិនឃើញលេខកូដនេះ ឬត្រូវបានប្រើរួចហើយ! សូមពិនិត្យលេខកូដរបស់អ្នកម្តងទៀត។'),
       });
     }
   };
@@ -402,36 +435,70 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
                   )}
                 </button>
 
-                {/* Quick Promo Code input (masked) */}
-                <div className="flex flex-col items-end gap-1">
-                  <div className="flex items-center gap-1.5 p-1 bg-purple-50 border border-purple-300 rounded-2xl shadow-2xs">
-                    <span className="flex items-center gap-1 pl-2 pr-1 text-purple-700 font-bold text-[11px] select-none">
-                      <Gift className="w-4 h-4 text-purple-600" />
-                      <span>Promo</span>
-                    </span>
-                    <input
-                      type="password"
-                      autoComplete="off"
-                      value={promoCodeInput}
-                      onChange={(e) => {
-                        setPromoCodeInput(e.target.value);
-                        setPromoCodeMsg(null);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') handlePromoUnlock();
-                      }}
-                      placeholder="••••••"
-                      className="w-24 sm:w-28 px-2 py-1.5 bg-white border border-purple-200 rounded-xl text-xs font-mono font-bold text-purple-950 outline-none placeholder:text-slate-400 text-center"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => handlePromoUnlock()}
-                      className="px-3 py-1.5 bg-purple-600 hover:bg-purple-700 active:scale-95 text-white text-xs font-bold rounded-xl shadow-xs cursor-pointer flex items-center gap-1 shrink-0 transition-transform"
-                      title="ដោះសោទាញយកដោយមិនបាច់បាញ់លុយ"
-                    >
-                      <Zap className="w-3.5 h-3.5 text-amber-300" />
-                      <span>{lang === 'km' ? 'ដោះសោ' : 'Unlock'}</span>
-                    </button>
+                {/* Quick Redeem Code (10,000 Sheet / Admin) & Separate Promo Code inputs */}
+                <div className="flex flex-col items-end gap-1.5">
+                  <div className="flex flex-wrap items-center justify-end gap-1.5">
+                    {/* Redeem Code Box */}
+                    <div className="flex items-center gap-1 p-1 bg-indigo-50 border border-indigo-300 rounded-2xl shadow-2xs">
+                      <span className="flex items-center gap-1 pl-2 pr-0.5 text-indigo-700 font-bold text-[11px] select-none">
+                        <Ticket className="w-3.5 h-3.5 text-indigo-600" />
+                        <span>Redeem</span>
+                      </span>
+                      <input
+                        type="text"
+                        autoComplete="off"
+                        value={redeemCodeInput}
+                        onChange={(e) => {
+                          setRedeemCodeInput(e.target.value.toUpperCase());
+                          setPromoCodeMsg(null);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handlePromoUnlock(redeemCodeInput, 'redeem');
+                        }}
+                        placeholder="Sheet / Admin"
+                        className="w-28 sm:w-32 px-2 py-1.5 bg-white border border-indigo-200 rounded-xl text-[11px] font-mono font-bold uppercase text-indigo-950 outline-none placeholder:font-sans placeholder:font-normal placeholder:text-slate-400"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handlePromoUnlock(redeemCodeInput, 'redeem')}
+                        className="px-2.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white text-[11px] font-bold rounded-xl shadow-xs cursor-pointer flex items-center gap-1 shrink-0 transition-transform"
+                        title="ដោះសោដោយ Redeem Code (Google Sheet / Admin) ដោយមិនបាច់បង់លុយ"
+                      >
+                        <Zap className="w-3 h-3 text-amber-300" />
+                        <span>{lang === 'km' ? 'ដោះសោ' : lang === 'ko' ? '해제' : 'Unlock'}</span>
+                      </button>
+                    </div>
+
+                    {/* Separate Promo Code Box */}
+                    <div className="flex items-center gap-1 p-1 bg-purple-50 border border-purple-300 rounded-2xl shadow-2xs">
+                      <span className="flex items-center gap-1 pl-2 pr-0.5 text-purple-700 font-bold text-[11px] select-none">
+                        <Gift className="w-3.5 h-3.5 text-purple-600" />
+                        <span>Promo</span>
+                      </span>
+                      <input
+                        type="text"
+                        autoComplete="off"
+                        value={promoCodeInput}
+                        onChange={(e) => {
+                          setPromoCodeInput(e.target.value.toUpperCase());
+                          setPromoCodeMsg(null);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handlePromoUnlock(promoCodeInput, 'promo');
+                        }}
+                        placeholder="Promo / Sheet"
+                        className="w-28 sm:w-32 px-2 py-1.5 bg-white border border-purple-200 rounded-xl text-[11px] font-mono font-bold uppercase text-purple-950 outline-none placeholder:font-sans placeholder:font-normal placeholder:text-slate-400"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => handlePromoUnlock(promoCodeInput, 'promo')}
+                        className="px-2.5 py-1.5 bg-purple-600 hover:bg-purple-700 active:scale-95 text-white text-[11px] font-bold rounded-xl shadow-xs cursor-pointer flex items-center gap-1 shrink-0 transition-transform"
+                        title="ដោះសោដោយ Promo Code ឬ Google Sheet ដោយមិនបាច់បង់លុយ"
+                      >
+                        <Zap className="w-3 h-3 text-amber-300" />
+                        <span>{lang === 'km' ? 'ប្រើកូដ' : lang === 'ko' ? '적용' : 'Apply'}</span>
+                      </button>
+                    </div>
                   </div>
                   {promoCodeMsg && (
                     <div className={`text-[11px] font-bold px-2.5 py-1 rounded-lg animate-in fade-in flex items-center gap-1 ${

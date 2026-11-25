@@ -70,12 +70,12 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const [processingStep, setProcessingStep] = useState<string>('');
   const [isSuccess, setIsSuccess] = useState(false);
 
-  // Dedicated Redeem / Promo Code State
-  const [redeemPlatform, setRedeemPlatform] = useState<'voucher' | 'promo'>('voucher');
+  // Dedicated Redeem Code State (10,000 Google Sheet & Admin Dashboard Redeem DB)
   const [redeemCode, setRedeemCode] = useState('');
   const [redeemError, setRedeemError] = useState<string | null>(null);
+  const [redeemSuccess, setRedeemSuccess] = useState(false);
 
-  // Quick Redeem / Promo Code State (top bar)
+  // Separate Promo Code State (Admin Dashboard Promo Codes + 10,000 Google Sheet Codes)
   const [promoCodeInput, setPromoCodeInput] = useState('');
   const [promoCodeError, setPromoCodeError] = useState<string | null>(null);
   const [promoCodeSuccess, setPromoCodeSuccess] = useState(false);
@@ -180,23 +180,30 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     }
   };
 
-  // Strict Promo / Redeem Code verification (Server SQLite DB + Firestore /promoCodes/{CODE})
+  // Unified Redeem / Promo Code verification (Instant unlock without prior payment:
+  // checks Master Promo, Server Admin Promo DB, 10,000 Google Sheet + Admin Redeem DB, and Firestore Promo Codes)
   const verifyCodeAndUnlock = async (rawInput: string, source: 'promo' | 'redeem') => {
     const trimmed = rawInput.trim().toUpperCase();
     const setErr = source === 'promo' ? setPromoCodeError : setRedeemError;
+    const setOk = source === 'promo' ? setPromoCodeSuccess : setRedeemSuccess;
 
     if (!trimmed) {
       setErr(
         isKm
-          ? 'សូមបញ្ចូលលេខកូដ Redeem Code / Promo Code!'
+          ? source === 'promo'
+            ? 'សូមបញ្ចូលលេខកូដ Promo Code ឬលេខកូដពី Google Sheet!'
+            : 'សូមបញ្ចូលលេខកូដ Redeem Code (ពី Google Sheet ឬ Admin)!'
           : isKo
-          ? '리딤 코드를 입력해 주세요.'
+          ? source === 'promo'
+            ? '프로모션 코드 또는 리딤 코드를 입력해 주세요.'
+            : '리딤 코드를 입력해 주세요.'
           : 'Please enter a valid Redeem / Promo Code!'
       );
       return;
     }
 
     setErr(null);
+    setOk(false);
     setIsProcessing(true);
     setProcessingStep(
       isKm
@@ -210,30 +217,50 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     let matchedCenterId: string | undefined;
     let matchedType = source === 'promo' ? 'Promo Code' : 'Redeem Code';
     let serverErrorMsg: string | null = null;
+    let shouldTryFirestore = true;
 
-    // 1. Strict server verification (SQLite Redeem DB, Master Promo, Korea Bank/Telegram codes)
+    // 1. Server verification (Admin Promo DB, 10,000 Google Sheet Redeem DB, Admin Redeem DB, Master Promo)
     try {
       const resp = await fetch('/api/payments/verify-redeem', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: trimmed }),
+        body: JSON.stringify({
+          code: trimmed,
+          userEmail: userEmail || '',
+          mode: source,
+          lang,
+        }),
       });
       const data = await resp.json().catch(() => ({}));
       if (resp.ok && data?.success) {
         verified = true;
-        if (data.type === 'telegram_receipt') matchedType = 'Telegram Auto-Unlock';
+        if (data.centerId) matchedCenterId = String(data.centerId);
+        if (data.type === 'telegram_bot' || data.type === 'telegram_receipt') matchedType = 'Telegram Auto-Unlock';
         else if (data.type === 'kr_receipt') matchedType = 'Korea Bank Receipt Code';
-        else if (data.type === 'redeem') matchedType = 'Single-Use Voucher';
+        else if (data.type === 'google_sheets') matchedType = 'Google Sheet Redeem Code';
+        else if (data.type === 'admin_promo') matchedType = 'Admin Promo Code';
+        else if (data.type === 'database' || data.type === 'admin' || data.type === 'redeem') matchedType = 'Admin Redeem Code';
         else matchedType = 'Promo Code';
       } else {
         serverErrorMsg = data?.error || null;
+        // Do not mask definitive status errors with a Firestore lookup
+        if (
+          data?.errorCode === 'ALREADY_USED' ||
+          data?.errorCode === 'REVOKED' ||
+          data?.errorCode === 'EXPIRED' ||
+          data?.errorCode === 'LIMIT_REACHED' ||
+          data?.errorCode === 'INACTIVE'
+        ) {
+          shouldTryFirestore = false;
+        }
       }
     } catch {
       // Fall through to Firestore check
     }
 
-    // 2. Firestore Admin-managed Promo Code lookup by exact code ID
-    if (!verified) {
+    // 2. Fallback: Firestore Admin-managed Promo Code lookup by exact code ID (for Firebase-signed-in users)
+    if (!verified && shouldTryFirestore) {
       const fsCheck = await verifyAndRedeemFirestorePromo(trimmed);
       if (fsCheck.valid) {
         verified = true;
@@ -245,9 +272,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     }
 
     if (verified) {
-      if (source === 'promo') {
-        setPromoCodeSuccess(true);
-      }
+      setOk(true);
       recordPaymentTransaction({
         userEmail: userEmail || '',
         amount: 0,
@@ -271,10 +296,10 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       setErr(
         serverErrorMsg ||
           (isKm
-            ? 'លេខកូដមិនត្រឹមត្រូវ ឬត្រូវបានប្រើរួចហើយ! សូមពិនិត្យម្តងទៀត ឬផ្ញើ Screenshot ការបង់ប្រាក់ទៅ Facebook / Telegram Bot។'
+            ? 'រកមិនឃើញលេខកូដនេះ ឬត្រូវបានប្រើរួចហើយ! សូមពិនិត្យអក្សរឡើងវិញ ឬយកលេខកូដ Unused ពី Admin Dashboard / Google Sheet។'
             : isKo
-            ? '유효하지 않거나 이미 사용된 코드입니다. 다시 확인하거나 결제 후 코드를 발급받아 주세요.'
-            : 'Invalid or already used code! Please check your code or send your payment screenshot to Telegram Bot / Facebook.')
+            ? '유효하지 않거나 이미 사용된 코드입니다. 코드를 다시 확인해 주세요.'
+            : 'Code not found or already used! Please double-check your Redeem / Promo Code.')
       );
     }
   };
@@ -343,8 +368,9 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       // Automatically burn the single-use code and unlock Clean PDF
       await fetch('/api/payments/verify-redeem', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: data.unlockCode }),
+        body: JSON.stringify({ code: data.unlockCode, userEmail: userEmail || '', lang }),
       }).catch(() => {});
 
       setTimeout(() => {
@@ -548,33 +574,103 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               </div>
             </div>
 
-            {/* Quick Redeem / Promo Code Unlock Box (Always Ready!) */}
-            <div className="p-4 bg-gradient-to-r from-purple-50 via-indigo-50 to-pink-50 border-2 border-purple-300 rounded-2xl space-y-2.5 shadow-xs">
-              <div className="flex items-center gap-2">
-                <span className="p-1.5 rounded-lg bg-purple-600 text-white shadow-2xs">
-                  <Ticket className="w-4 h-4" />
-                </span>
-                <div>
-                  <span className="text-xs font-black text-purple-950 block">
-                    {isKm
-                      ? 'មានលេខកូដដោះសោ (Redeem Code) ហើយមែនទេ? វាយបញ្ចូលទីនេះ!'
-                      : isKo
-                      ? '발급받은 리딤 코드(Redeem Code) 입력하여 즉시 잠금 해제'
-                      : 'Have a Redeem Code? Enter it below to unlock immediately'}
+            {/* Dual Instant Unlock Boxes (No Prior Payment Required!):
+                1. Redeem Code Box (10,000 Google Sheet & Admin Redeem DB)
+                2. Separate Promo Code Box (Admin Promo Codes + 10,000 Google Sheet Codes) */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              {/* BOX 1: Redeem Code (10,000 Google Sheet & Admin Dashboard) */}
+              <div className="p-3.5 bg-gradient-to-br from-indigo-50 via-blue-50 to-slate-50 border-2 border-indigo-300 rounded-2xl space-y-2 shadow-xs">
+                <div className="flex items-start gap-2">
+                  <span className="p-1.5 rounded-lg bg-indigo-600 text-white shadow-2xs shrink-0 mt-0.5">
+                    <Ticket className="w-3.5 h-3.5" />
                   </span>
-                  <span className="text-[10.5px] text-purple-700">
-                    {isKm
-                      ? 'ប្រើលេខកូដដែលទទួលបានពី Telegram Bot, Facebook Page ឬ Admin ដើម្បីដោះសោ PDF ភ្លាមៗ'
-                      : isKo
-                      ? '텔레그램 봇 또는 페이스북에서 받은 코드를 입력해 Clean PDF를 다운로드하세요'
-                      : 'Enter the unlock code received from Telegram Bot, Facebook Page, or Admin'}
-                  </span>
+                  <div className="min-w-0">
+                    <span className="text-xs font-black text-indigo-950 block leading-tight">
+                      {isKm
+                        ? 'ប្រអប់ Redeem Code (Google Sheet / Admin)'
+                        : isKo
+                        ? '리딤 코드 입력 (Redeem Code)'
+                        : 'Redeem Code (Google Sheet / Admin)'}
+                    </span>
+                    <span className="text-[10.5px] text-indigo-700 leading-snug block mt-0.5">
+                      {isKm
+                        ? 'វាយកូដពី Google Sheet (10,000 កូដ) ឬ Admin Dashboard ដើម្បីដោះសោភ្លាមៗដោយមិនបាច់បង់លុយ'
+                        : isKo
+                        ? '결제 없이 Google Sheet(10,000개) 또는 관리자 리딤 코드로 즉시 해제'
+                        : 'Unlock instantly without paying using Google Sheet (10,000) or Admin codes'}
+                    </span>
+                  </div>
                 </div>
+
+                <div className="flex items-center gap-1.5 pt-0.5">
+                  <input
+                    type="text"
+                    autoComplete="off"
+                    value={redeemCode}
+                    onChange={(e) => {
+                      setRedeemCode(e.target.value.toUpperCase());
+                      setRedeemError(null);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        verifyCodeAndUnlock(redeemCode, 'redeem');
+                      }
+                    }}
+                    placeholder={isKm ? 'ឧ. ZSCE-W5AO-BLCI' : 'e.g. ZSCE-W5AO-BLCI'}
+                    className="w-full min-w-0 px-3 py-2 bg-white border border-indigo-300 rounded-xl text-xs font-mono font-bold tracking-wider uppercase text-indigo-950 focus:outline-none focus:ring-2 focus:ring-indigo-400 placeholder:font-sans placeholder:font-normal placeholder:text-slate-400"
+                  />
+                  <button
+                    type="button"
+                    disabled={isProcessing}
+                    onClick={() => verifyCodeAndUnlock(redeemCode, 'redeem')}
+                    className="px-3 py-2 bg-indigo-600 hover:bg-indigo-700 active:scale-95 text-white text-xs font-black rounded-xl shadow-sm flex items-center gap-1 cursor-pointer shrink-0 transition-transform disabled:opacity-50"
+                  >
+                    <Zap className="w-3.5 h-3.5 text-amber-300" />
+                    <span>{isKm ? 'ដោះសោ' : isKo ? '해제' : 'Unlock'}</span>
+                  </button>
+                </div>
+
+                {redeemError && (
+                  <div className="p-2 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-[11px] flex items-start gap-1.5">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                    <span>{redeemError}</span>
+                  </div>
+                )}
+
+                {redeemSuccess && (
+                  <div className="p-2 rounded-xl bg-emerald-50 border border-emerald-300 text-emerald-800 text-[11px] flex items-center gap-1.5 font-bold">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                    <span>{isKm ? '✓ ដោះសោ Redeem Code ជោគជ័យ!' : '✓ Redeem Code unlocked!'}</span>
+                  </div>
+                )}
               </div>
 
-              <div className="flex items-center gap-2 pt-1">
-                <div className="relative flex-1">
-                  <Ticket className="w-4 h-4 text-purple-500 absolute left-3 top-3" />
+              {/* BOX 2: Separate Promo Code Box (Admin Promo + 10,000 Google Sheet Codes) */}
+              <div className="p-3.5 bg-gradient-to-br from-purple-50 via-fuchsia-50 to-pink-50 border-2 border-purple-300 rounded-2xl space-y-2 shadow-xs">
+                <div className="flex items-start gap-2">
+                  <span className="p-1.5 rounded-lg bg-purple-600 text-white shadow-2xs shrink-0 mt-0.5">
+                    <Gift className="w-3.5 h-3.5" />
+                  </span>
+                  <div className="min-w-0">
+                    <span className="text-xs font-black text-purple-950 block leading-tight">
+                      {isKm
+                        ? 'ប្រអប់ Promo Code ផ្សេង (ប្រូម៉ូកូដ)'
+                        : isKo
+                        ? '프로모션 코드 입력 (Promo Code)'
+                        : 'Promo Code (Admin & Sheet Codes)'}
+                    </span>
+                    <span className="text-[10.5px] text-purple-700 leading-snug block mt-0.5">
+                      {isKm
+                        ? 'ប្រើ Promo Code ពី Admin Dashboard និងអាចដាក់លេខកូដ Google Sheet (10,000 កូដ) បានផងដែរ'
+                        : isKo
+                        ? '관리자 프로모션 코드 및 Google Sheet 10,000개 코드 모두 입력 가능'
+                        : 'Accepts Admin Dashboard Promo Codes and all 10,000 Google Sheet codes'}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1.5 pt-0.5">
                   <input
                     type="text"
                     autoComplete="off"
@@ -589,34 +685,34 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                         verifyCodeAndUnlock(promoCodeInput, 'promo');
                       }
                     }}
-                    placeholder={isKm ? 'ឧ. KIIP-26-XXXXXX' : 'e.g. KIIP-26-XXXXXX'}
-                    className="w-full pl-9 pr-3 py-2.5 bg-white border border-purple-300 rounded-xl text-xs sm:text-sm font-mono font-bold tracking-wider uppercase text-purple-950 focus:outline-none focus:ring-2 focus:ring-purple-400 placeholder:font-sans placeholder:font-normal placeholder:text-slate-400"
+                    placeholder={isKm ? 'ឧ. KIIP-PROMO / Sheet Code' : 'e.g. KIIP-PROMO'}
+                    className="w-full min-w-0 px-3 py-2 bg-white border border-purple-300 rounded-xl text-xs font-mono font-bold tracking-wider uppercase text-purple-950 focus:outline-none focus:ring-2 focus:ring-purple-400 placeholder:font-sans placeholder:font-normal placeholder:text-slate-400"
                   />
+                  <button
+                    type="button"
+                    disabled={isProcessing}
+                    onClick={() => verifyCodeAndUnlock(promoCodeInput, 'promo')}
+                    className="px-3 py-2 bg-gradient-to-r from-purple-600 to-fuchsia-600 hover:from-purple-700 hover:to-fuchsia-700 active:scale-95 text-white text-xs font-black rounded-xl shadow-sm flex items-center gap-1 cursor-pointer shrink-0 transition-transform disabled:opacity-50"
+                  >
+                    <Gift className="w-3.5 h-3.5 text-amber-200" />
+                    <span>{isKm ? 'ប្រើកូដ' : isKo ? '적용' : 'Apply'}</span>
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  disabled={isProcessing}
-                  onClick={() => verifyCodeAndUnlock(promoCodeInput, 'promo')}
-                  className="px-4 py-2.5 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700 active:scale-95 text-white text-xs font-black rounded-xl shadow-md flex items-center gap-1.5 cursor-pointer shrink-0 transition-transform disabled:opacity-50"
-                >
-                  <Zap className="w-3.5 h-3.5 text-amber-300" />
-                  <span>{isKm ? 'ដោះសោភ្លាមៗ' : isKo ? '잠금 해제' : 'Unlock Now'}</span>
-                </button>
+
+                {promoCodeError && (
+                  <div className="p-2 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-[11px] flex items-start gap-1.5">
+                    <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                    <span>{promoCodeError}</span>
+                  </div>
+                )}
+
+                {promoCodeSuccess && (
+                  <div className="p-2 rounded-xl bg-emerald-50 border border-emerald-300 text-emerald-800 text-[11px] flex items-center gap-1.5 font-bold">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                    <span>{isKm ? '✓ ដោះសោ Promo Code ជោគជ័យ!' : '✓ Promo Code unlocked!'}</span>
+                  </div>
+                )}
               </div>
-
-              {promoCodeError && (
-                <div className="p-2 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center gap-2">
-                  <AlertCircle className="w-4 h-4 shrink-0" />
-                  <span>{promoCodeError}</span>
-                </div>
-              )}
-
-              {promoCodeSuccess && (
-                <div className="p-2 rounded-xl bg-emerald-50 border border-emerald-300 text-emerald-800 text-xs flex items-center gap-2 font-bold">
-                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                  <span>✓ លេខកូដត្រឹមត្រូវ! កំពុងដោះសោ Clean PDF...</span>
-                </div>
-              )}
             </div>
 
             {/* Payment Method Selector: ONLY 2 Active Payment Methods + Redeem Code; All Others Unavailable */}
@@ -987,130 +1083,170 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               </div>
             )}
 
-            {/* TAB 3: STRICT REDEEM / VOUCHER CODE */}
+            {/* TAB 3: REDEEM CODE (10,000 GOOGLE SHEET / ADMIN DB) + SEPARATE PROMO CODE BOX */}
             {activeTab === 'redeem' && (
               <div className="space-y-4">
-                <div className="p-4 bg-gradient-to-r from-purple-50 via-indigo-50 to-pink-50 rounded-2xl border border-purple-200 space-y-2">
-                  <div className="flex items-center gap-2.5">
-                    <div className="w-8 h-8 rounded-xl bg-purple-600 text-white flex items-center justify-center shrink-0 shadow-xs">
-                      <Ticket className="w-4 h-4" />
+                <div className="p-3.5 bg-slate-50 rounded-2xl border border-slate-200 text-xs text-slate-700 leading-relaxed">
+                  {isKm
+                    ? '🔓 អាចដោះសោទាញយក Clean PDF បានភ្លាមៗដោយមិនចាំបាច់បង់ប្រាក់ជាមុន! អ្នកអាចប្រើលេខកូដពី Google Sheet (10,000 កូដ), Admin Dashboard (Redeem DB) ឬ Promo Code ក្នុងប្រអប់ខាងក្រោម៖'
+                    : isKo
+                    ? '🔓 별도 결제 없이 즉시 잠금 해제할 수 있습니다. Google Sheet 10,000개 리딤 코드, 관리자 대시보드 코드 또는 프로모션 코드를 아래에 입력하세요.'
+                    : '🔓 Unlock Clean PDF immediately without prior payment using any of the 10,000 Google Sheet codes, Admin Dashboard Redeem codes, or Promo Codes below:'}
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                  {/* Card 1: Redeem Code Box */}
+                  <div className="p-4 rounded-2xl bg-indigo-50/70 border border-indigo-200 space-y-3">
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 rounded-xl bg-indigo-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+                        <Ticket className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h4 className="text-xs sm:text-sm font-black text-indigo-950">
+                          {isKm ? '1. ប្រអប់ Redeem Code' : isKo ? '1. 리딤 코드 (Redeem)' : '1. Redeem Code'}
+                        </h4>
+                        <p className="text-[11px] text-indigo-700">
+                          {isKm ? 'សម្រាប់ 10,000 កូដ Google Sheet & Admin DB' : 'Google Sheet 10,000 & Admin DB'}
+                        </p>
+                      </div>
                     </div>
-                    <div>
-                      <h4 className="text-xs sm:text-sm font-black text-purple-950">
-                        {isKm ? 'លេខកូដដោះសោឯកសារ (Redeem / Voucher Code)' : 'Redeem / Voucher Code'}
-                      </h4>
-                      <p className="text-[11px] text-purple-700">
-                        {isKm
-                          ? 'បញ្ចូលលេខកូដដែលទទួលបានពី Telegram Bot, Facebook Page ឬ Admin បន្ទាប់ពីបង់ប្រាក់តាមធនាគារកូរ៉េ ឬ ABA PAY'
-                          : isKo
-                          ? '계좌이체 또는 ABA 결제 후 텔레그램 봇/페이스북에서 받은 일회용 코드를 입력하세요'
-                          : 'Enter the single-use code received from Telegram Bot, Facebook Page, or Admin'}
-                      </p>
+
+                    <div className="relative">
+                      <Ticket className="w-4 h-4 text-indigo-500 absolute left-3 top-3" />
+                      <input
+                        type="text"
+                        autoComplete="off"
+                        value={redeemCode}
+                        onChange={(e) => {
+                          setRedeemCode(e.target.value.toUpperCase());
+                          setRedeemError(null);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            verifyCodeAndUnlock(redeemCode, 'redeem');
+                          }
+                        }}
+                        placeholder={isKm ? 'ឧ. ZSCE-W5AO-BLCI' : 'e.g. ZSCE-W5AO-BLCI'}
+                        className="w-full pl-9 pr-14 py-2.5 rounded-xl bg-white border border-indigo-300 text-xs sm:text-sm font-mono tracking-wider font-bold uppercase focus:border-indigo-600 focus:ring-2 focus:ring-indigo-100 outline-none"
+                      />
+                      {redeemCode && (
+                        <button
+                          type="button"
+                          onClick={() => setRedeemCode('')}
+                          className="absolute right-2.5 top-2.5 text-[11px] text-slate-400 hover:text-slate-600 px-1.5 py-0.5 rounded cursor-pointer"
+                        >
+                          {t.clearBtn}
+                        </button>
+                      )}
                     </div>
+
+                    {redeemError && (
+                      <div className="p-2 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-start gap-2">
+                        <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                        <span>{redeemError}</span>
+                      </div>
+                    )}
+
+                    <button
+                      type="button"
+                      disabled={isProcessing}
+                      onClick={() => verifyCodeAndUnlock(redeemCode, 'redeem')}
+                      className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white font-black text-xs sm:text-sm rounded-xl shadow-md flex items-center justify-center gap-2 transition-all cursor-pointer disabled:opacity-60"
+                    >
+                      {isProcessing ? (
+                        <>
+                          <RefreshCw className="w-4 h-4 animate-spin text-white" />
+                          <span>{processingStep}</span>
+                        </>
+                      ) : (
+                        <>
+                          <Ticket className="w-4 h-4 text-white" />
+                          <span>{isKm ? 'ដោះសោដោយ Redeem Code' : isKo ? '리딤 코드로 잠금 해제' : 'Unlock with Redeem Code'}</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  {/* Card 2: Separate Promo Code Box */}
+                  <div className="p-4 rounded-2xl bg-purple-50/70 border border-purple-200 space-y-3">
+                    <div className="flex items-center gap-2">
+                      <div className="w-8 h-8 rounded-xl bg-purple-600 text-white flex items-center justify-center shrink-0 shadow-xs">
+                        <Gift className="w-4 h-4" />
+                      </div>
+                      <div>
+                        <h4 className="text-xs sm:text-sm font-black text-purple-950">
+                          {isKm ? '2. ប្រអប់ Promo Code ផ្សេង' : isKo ? '2. 프로모션 코드 (Promo)' : '2. Promo Code Box'}
+                        </h4>
+                        <p className="text-[11px] text-purple-700">
+                          {isKm ? 'Admin Promo Code + 10,000 កូដ Google Sheet' : 'Admin Promo + 10,000 Google Sheet Codes'}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="relative">
+                      <Gift className="w-4 h-4 text-purple-500 absolute left-3 top-3" />
+                      <input
+                        type="text"
+                        autoComplete="off"
+                        value={promoCodeInput}
+                        onChange={(e) => {
+                          setPromoCodeInput(e.target.value.toUpperCase());
+                          setPromoCodeError(null);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            verifyCodeAndUnlock(promoCodeInput, 'promo');
+                          }
+                        }}
+                        placeholder={isKm ? 'ឧ. KIIP-PROMO / Sheet Code' : 'e.g. KIIP-PROMO'}
+                        className="w-full pl-9 pr-14 py-2.5 rounded-xl bg-white border border-purple-300 text-xs sm:text-sm font-mono tracking-wider font-bold uppercase focus:border-purple-600 focus:ring-2 focus:ring-purple-100 outline-none"
+                      />
+                      {promoCodeInput && (
+                        <button
+                          type="button"
+                          onClick={() => setPromoCodeInput('')}
+                          className="absolute right-2.5 top-2.5 text-[11px] text-slate-400 hover:text-slate-600 px-1.5 py-0.5 rounded cursor-pointer"
+                        >
+                          {t.clearBtn}
+                        </button>
+                      )}
+                    </div>
+
+                    {promoCodeError && (
+                      <div className="p-2 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-start gap-2">
+                        <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                        <span>{promoCodeError}</span>
+                      </div>
+                    )}
+
+                    <button
+                      type="button"
+                      disabled={isProcessing}
+                      onClick={() => verifyCodeAndUnlock(promoCodeInput, 'promo')}
+                      className="w-full py-2.5 bg-gradient-to-r from-purple-600 to-fuchsia-600 hover:from-purple-700 hover:to-fuchsia-700 text-white font-black text-xs sm:text-sm rounded-xl shadow-md flex items-center justify-center gap-2 transition-all cursor-pointer disabled:opacity-60"
+                    >
+                      {isProcessing ? (
+                        <>
+                          <RefreshCw className="w-4 h-4 animate-spin text-white" />
+                          <span>{processingStep}</span>
+                        </>
+                      ) : (
+                        <>
+                          <Gift className="w-4 h-4 text-white" />
+                          <span>{isKm ? 'ដោះសោដោយ Promo Code' : isKo ? '프로모션 코드로 잠금 해제' : 'Unlock with Promo Code'}</span>
+                        </>
+                      )}
+                    </button>
                   </div>
                 </div>
 
-                {/* Type selector */}
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setRedeemPlatform('voucher');
-                      setRedeemError(null);
-                    }}
-                    className={`p-2.5 rounded-xl border text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
-                      redeemPlatform === 'voucher'
-                        ? 'border-indigo-600 bg-indigo-50 text-indigo-900 ring-2 ring-indigo-500/20'
-                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
-                    }`}
-                  >
-                    <Ticket className="w-4 h-4 text-indigo-600 shrink-0" />
-                    <span>1-Time Redeem Code</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setRedeemPlatform('promo');
-                      setRedeemError(null);
-                    }}
-                    className={`p-2.5 rounded-xl border text-xs font-bold transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
-                      redeemPlatform === 'promo'
-                        ? 'border-purple-600 bg-purple-50 text-purple-900 ring-2 ring-purple-500/20'
-                        : 'border-slate-200 bg-white text-slate-700 hover:bg-slate-50'
-                    }`}
-                  >
-                    <Gift className="w-4 h-4 text-purple-600 shrink-0" />
-                    <span>VIP Promo Code</span>
-                  </button>
-                </div>
-
-                <div>
-                  <label className="text-xs font-bold text-slate-700 block mb-1">
-                    {isKm ? 'វាយបញ្ចូលលេខកូដដោះសោ៖' : isKo ? '코드 입력:' : 'Enter Code:'}
-                  </label>
-                  <div className="relative">
-                    <Ticket className="w-4 h-4 text-purple-500 absolute left-3 top-3.5" />
-                    <input
-                      type="text"
-                      autoComplete="off"
-                      value={redeemCode}
-                      onChange={(e) => {
-                        setRedeemCode(e.target.value.toUpperCase());
-                        setRedeemError(null);
-                      }}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') {
-                          e.preventDefault();
-                          verifyCodeAndUnlock(redeemCode, 'redeem');
-                        }
-                      }}
-                      placeholder={isKm ? 'ឧ. KIIP-26-XXXXXX' : 'e.g. KIIP-26-XXXXXX'}
-                      className="w-full pl-9 pr-20 py-3 rounded-xl border border-slate-300 text-sm font-mono tracking-wider font-bold uppercase focus:border-purple-600 focus:ring-2 focus:ring-purple-100 outline-none"
-                    />
-                    {redeemCode && (
-                      <button
-                        type="button"
-                        onClick={() => setRedeemCode('')}
-                        className="absolute right-3 top-3 text-xs text-slate-400 hover:text-slate-600 px-2 py-0.5 rounded cursor-pointer"
-                      >
-                        {t.clearBtn}
-                      </button>
-                    )}
-                  </div>
-
-                  {redeemError && (
-                    <div className="mt-2 p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-center gap-2">
-                      <AlertCircle className="w-4 h-4 shrink-0" />
-                      <span>{redeemError}</span>
-                    </div>
-                  )}
-                </div>
-
-                <div className="flex flex-col sm:flex-row gap-2.5">
-                  <button
-                    type="button"
-                    disabled={isProcessing}
-                    onClick={() => verifyCodeAndUnlock(redeemCode, 'redeem')}
-                    className="flex-1 py-3.5 bg-gradient-to-r from-purple-600 via-indigo-600 to-purple-700 hover:from-purple-700 hover:to-indigo-700 text-white font-black text-sm rounded-2xl shadow-lg flex items-center justify-center gap-2 transition-all cursor-pointer disabled:opacity-60"
-                  >
-                    {isProcessing ? (
-                      <>
-                        <RefreshCw className="w-4 h-4 animate-spin text-white" />
-                        <span>{processingStep}</span>
-                      </>
-                    ) : (
-                      <>
-                        <Ticket className="w-4 h-4 text-white" />
-                        <span>{isKm ? 'ផ្ទៀងផ្ទាត់លេខកូដ & ដោះសោ' : 'Verify & Unlock'}</span>
-                      </>
-                    )}
-                  </button>
-
+                <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
                     onClick={() => setActiveTab('krbank')}
-                    className="px-4 py-3.5 rounded-2xl bg-emerald-50 hover:bg-emerald-100 text-emerald-900 font-bold text-xs border border-emerald-200 cursor-pointer"
+                    className="px-4 py-2.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-900 font-bold text-xs border border-emerald-200 cursor-pointer"
                   >
                     🇰🇷 {isKm ? 'បង់តាមធនាគារកូរ៉េ' : 'Korea Bank'}
                   </button>
@@ -1118,7 +1254,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                   <button
                     type="button"
                     onClick={() => setActiveTab('khqr')}
-                    className="px-4 py-3.5 rounded-2xl bg-sky-50 hover:bg-sky-100 text-[#004f80] font-bold text-xs border border-sky-200 cursor-pointer"
+                    className="px-4 py-2.5 rounded-xl bg-sky-50 hover:bg-sky-100 text-[#004f80] font-bold text-xs border border-sky-200 cursor-pointer"
                   >
                     {isKm ? 'បង់តាម ABA QR' : 'ABA QR'}
                   </button>

@@ -19,6 +19,8 @@ import {
   Database,
   Send,
   KeyRound,
+  Copy,
+  Check,
 } from 'lucide-react';
 import { Language } from '../types';
 import {
@@ -162,6 +164,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [newLimit, setNewLimit] = useState(50);
   const [newExpiresAt, setNewExpiresAt] = useState(defaultExpiry);
   const [promoFeedback, setPromoFeedback] = useState<string | null>(null);
+  const [copiedPromoCode, setCopiedPromoCode] = useState<string | null>(null);
 
   // New Support Center Form State
   const [newCenterName, setNewCenterName] = useState('');
@@ -191,13 +194,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
     const docsById = new Map<string, DocumentItem>();
     const paysById = new Map<string, PaymentItem>();
+    const promosByCode = new Map<string, PromoCodeItem>();
 
-    // 1. Fetch real server-side analytics (when authenticated with server Admin Bearer token)
+    // 1. Fetch real server-side analytics & server-side promo codes (when authenticated with Admin Bearer token)
     if (adminToken) {
       try {
-        const resp = await fetch('/api/admin/analytics', {
-          headers: { Authorization: `Bearer ${adminToken}` },
-        });
+        const [resp, promosResp] = await Promise.all([
+          fetch('/api/admin/analytics', {
+            headers: { Authorization: `Bearer ${adminToken}` },
+          }),
+          fetch('/api/admin/promo-codes', {
+            headers: { Authorization: `Bearer ${adminToken}` },
+          }).catch(() => null),
+        ]);
         if (resp.ok) {
           const json = await resp.json();
           if (json?.success) {
@@ -233,6 +242,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             }
             if (json.integrations) {
               setIntegrations(json.integrations);
+            }
+          }
+        }
+        if (promosResp && promosResp.ok) {
+          const pJson = await promosResp.json().catch(() => null);
+          if (pJson?.success && Array.isArray(pJson.promoCodes)) {
+            for (const p of pJson.promoCodes) {
+              const key = String(p.code || p.id || '').toUpperCase();
+              if (!key) continue;
+              promosByCode.set(key, {
+                id: key,
+                code: key,
+                centerId: String(p.centerId || 'general'),
+                monthLabel: p.monthLabel ? String(p.monthLabel) : undefined,
+                usageLimit: Number(p.usageLimit) || 50,
+                usageCount: Number(p.usageCount) || 0,
+                expiresAt: String(p.expiresAt || ''),
+                isActive: p.isActive !== false,
+                createdAt: String(p.createdAt || ''),
+              });
             }
           }
         }
@@ -292,23 +321,39 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
         try {
           const promosSnap = await getDocs(collection(db, 'promoCodes'));
-          const pList: PromoCodeItem[] = [];
+          const fsPromoList: PromoCodeItem[] = [];
           promosSnap.forEach((d) => {
             const data = d.data();
-            pList.push({
-              id: d.id,
-              code: String(data.code || d.id),
-              centerId: String(data.centerId || ''),
+            const key = String(data.code || d.id).toUpperCase();
+            const item: PromoCodeItem = {
+              id: key,
+              code: key,
+              centerId: String(data.centerId || 'general'),
               monthLabel: data.monthLabel ? String(data.monthLabel) : undefined,
               usageLimit: Number(data.usageLimit) || 50,
               usageCount: Number(data.usageCount) || 0,
               expiresAt: String(data.expiresAt || ''),
               isActive: data.isActive !== false,
               createdAt: formatFirestoreDate(data.createdAt),
+            };
+            fsPromoList.push(item);
+            const existing = promosByCode.get(key);
+            promosByCode.set(key, {
+              ...item,
+              usageCount: Math.max(item.usageCount, existing?.usageCount || 0),
             });
           });
-          pList.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-          setPromoCodes(pList);
+          // Automatically mirror Firestore promo codes to server SQLite so guests/non-Google users can redeem them
+          if (adminToken && fsPromoList.length > 0) {
+            fetch('/api/admin/promo-codes', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${adminToken}`,
+              },
+              body: JSON.stringify({ promos: fsPromoList }),
+            }).catch(() => {});
+          }
         } catch (err) {
           handleFirestoreError(err, OperationType.LIST, 'promoCodes');
         }
@@ -355,8 +400,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     const sortedPays = Array.from(paysById.values()).sort((a, b) =>
       b.createdAt.localeCompare(a.createdAt)
     );
+    const sortedPromos = Array.from(promosByCode.values()).sort((a, b) =>
+      b.createdAt.localeCompare(a.createdAt)
+    );
     setDocumentsList(sortedDocs);
     setPaymentsList(sortedPays);
+    setPromoCodes(sortedPromos);
     setLoadingData(false);
   }, [isAuthorizedAdmin, adminToken, isFirebaseRootAdmin, isKm, newCenterId]);
 
@@ -467,11 +516,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     e.preventDefault();
     setPromoFeedback(null);
 
-    if (!isFirebaseRootAdmin) {
+    if (!adminToken && !isFirebaseRootAdmin) {
       setPromoFeedback(
         isKm
-          ? 'សូមចុច "ភ្ជាប់ Cloud Firestore (Google Admin)" ជាមុនសិនដើម្បីរក្សាទុក Promo Code ចូល Database។'
-          : 'Please sign in with Google Admin to save promo codes to Cloud Firestore.'
+          ? 'សូមចូលគណនី Admin ជាមុនសិនដើម្បីបង្កើត Promo Code។'
+          : 'Please sign in as Admin first to create promo codes.'
       );
       return;
     }
@@ -485,41 +534,111 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     const chosenCenter = sanitizeId(newCenterId || centers[0]?.id || 'general');
     const safeLimit = Math.max(1, Math.min(100000, Number(newLimit) || 50));
 
-    try {
-      await setDoc(doc(db, 'promoCodes', codeStr), {
-        id: codeStr,
-        code: codeStr,
-        centerId: chosenCenter,
-        monthLabel: newMonthLabel.slice(0, 32),
-        usageLimit: safeLimit,
-        usageCount: 0,
-        expiresAt: newExpiresAt.slice(0, 32),
-        isActive: true,
-        createdAt: serverTimestamp(),
-      });
-      setNewCode('');
-      setPromoFeedback(isKm ? `✓ បានបង្កើត Promo Code "${codeStr}" ចូល Firestore ជោគជ័យ!` : `✓ Created promo code "${codeStr}" in Firestore.`);
-      await loadAllRealData();
-    } catch (err) {
+    let savedServer = false;
+    let savedFirestore = false;
+    let lastError = '';
+
+    // 1. Save to server SQLite DB so ALL users (even guests without Google login) can unlock immediately
+    if (adminToken) {
       try {
-        handleFirestoreError(err, OperationType.CREATE, `promoCodes/${codeStr}`);
-      } catch (wrapped: any) {
-        setPromoFeedback(wrapped?.message || 'Failed to save promo code.');
+        const resp = await fetch('/api/admin/promo-codes', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${adminToken}`,
+          },
+          body: JSON.stringify({
+            code: codeStr,
+            centerId: chosenCenter,
+            monthLabel: newMonthLabel.slice(0, 32),
+            usageLimit: safeLimit,
+            expiresAt: newExpiresAt.slice(0, 32),
+            isActive: true,
+          }),
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (resp.ok && data?.success) {
+          savedServer = true;
+        } else {
+          lastError = data?.error || 'Failed to save to server database.';
+        }
+      } catch (err: any) {
+        lastError = err?.message || 'Server error while saving promo code.';
       }
+    }
+
+    // 2. Also save to Cloud Firestore when connected as Google Root Admin
+    if (isFirebaseRootAdmin) {
+      try {
+        await setDoc(doc(db, 'promoCodes', codeStr), {
+          id: codeStr,
+          code: codeStr,
+          centerId: chosenCenter,
+          monthLabel: newMonthLabel.slice(0, 32),
+          usageLimit: safeLimit,
+          usageCount: 0,
+          expiresAt: newExpiresAt.slice(0, 32),
+          isActive: true,
+          createdAt: serverTimestamp(),
+        });
+        savedFirestore = true;
+      } catch (err) {
+        try {
+          handleFirestoreError(err, OperationType.CREATE, `promoCodes/${codeStr}`);
+        } catch (wrapped: any) {
+          if (!savedServer) {
+            lastError = wrapped?.message || 'Failed to save promo code to Firestore.';
+          }
+        }
+      }
+    }
+
+    if (savedServer || savedFirestore) {
+      setNewCode('');
+      setPromoFeedback(
+        isKm
+          ? `✓ បានបង្កើត Promo Code "${codeStr}" រួចរាល់! អាចយកទៅប្រើដោះសោបានភ្លាមៗដោយមិនបាច់បង់ប្រាក់។`
+          : `✓ Created promo code "${codeStr}"! Ready for immediate unlock without payment.`
+      );
+      await loadAllRealData();
+    } else {
+      setPromoFeedback(lastError || 'Failed to save promo code.');
     }
   };
 
   const handleDeletePromo = async (id: string) => {
-    if (!isFirebaseRootAdmin) return;
-    try {
-      await deleteDoc(doc(db, 'promoCodes', id));
-      setPromoCodes((prev) => prev.filter((p) => p.id !== id));
-    } catch (err) {
+    if (!adminToken && !isFirebaseRootAdmin) return;
+    if (adminToken) {
       try {
-        handleFirestoreError(err, OperationType.DELETE, `promoCodes/${id}`);
+        await fetch(`/api/admin/promo-codes/${encodeURIComponent(id)}`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${adminToken}` },
+        });
       } catch {
-        // Logged via handleFirestoreError
+        // Non-blocking
       }
+    }
+    if (isFirebaseRootAdmin) {
+      try {
+        await deleteDoc(doc(db, 'promoCodes', id));
+      } catch (err) {
+        try {
+          handleFirestoreError(err, OperationType.DELETE, `promoCodes/${id}`);
+        } catch {
+          // Logged via handleFirestoreError
+        }
+      }
+    }
+    setPromoCodes((prev) => prev.filter((p) => p.id !== id));
+  };
+
+  const handleCopyPromoCode = (code: string) => {
+    try {
+      navigator.clipboard.writeText(code);
+      setCopiedPromoCode(code);
+      setTimeout(() => setCopiedPromoCode(null), 1800);
+    } catch {
+      // ignore clipboard errors
     }
   };
 
@@ -1118,7 +1237,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <div className="bg-white rounded-3xl border border-slate-200 shadow-xs overflow-hidden">
                       <div className="p-5 border-b border-slate-200 flex items-center justify-between">
                         <h4 className="font-extrabold text-slate-900 text-sm">
-                          {isKm ? 'បញ្ជី Promo Codes ក្នុង Cloud Firestore' : 'Active Firestore Promotion Codes'}
+                          {isKm ? 'បញ្ជី Promo Codes សកម្ម (Server DB + Cloud Firestore)' : 'Active Promotion Codes (Server DB + Firestore)'}
                         </h4>
                         <span className="text-xs text-slate-500 tabular-nums">{promoCodes.length} codes</span>
                       </div>
@@ -1126,8 +1245,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       {promoCodes.length === 0 ? (
                         <div className="p-10 text-center text-xs text-slate-500">
                           {isKm
-                            ? 'មិនទាន់មាន Promo Code ក្នុង Firestore ទេ។ សូមបង្កើត Promo Code ថ្មីខាងលើ!'
-                            : 'No promotion codes created in Firestore yet.'}
+                            ? 'មិនទាន់មាន Promo Code នៅឡើយទេ។ សូមបង្កើត Promo Code ថ្មីខាងលើ ដើម្បីចែកជូនអ្នកប្រើប្រាស់ដោះសោដោយមិនបាច់បង់ប្រាក់!'
+                            : 'No promotion codes created yet. Create one above for instant unlock!'}
                         </div>
                       ) : (
                         <div className="overflow-x-auto">
@@ -1146,7 +1265,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                 const centerObj = centers.find((c) => c.id === p.centerId);
                                 return (
                                   <tr key={p.id} className="hover:bg-slate-50/80">
-                                    <td className="p-4 font-mono font-bold text-purple-900">{p.code}</td>
+                                    <td className="p-4">
+                                      <div className="flex items-center gap-2">
+                                        <span className="font-mono font-bold text-purple-900">{p.code}</span>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleCopyPromoCode(p.code)}
+                                          className="p-1 rounded-md text-slate-400 hover:text-purple-700 hover:bg-purple-50 transition-colors cursor-pointer"
+                                          title={isKm ? 'ចម្លង Promo Code' : 'Copy Promo Code'}
+                                        >
+                                          {copiedPromoCode === p.code ? (
+                                            <Check className="w-3.5 h-3.5 text-emerald-600" />
+                                          ) : (
+                                            <Copy className="w-3.5 h-3.5" />
+                                          )}
+                                        </button>
+                                      </div>
+                                    </td>
                                     <td className="p-4">{centerObj ? centerObj.centerName : p.centerId}</td>
                                     <td className="p-4">
                                       <div className="flex items-center gap-2">

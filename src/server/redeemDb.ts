@@ -234,6 +234,19 @@ export function getRedeemDb(): DatabaseSync {
       last_login_at TEXT DEFAULT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_user_accounts_email ON user_accounts(email);
+
+    CREATE TABLE IF NOT EXISTS promo_codes (
+      code TEXT PRIMARY KEY,
+      code_compact TEXT NOT NULL DEFAULT '',
+      center_id TEXT NOT NULL DEFAULT 'general',
+      month_label TEXT NOT NULL DEFAULT '',
+      usage_limit INTEGER NOT NULL DEFAULT 50,
+      usage_count INTEGER NOT NULL DEFAULT 0,
+      expires_at TEXT NOT NULL DEFAULT '',
+      is_active INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_promo_codes_compact ON promo_codes(code_compact);
   `);
 
   ensureRedeemSchemaMigrations(db);
@@ -528,16 +541,19 @@ export function checkRedeemCodeStatus(rawCode: string): {
  * Atomically verifies a Redeem Code and marks it 'Used' if its status is 'Unused'.
  * Supports both exact match and hyphen/space-insensitive compact alphanumeric match.
  */
+export type RedeemErrorCode = 'EMPTY' | 'NOT_FOUND' | 'ALREADY_USED' | 'REVOKED';
+
 export function verifyAndBurnRedeemCode(
   rawCode: string,
   usedBy = ''
-): { ok: boolean; statusCode: number; error?: string; record?: RedeemCodeRecord } {
+): { ok: boolean; statusCode: number; errorCode?: RedeemErrorCode; error?: string; record?: RedeemCodeRecord } {
   const code = normalizeCode(rawCode);
   const compact = compactCode(rawCode);
   if (!code || code.length < 4) {
     return {
       ok: false,
       statusCode: 400,
+      errorCode: 'EMPTY',
       error: 'សូមបញ្ចូលលេខកូដ Redeem Code ឱ្យបានត្រឹមត្រូវ!',
     };
   }
@@ -571,6 +587,7 @@ export function verifyAndBurnRedeemCode(
       return {
         ok: false,
         statusCode: 404,
+        errorCode: 'NOT_FOUND',
         error: 'រកមិនឃើញលេខកូដនេះក្នុងប្រព័ន្ធ Database ឡើយ!',
       };
     }
@@ -580,6 +597,7 @@ export function verifyAndBurnRedeemCode(
       return {
         ok: false,
         statusCode: 409,
+        errorCode: 'ALREADY_USED',
         error: 'លេខកូដដោះសោនេះត្រូវបានប្រើប្រាស់រួចហើយ (Used)!',
       };
     }
@@ -589,6 +607,7 @@ export function verifyAndBurnRedeemCode(
       return {
         ok: false,
         statusCode: 403,
+        errorCode: 'REVOKED',
         error: 'លេខកូដនេះត្រូវបានផ្អាក ឬផុតសុពលភាព (Revoked)!',
       };
     }
@@ -1922,5 +1941,251 @@ export function resetUserAccountPassword(params: {
   }
   return { ok: true };
 }
+
+// ============================================================================
+// SERVER-SIDE ADMIN PROMO CODES (Works for ALL users without requiring Google Sign-In)
+// ============================================================================
+export interface ServerPromoCodeRecord {
+  id: string;
+  code: string;
+  centerId: string;
+  monthLabel: string;
+  usageLimit: number;
+  usageCount: number;
+  expiresAt: string;
+  isActive: boolean;
+  createdAt: string;
+}
+
+export type PromoErrorCode = 'EMPTY' | 'NOT_FOUND' | 'INACTIVE' | 'EXPIRED' | 'LIMIT_REACHED';
+
+interface PromoCodeDbRow {
+  code: string;
+  code_compact: string;
+  center_id: string;
+  month_label: string;
+  usage_limit: number;
+  usage_count: number;
+  expires_at: string;
+  is_active: number;
+  created_at: string;
+}
+
+function mapPromoRow(r: PromoCodeDbRow): ServerPromoCodeRecord {
+  return {
+    id: String(r.code),
+    code: String(r.code),
+    centerId: String(r.center_id || 'general'),
+    monthLabel: String(r.month_label || ''),
+    usageLimit: Math.max(1, Number(r.usage_limit) || 50),
+    usageCount: Math.max(0, Number(r.usage_count) || 0),
+    expiresAt: String(r.expires_at || ''),
+    isActive: Number(r.is_active) !== 0,
+    createdAt: String(r.created_at || ''),
+  };
+}
+
+export function listServerPromoCodes(): ServerPromoCodeRecord[] {
+  const db = getRedeemDb();
+  const rows = db
+    .prepare(
+      `SELECT code, code_compact, center_id, month_label, usage_limit, usage_count, expires_at, is_active, created_at
+       FROM promo_codes
+       ORDER BY created_at DESC`
+    )
+    .all() as unknown as PromoCodeDbRow[];
+  return rows.map(mapPromoRow);
+}
+
+export function upsertServerPromoCode(params: {
+  code: string;
+  centerId?: string;
+  monthLabel?: string;
+  usageLimit?: number;
+  usageCount?: number;
+  expiresAt?: string;
+  isActive?: boolean;
+  createdAt?: string;
+  preserveUsageCount?: boolean;
+}): { ok: boolean; error?: string; promo?: ServerPromoCodeRecord } {
+  const code = normalizeCode(params.code);
+  const compact = compactCode(params.code);
+  if (code.length < 3 || code.length > 64) {
+    return {
+      ok: false,
+      error: 'លេខកូដ Promo Code ត្រូវមានចន្លោះ ៣ ដល់ ៦៤ តួអក្សរ (A-Z, 0-9, -, _)។',
+    };
+  }
+
+  const centerId = String(params.centerId || 'general')
+    .trim()
+    .replace(/[^a-zA-Z0-9_-]/g, '')
+    .slice(0, 64) || 'general';
+  const monthLabel = String(params.monthLabel || '').trim().slice(0, 32);
+  const usageLimit = Math.max(1, Math.min(100000, Math.floor(Number(params.usageLimit) || 50)));
+  const incomingUsageCount = Math.max(0, Math.floor(Number(params.usageCount) || 0));
+  const expiresAt = String(params.expiresAt || '').trim().slice(0, 32);
+  const isActive = params.isActive === false ? 0 : 1;
+  const createdAt = String(params.createdAt || '').trim() || new Date().toISOString();
+
+  const db = getRedeemDb();
+  if (params.preserveUsageCount) {
+    db.prepare(
+      `INSERT INTO promo_codes (code, code_compact, center_id, month_label, usage_limit, usage_count, expires_at, is_active, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(code) DO UPDATE SET
+         code_compact = excluded.code_compact,
+         center_id = excluded.center_id,
+         month_label = CASE WHEN excluded.month_label != '' THEN excluded.month_label ELSE promo_codes.month_label END,
+         usage_limit = excluded.usage_limit,
+         usage_count = MAX(promo_codes.usage_count, excluded.usage_count),
+         expires_at = excluded.expires_at,
+         is_active = excluded.is_active`
+    ).run(code, compact, centerId, monthLabel, usageLimit, incomingUsageCount, expiresAt, isActive, createdAt);
+  } else {
+    db.prepare(
+      `INSERT INTO promo_codes (code, code_compact, center_id, month_label, usage_limit, usage_count, expires_at, is_active, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(code) DO UPDATE SET
+         code_compact = excluded.code_compact,
+         center_id = excluded.center_id,
+         month_label = excluded.month_label,
+         usage_limit = excluded.usage_limit,
+         expires_at = excluded.expires_at,
+         is_active = excluded.is_active`
+    ).run(code, compact, centerId, monthLabel, usageLimit, incomingUsageCount, expiresAt, isActive, createdAt);
+  }
+
+  const row = db
+    .prepare(
+      `SELECT code, code_compact, center_id, month_label, usage_limit, usage_count, expires_at, is_active, created_at
+       FROM promo_codes WHERE code = ?`
+    )
+    .get(code) as unknown as PromoCodeDbRow | undefined;
+
+  return row ? { ok: true, promo: mapPromoRow(row) } : { ok: false, error: 'Failed to save promo code' };
+}
+
+export function deleteServerPromoCode(rawCode: string): boolean {
+  const code = normalizeCode(rawCode);
+  if (!code) return false;
+  const db = getRedeemDb();
+  const info = db.prepare('DELETE FROM promo_codes WHERE code = ?').run(code);
+  return Number(info.changes) > 0;
+}
+
+function isPromoExpired(expiresAt: string): boolean {
+  const trimmed = String(expiresAt || '').trim();
+  if (!trimmed) return false;
+  // Support YYYY-MM-DD (valid through end of that day in KST +09:00) or ISO timestamp
+  const parsed = /^\d{4}-\d{2}-\d{2}$/.test(trimmed)
+    ? new Date(`${trimmed}T23:59:59+09:00`)
+    : new Date(trimmed);
+  if (Number.isNaN(parsed.getTime())) return false;
+  return Date.now() > parsed.getTime();
+}
+
+export function verifyAndIncrementServerPromoCode(rawCode: string): {
+  ok: boolean;
+  statusCode: number;
+  errorCode?: PromoErrorCode;
+  error?: string;
+  promo?: ServerPromoCodeRecord;
+} {
+  const code = normalizeCode(rawCode);
+  const compact = compactCode(rawCode);
+  if (!code || code.length < 3) {
+    return {
+      ok: false,
+      statusCode: 400,
+      errorCode: 'EMPTY',
+      error: 'សូមបញ្ចូលលេខកូដ Promo Code ឱ្យបានត្រឹមត្រូវ!',
+    };
+  }
+
+  const db = getRedeemDb();
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    let row = db
+      .prepare(
+        `SELECT code, code_compact, center_id, month_label, usage_limit, usage_count, expires_at, is_active, created_at
+         FROM promo_codes WHERE code = ?`
+      )
+      .get(code) as unknown as PromoCodeDbRow | undefined;
+
+    if (!row && compact.length >= 3) {
+      row = db
+        .prepare(
+          `SELECT code, code_compact, center_id, month_label, usage_limit, usage_count, expires_at, is_active, created_at
+           FROM promo_codes WHERE code_compact = ?
+           ORDER BY is_active DESC, created_at DESC
+           LIMIT 1`
+        )
+        .get(compact) as unknown as PromoCodeDbRow | undefined;
+    }
+
+    if (!row) {
+      db.exec('COMMIT');
+      return {
+        ok: false,
+        statusCode: 404,
+        errorCode: 'NOT_FOUND',
+      };
+    }
+
+    if (Number(row.is_active) === 0) {
+      db.exec('COMMIT');
+      return {
+        ok: false,
+        statusCode: 403,
+        errorCode: 'INACTIVE',
+        error: 'លេខកូដ Promo Code នេះត្រូវបានផ្អាកដំណើរការ!',
+      };
+    }
+
+    if (isPromoExpired(row.expires_at)) {
+      db.exec('COMMIT');
+      return {
+        ok: false,
+        statusCode: 403,
+        errorCode: 'EXPIRED',
+        error: 'លេខកូដ Promo Code នេះបានផុតកំណត់ហើយ!',
+      };
+    }
+
+    const currentCount = Math.max(0, Number(row.usage_count) || 0);
+    const limit = Math.max(1, Number(row.usage_limit) || 50);
+    if (currentCount >= limit) {
+      db.exec('COMMIT');
+      return {
+        ok: false,
+        statusCode: 409,
+        errorCode: 'LIMIT_REACHED',
+        error: 'លេខកូដ Promo Code នេះត្រូវបានប្រើអស់ចំនួនកំណត់ហើយ!',
+      };
+    }
+
+    db.prepare(
+      `UPDATE promo_codes
+       SET usage_count = usage_count + 1
+       WHERE code = ? AND is_active = 1 AND usage_count < usage_limit`
+    ).run(row.code);
+
+    db.exec('COMMIT');
+    return {
+      ok: true,
+      statusCode: 200,
+      promo: mapPromoRow({ ...row, usage_count: currentCount + 1 }),
+    };
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      // ignore rollback failure
+    }
+    throw err;
+  }
+}
+
 
 

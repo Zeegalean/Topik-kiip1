@@ -21,6 +21,10 @@ import {
   syncRedeemCodesFromGoogleSheet,
   ensureGoogleSheetSynced,
   checkRedeemCodeStatus,
+  listServerPromoCodes,
+  upsertServerPromoCode,
+  deleteServerPromoCode,
+  verifyAndIncrementServerPromoCode,
   listAdminAccounts,
   createOrUpdateAdminAccount,
   verifyDbAdminLogin,
@@ -1183,22 +1187,119 @@ interface IssuedUnlockCode {
 }
 const issuedUnlockCodes = new Map<string, IssuedUnlockCode>();
 
+function localizeCodeError(
+  errorCode: 'EMPTY' | 'NOT_FOUND' | 'ALREADY_USED' | 'REVOKED' | 'INACTIVE' | 'EXPIRED' | 'LIMIT_REACHED',
+  lang: string
+): string {
+  const l = String(lang || 'km').toLowerCase();
+  if (l === 'ko') {
+    switch (errorCode) {
+      case 'EMPTY':
+        return '리딤 코드 또는 프로모션 코드를 입력해 주세요.';
+      case 'ALREADY_USED':
+        return '이미 사용된 일회용 코드입니다. 새 코드를 입력해 주세요.';
+      case 'REVOKED':
+        return '취소되었거나 비활성화된 코드입니다.';
+      case 'INACTIVE':
+        return '비활성화된 프로모션 코드입니다.';
+      case 'EXPIRED':
+        return '만료된 프로모션 코드입니다.';
+      case 'LIMIT_REACHED':
+        return '사용 한도가 모두 소진된 프로모션 코드입니다.';
+      case 'NOT_FOUND':
+      default:
+        return '시스템에서 일치하는 코드를 찾을 수 없습니다. 오타나 공백을 다시 확인해 주세요.';
+    }
+  }
+  if (l === 'en') {
+    switch (errorCode) {
+      case 'EMPTY':
+        return 'Please enter a Redeem Code or Promo Code.';
+      case 'ALREADY_USED':
+        return 'This single-use code has already been redeemed.';
+      case 'REVOKED':
+        return 'This code has been revoked or disabled.';
+      case 'INACTIVE':
+        return 'This promo code is currently inactive.';
+      case 'EXPIRED':
+        return 'This promo code has expired.';
+      case 'LIMIT_REACHED':
+        return 'This promo code has reached its maximum usage limit.';
+      case 'NOT_FOUND':
+      default:
+        return 'Code not found in our Redeem/Promo database. Please check for typos and try again.';
+    }
+  }
+  // Default: Khmer
+  switch (errorCode) {
+    case 'EMPTY':
+      return 'សូមបញ្ចូលលេខកូដ Redeem Code ឬ Promo Code!';
+    case 'ALREADY_USED':
+      return 'លេខកូដដោះសោនេះត្រូវបានប្រើប្រាស់រួចហើយ (Used)! សូមប្រើលេខកូដថ្មីផ្សេងទៀត។';
+    case 'REVOKED':
+      return 'លេខកូដនេះត្រូវបានផ្អាក ឬផុតសុពលភាព (Revoked)!';
+    case 'INACTIVE':
+      return 'លេខកូដ Promo Code នេះត្រូវបានផ្អាកដំណើរការ!';
+    case 'EXPIRED':
+      return 'លេខកូដ Promo Code នេះបានផុតកំណត់ហើយ!';
+    case 'LIMIT_REACHED':
+      return 'លេខកូដ Promo Code នេះត្រូវបានប្រើអស់ចំនួនកំណត់ហើយ!';
+    case 'NOT_FOUND':
+    default:
+      return 'រកមិនឃើញលេខកូដនេះក្នុងប្រព័ន្ធ (Redeem DB / Google Sheet / Promo Codes) ឡើយ! សូមពិនិត្យអក្សរ ឬដកឃ្លាឡើងវិញ។';
+  }
+}
+
 app.post('/api/payments/verify-redeem', paymentRateLimiter, async (req, res) => {
   const rawCode = String(req.body?.code || '').trim().toUpperCase();
   const userEmail = String(req.body?.userEmail || '').trim().slice(0, 160);
+  const lang = String(req.body?.lang || 'km').trim().toLowerCase();
+
   if (!rawCode) {
     return res.status(400).json({
       success: false,
-      error: 'សូមបញ្ចូលលេខកូដ Promo / Redeem Code!',
+      errorCode: 'EMPTY',
+      error: localizeCodeError('EMPTY', lang),
     });
   }
 
+  // 1. Master VIP Promo Codes (instant unlock without prior payment)
   if (MASTER_PROMO_CODES.has(rawCode)) {
     grantUnlockCookie(req, res, 'promo', rawCode);
-    return res.json({ success: true, type: 'promo' });
+    return res.json({ success: true, type: 'promo', code: rawCode });
   }
 
-  // 1. Atomic lookup & burn in persistent SQLite Redeem Codes Database ('Unused' -> 'Used')
+  // 2. Server-side Admin Dashboard Promo Codes (works for ALL users — guest, email, OTP, Google — without payment!)
+  try {
+    const promoCheck = verifyAndIncrementServerPromoCode(rawCode);
+    if (promoCheck.ok && promoCheck.promo) {
+      grantUnlockCookie(req, res, 'admin_promo', promoCheck.promo.code);
+      return res.json({
+        success: true,
+        type: 'admin_promo',
+        code: promoCheck.promo.code,
+        centerId: promoCheck.promo.centerId,
+        usageCount: promoCheck.promo.usageCount,
+        usageLimit: promoCheck.promo.usageLimit,
+      });
+    }
+    if (
+      promoCheck.errorCode === 'EXPIRED' ||
+      promoCheck.errorCode === 'INACTIVE' ||
+      promoCheck.errorCode === 'LIMIT_REACHED'
+    ) {
+      return res.status(promoCheck.statusCode).json({
+        success: false,
+        errorCode: promoCheck.errorCode,
+        error: localizeCodeError(promoCheck.errorCode, lang),
+      });
+    }
+  } catch (err) {
+    console.error('[PromoDB] Verification error:', err);
+  }
+
+  // 3. Atomic lookup & burn in persistent SQLite Redeem Codes Database ('Unused' -> 'Used')
+  //    Includes all 10,000 Google Sheet codes, Admin Dashboard Redeem DB codes, and pre-seeded codes.
   //    If not found yet and a Google Sheet is configured, trigger a throttled auto-sync and retry once.
   try {
     let dbCheck = verifyAndBurnRedeemCode(rawCode, userEmail || 'web_user');
@@ -1223,33 +1324,37 @@ app.post('/api/payments/verify-redeem', paymentRateLimiter, async (req, res) => 
       });
     }
     if (dbCheck.statusCode === 409 || dbCheck.statusCode === 403) {
+      const errCode = dbCheck.errorCode === 'REVOKED' ? 'REVOKED' : 'ALREADY_USED';
       return res.status(dbCheck.statusCode).json({
         success: false,
-        error: dbCheck.error,
+        errorCode: errCode,
+        error: localizeCodeError(errCode, lang),
       });
     }
   } catch (err) {
     console.error('[RedeemDB] Verification error:', err);
   }
 
-  // 2. Fallback check in-memory issued unlock codes
+  // 4. Fallback check in-memory issued unlock codes
   const issued = issuedUnlockCodes.get(rawCode);
   if (issued) {
     if (issued.used) {
       return res.status(409).json({
         success: false,
-        error: 'លេខកូដដោះសោនេះត្រូវបានប្រើប្រាស់រួចហើយ!',
+        errorCode: 'ALREADY_USED',
+        error: localizeCodeError('ALREADY_USED', lang),
       });
     }
     issued.used = true;
     issued.usedAt = Date.now();
     grantUnlockCookie(req, res, issued.source, issued.code);
-    return res.json({ success: true, type: issued.source });
+    return res.json({ success: true, type: issued.source, code: issued.code });
   }
 
-  return res.status(400).json({
+  return res.status(404).json({
     success: false,
-    error: 'លេខកូដមិនត្រឹមត្រូវ ឬផុតកំណត់! សូមពិនិត្យម្តងទៀត ឬបង់ប្រាក់តាម ABA PayWay / Korea Bank។',
+    errorCode: 'NOT_FOUND',
+    error: localizeCodeError('NOT_FOUND', lang),
   });
 });
 
@@ -1536,14 +1641,16 @@ app.post('/api/admin/logout', (req, res) => {
 
 // Root Admin Google Sign-In Verification (Verifies Firebase ID Token RS256 signature via Google JWKS)
 const ROOT_ADMIN_EMAIL = 'zeekhmerads@gmail.com';
-const FIREBASE_PROJECT_ID = (() => {
+const FIREBASE_CONFIG_JSON = (() => {
   try {
     const raw = fs.readFileSync(path.join(__dirname, 'firebase-applet-config.json'), 'utf8');
-    return String(JSON.parse(raw)?.projectId || '').trim();
+    return JSON.parse(raw) as { projectId?: string; firestoreDatabaseId?: string };
   } catch {
-    return '';
+    return {};
   }
 })();
+const FIREBASE_PROJECT_ID = String(FIREBASE_CONFIG_JSON?.projectId || '').trim();
+const FIREBASE_DATABASE_ID = String(FIREBASE_CONFIG_JSON?.firestoreDatabaseId || '(default)').trim() || '(default)';
 
 let cachedGoogleJwks: { keys: any[]; fetchedAt: number } | null = null;
 
@@ -1657,7 +1764,7 @@ app.post('/api/payments/confirm-firebase-unlock', paymentRateLimiter, async (req
     }
     // Verify the promoCode document exists & is active via Firestore REST API before granting unlock cookie
     const fsResp = await fetch(
-      `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(FIREBASE_PROJECT_ID)}/databases/(default)/documents/promoCodes/${encodeURIComponent(promoCode)}`,
+      `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(FIREBASE_PROJECT_ID)}/databases/${encodeURIComponent(FIREBASE_DATABASE_ID)}/documents/promoCodes/${encodeURIComponent(promoCode)}`,
       {
         headers: { Authorization: `Bearer ${idToken}` },
         signal: AbortSignal.timeout(6000),
@@ -2696,6 +2803,82 @@ app.delete('/api/admin/redeem-codes/:code', requireAdminAuth, (req, res) => {
   } catch (err) {
     console.error('[Admin RedeemDB] Delete failed:', err);
     return res.status(500).json({ success: false, error: 'Failed to delete redeem code' });
+  }
+});
+
+// ============================================================================
+// ADMIN-PROTECTED PROMO CODES API (SQLite mirror so ALL users can unlock without Google login)
+// ============================================================================
+app.get('/api/admin/promo-codes', requireAdminAuth, (_req, res) => {
+  try {
+    return res.json({
+      success: true,
+      promoCodes: listServerPromoCodes(),
+    });
+  } catch (err) {
+    console.error('[Admin PromoDB] Read failed:', err);
+    return res.status(500).json({ success: false, error: 'Failed to read promo codes' });
+  }
+});
+
+app.post('/api/admin/promo-codes', requireAdminAuth, (req, res) => {
+  try {
+    // Bulk mirror mode (used by Admin Dashboard to mirror existing Firestore promo codes into SQLite)
+    if (Array.isArray(req.body?.promos)) {
+      const items = req.body.promos.slice(0, 500);
+      let synced = 0;
+      for (const item of items) {
+        if (!item || typeof item !== 'object') continue;
+        const r = upsertServerPromoCode({
+          code: String((item as any).code || (item as any).id || ''),
+          centerId: String((item as any).centerId || 'general'),
+          monthLabel: String((item as any).monthLabel || ''),
+          usageLimit: Number((item as any).usageLimit) || 50,
+          usageCount: Number((item as any).usageCount) || 0,
+          expiresAt: String((item as any).expiresAt || ''),
+          isActive: (item as any).isActive !== false,
+          createdAt: typeof (item as any).createdAt === 'string' ? (item as any).createdAt : undefined,
+          preserveUsageCount: true,
+        });
+        if (r.ok) synced++;
+      }
+      return res.json({
+        success: true,
+        synced,
+        promoCodes: listServerPromoCodes(),
+      });
+    }
+
+    const result = upsertServerPromoCode({
+      code: String(req.body?.code || ''),
+      centerId: String(req.body?.centerId || 'general'),
+      monthLabel: String(req.body?.monthLabel || ''),
+      usageLimit: Number(req.body?.usageLimit) || 50,
+      expiresAt: String(req.body?.expiresAt || ''),
+      isActive: req.body?.isActive !== false,
+    });
+    if (!result.ok) {
+      return res.status(400).json({ success: false, error: result.error || 'Invalid promo code' });
+    }
+    return res.json({
+      success: true,
+      promo: result.promo,
+      promoCodes: listServerPromoCodes(),
+    });
+  } catch (err) {
+    console.error('[Admin PromoDB] Upsert failed:', err);
+    return res.status(500).json({ success: false, error: 'Failed to save promo code' });
+  }
+});
+
+app.delete('/api/admin/promo-codes/:code', requireAdminAuth, (req, res) => {
+  try {
+    const code = String(req.params.code || '');
+    deleteServerPromoCode(code);
+    return res.json({ success: true, promoCodes: listServerPromoCodes() });
+  } catch (err) {
+    console.error('[Admin PromoDB] Delete failed:', err);
+    return res.status(500).json({ success: false, error: 'Failed to delete promo code' });
   }
 });
 
