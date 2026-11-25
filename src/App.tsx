@@ -103,10 +103,12 @@ export default function App() {
   const [isAdminAuthOpen, setIsAdminAuthOpen] = useState<boolean>(false);
   const [isAdminDashboardOpen, setIsAdminDashboardOpen] = useState<boolean>(false);
 
-  // Clean up any legacy localStorage admin flag from prior versions
+  // Clean up any legacy localStorage admin or permanent paid flags from prior versions
   useEffect(() => {
     try {
       localStorage.removeItem('kiip_admin_mode');
+      localStorage.removeItem('kiip_doc_paid_v3');
+      localStorage.removeItem('kiip_doc_paid');
     } catch {}
   }, []);
 
@@ -180,14 +182,8 @@ export default function App() {
   const [isRescanningOcr, setIsRescanningOcr] = useState<boolean>(false);
   const [hasConfirmedOcrReview, setHasConfirmedOcrReview] = useState<boolean>(false);
 
-  // Payment & Watermark Unlock State (Persisted in localStorage)
-  const [isPaid, setIsPaid] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem('kiip_doc_paid_v3') === 'true';
-    } catch {
-      return false;
-    }
-  });
+  // Payment & Watermark Unlock State (Strictly in-memory per session — never persisted in localStorage)
+  const [isPaid, setIsPaid] = useState<boolean>(false);
   const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
   const [pendingStepAfterPayment, setPendingStepAfterPayment] = useState<number | null>(null);
   const [autoDownloadPdfTrigger, setAutoDownloadPdfTrigger] = useState<number>(0);
@@ -255,6 +251,7 @@ export default function App() {
     setOcrModel('sample-preset');
     setOcrRawText('');
     setHasConfirmedOcrReview(false);
+    setIsPaid(false);
     setActiveTab('flow');
   };
 
@@ -635,6 +632,7 @@ export default function App() {
                     lang={lang}
                     onPrev={() => setCurrentStep(4)}
                     onRestart={() => {
+                      setIsPaid(false);
                       setCurrentStep(1);
                     }}
                   />
@@ -694,8 +692,6 @@ export default function App() {
         bgOpacity={bgOpacity}
         setBgOpacity={setBgOpacity}
         defaultBgUrl={DEFAULT_BG_URL}
-        isPaid={isPaid}
-        setIsPaid={setIsPaid}
         lang={lang}
       />
 

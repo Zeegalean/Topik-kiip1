@@ -93,6 +93,13 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
   const [pendingAutoDownload, setPendingAutoDownload] = useState(false);
   const lastHandledTriggerRef = useRef<number>(0);
   const effectivePaid = isPaid || forceCleanExport;
+
+  // Keep clean-export override strictly synced when payment state resets to locked
+  useEffect(() => {
+    if (!isPaid) {
+      setForceCleanExport(false);
+    }
+  }, [isPaid]);
   const [mergedArcPreview, setMergedArcPreview] = useState<string | null>(null);
   const [previewTab, setPreviewTab] = useState<'form' | 'pages'>('form');
   const [selectedZoomImg, setSelectedZoomImg] = useState<{
@@ -207,9 +214,6 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
     }
 
     if (isValid) {
-      try {
-        localStorage.setItem('kiip_doc_paid_v3', 'true');
-      } catch {}
       setForceCleanExport(true);
       if (setIsPaid) setIsPaid(true);
       recordPaymentTransaction({
@@ -449,9 +453,15 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
               <span className="text-xs font-bold uppercase tracking-wider text-teal-700 bg-teal-50 px-2.5 py-0.5 rounded-full border border-teal-200">
                 {t.step3Badge}
               </span>
-              <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200">
-                ⚡ អាចចុច Download សាកល្បងបានភ្លាមៗ
-              </span>
+              {!isPaid ? (
+                <span className="text-[11px] font-semibold text-rose-700 bg-rose-50 px-2.5 py-0.5 rounded-full border border-rose-200">
+                  🔒 {lang === 'ko' ? '결제 또는 코드 입력 후 PDF 다운로드 가능' : lang === 'en' ? 'Payment or Code Required to Download PDF' : 'តម្រូវឱ្យបង់ប្រាក់ ឬ បញ្ចូលកូដ ដើម្បីទាញយក PDF'}
+                </span>
+              ) : (
+                <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 px-2.5 py-0.5 rounded-full border border-emerald-200">
+                  ✓ Clean PDF Unlocked
+                </span>
+              )}
             </div>
             <h2 className="text-xl sm:text-2xl font-bold text-slate-900">
               {t.step3Title}
@@ -470,30 +480,10 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
                   type="button"
                   onClick={onOpenPayment}
                   className="px-5 py-3.5 rounded-2xl bg-gradient-to-r from-red-600 via-rose-600 to-red-700 hover:from-red-700 hover:to-rose-700 text-white font-black text-xs sm:text-sm shadow-xl shadow-red-900/25 flex items-center justify-center gap-2 transition-all hover:scale-[1.02] cursor-pointer"
-                  title="បង់ប្រាក់តាម Play Store, App Store, Redeem Code ដើម្បីដោះសោឯកសារស្អាតគ្មាន Watermark"
+                  title="បង់ប្រាក់ ឬ បញ្ចូល Redeem / Promo Code ដើម្បីដោះសោ និងទាញយកឯកសារស្អាតគ្មាន Watermark"
                 >
                   <Lock className="w-4 h-4" />
                   <span>{t.payToUnlockCleanBtn}</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => handleDownloadMerged()}
-                  disabled={isGeneratingMerged}
-                  className="px-4 py-3.5 rounded-2xl bg-slate-800 hover:bg-slate-900 active:scale-[0.98] text-white font-extrabold text-xs sm:text-sm shadow-md flex items-center justify-center gap-2 transition-all hover:scale-[1.02] cursor-pointer disabled:opacity-50"
-                  title="ទាញយកកញ្ចប់ឯកសារសាកល្បងភ្លាមៗ"
-                >
-                  {isGeneratingMerged ? (
-                    <>
-                      <RefreshCw className="w-4 h-4 animate-spin text-teal-300" />
-                      <span>{t.generatingPdf}</span>
-                    </>
-                  ) : (
-                    <>
-                      <Download className="w-4 h-4 text-emerald-400" />
-                      <span>⚡ ទាញយកសាកល្បង ({totalPages} ទំព័រ)</span>
-                    </>
-                  )}
                 </button>
 
                 {/* Quick Paid Redeem Code & Separate Free Promo Code inputs */}

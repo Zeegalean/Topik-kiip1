@@ -229,39 +229,6 @@ export const BackgroundSettingsModal: React.FC<BackgroundSettingsModalProps> = (
             </div>
           </div>
 
-          {/* Document Watermark & Payment Status Switch (For Testing) */}
-          {setIsPaid && (
-            <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-2">
-              <div className="flex items-center justify-between">
-                <div>
-                  <h4 className="text-xs font-bold text-slate-800">
-                    {t.bgWatermarkStatus}
-                  </h4>
-                  <p className="text-[10px] text-slate-500">
-                    {isPaid ? '✓ ឯកសារស្អាត Clean 100% (គ្មាន Watermark)' : '🔒 មាន Watermark &quot;REJECTION&quot;'}
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const nextVal = !isPaid;
-                    setIsPaid(nextVal);
-                    try {
-                      localStorage.setItem('kiip_doc_paid', String(nextVal));
-                    } catch {}
-                  }}
-                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer border ${
-                    isPaid
-                      ? 'bg-emerald-100 hover:bg-emerald-200 text-emerald-800 border-emerald-300'
-                      : 'bg-red-100 hover:bg-red-200 text-red-800 border-red-300'
-                  }`}
-                >
-                  {isPaid ? '✓ PAID (Clean)' : '🔒 UNPAID (Rejection)'}
-                </button>
-              </div>
-            </div>
-          )}
-
           {/* Motivational Quote Note */}
           <div className="p-3 bg-amber-50 rounded-xl border border-amber-200 text-[11px] text-amber-900 flex items-start gap-2">
             <Sparkles className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />

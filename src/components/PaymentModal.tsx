@@ -106,11 +106,6 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const [successSecondsLeft, setSuccessSecondsLeft] = useState<number>(30);
 
   const completeUnlock = useCallback(() => {
-    try {
-      localStorage.setItem('kiip_doc_paid_v3', 'true');
-    } catch {
-      // ignore
-    }
     setIsProcessing(false);
     setIsSuccess(true);
     setSuccessSecondsLeft(30);
@@ -310,11 +305,6 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
           ? '✓ 코드 확인 완료! Clean PDF 자동 저장 중...'
           : '✓ Code verified! Unlocking & downloading Clean PDF...'
       );
-      try {
-        localStorage.setItem('kiip_doc_paid_v3', 'true');
-      } catch {
-        // ignore storage errors
-      }
       confetti({
         particleCount: 150,
         spread: 95,
