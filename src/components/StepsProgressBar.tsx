@@ -3,6 +3,7 @@ import { Language } from '../types';
 import {
   Upload,
   ScanText,
+  ClipboardCheck,
   FileEdit,
   FileSearch,
   Send,
@@ -14,6 +15,7 @@ interface StepsProgressBarProps {
   currentStep: number;
   onSelectStep: (step: number) => void;
   isStep1Ready: boolean;
+  canOpenVerification?: boolean;
   isPaid: boolean;
   lang: Language;
 }
@@ -44,14 +46,28 @@ const STAGES: StageDefinition[] = [
     num: 2,
     icon: ScanText,
     title: {
-      en: 'Review',
-      ko: '검토',
-      km: 'ពិនិត្យ OCR',
+      en: 'Verify',
+      ko: '검증',
+      km: 'ផ្ទៀងផ្ទាត់',
     },
     subtitle: {
-      en: 'Verify OCR',
+      en: 'OCR Scan',
       ko: 'OCR 확인',
-      km: 'ផ្ទៀងផ្ទាត់ទិន្នន័យ',
+      km: 'ស្កេន OCR',
+    },
+  },
+  {
+    num: 2.5,
+    icon: ClipboardCheck,
+    title: {
+      en: 'Review & Correct',
+      ko: '검토·수정',
+      km: 'ពិនិត្យកែតម្រូវ',
+    },
+    subtitle: {
+      en: 'Step 2.5 Fix',
+      ko: '2.5단계 오류 수정',
+      km: 'ជំហាន 2.5',
     },
   },
   {
@@ -102,23 +118,25 @@ export const StepsProgressBar: React.FC<StepsProgressBarProps> = ({
   currentStep,
   onSelectStep,
   isStep1Ready,
+  canOpenVerification,
   isPaid,
   lang,
 }) => {
   const locale: 'en' | 'ko' | 'km' =
     lang === 'ko' || lang === 'km' ? lang : 'en';
 
-  const clampedStep = Math.min(Math.max(currentStep, 1), STAGES.length);
-  const activeStage = STAGES[clampedStep - 1];
-  const trackRatio = (clampedStep - 1) / (STAGES.length - 1);
-  const percentComplete = Math.round((clampedStep / STAGES.length) * 100);
+  const activeIndexRaw = STAGES.findIndex((s) => s.num === currentStep);
+  const activeIndex = activeIndexRaw >= 0 ? activeIndexRaw : 0;
+  const activeStage = STAGES[activeIndex];
+  const trackRatio = activeIndex / (STAGES.length - 1);
+  const percentComplete = Math.round(((activeIndex + 1) / STAGES.length) * 100);
 
   const stepCounterLabel =
     locale === 'ko'
-      ? `${clampedStep} / ${STAGES.length} 단계`
+      ? `${activeStage.num}단계 (${activeIndex + 1}/${STAGES.length})`
       : locale === 'km'
-        ? `ជំហាន ${clampedStep} ក្នុងចំណោម ${STAGES.length}`
-        : `Step ${clampedStep} of ${STAGES.length}`;
+        ? `ជំហាន ${activeStage.num} (${activeIndex + 1}/${STAGES.length})`
+        : `Step ${activeStage.num} (${activeIndex + 1} of ${STAGES.length})`;
 
   const progressAriaLabel =
     locale === 'ko'
@@ -171,11 +189,11 @@ export const StepsProgressBar: React.FC<StepsProgressBarProps> = ({
         </span>
       </div>
 
-      {/* 5-stage horizontal progress track */}
+      {/* 6-stage horizontal progress track (including Step 2.5 Review & Correct) */}
       <div className="relative">
-        {/* Background rail connecting node 1 center to node 5 center */}
+        {/* Background rail connecting node 1 center to final node center */}
         <div
-          className="pointer-events-none absolute top-[18px] sm:top-[20px] left-[10%] right-[10%] h-0.5 bg-slate-200 rounded-full overflow-hidden"
+          className="pointer-events-none absolute top-[18px] sm:top-[20px] left-[8.33%] right-[8.33%] h-0.5 bg-slate-200 rounded-full overflow-hidden"
           aria-hidden="true"
         >
           <div
@@ -184,12 +202,15 @@ export const StepsProgressBar: React.FC<StepsProgressBarProps> = ({
           />
         </div>
 
-        <ol className="relative grid grid-cols-5 gap-1 sm:gap-2">
-          {STAGES.map((stage) => {
+        <ol className="relative grid grid-cols-6 gap-1 sm:gap-2">
+          {STAGES.map((stage, idx) => {
             const Icon = stage.icon;
-            const isCompleted = stage.num < clampedStep;
-            const isActive = stage.num === clampedStep;
-            const isLockedByUpload = stage.num > 1 && !isStep1Ready;
+            const isCompleted = idx < activeIndex;
+            const isActive = idx === activeIndex;
+            const isLockedByUpload =
+              stage.num === 2 || stage.num === 2.5
+                ? !(canOpenVerification ?? isStep1Ready)
+                : stage.num > 2.5 && !isStep1Ready;
             const isLockedByPayment = stage.num === 5 && !isPaid && isStep1Ready;
             const isDisabled = isLockedByUpload;
 
@@ -239,7 +260,7 @@ export const StepsProgressBar: React.FC<StepsProgressBarProps> = ({
                     ) : isLockedByUpload || isLockedByPayment ? (
                       <Lock className="w-3.5 h-3.5 sm:w-4 sm:h-4" aria-hidden="true" />
                     ) : (
-                      <span className="text-xs sm:text-sm font-bold tabular-nums">
+                      <span className={`${stage.num === 2.5 ? 'text-[11px] sm:text-xs' : 'text-xs sm:text-sm'} font-bold tabular-nums`}>
                         {stage.num}
                       </span>
                     )}

@@ -6,7 +6,7 @@
       (function() {
         // Purge stale Service Worker & Workbox caches on mobile browsers once per release version
         try {
-          var SW_VER = "kiip_ocr_v8";
+          var SW_VER = "kiip_ocr_v10";
           if (window.localStorage && localStorage.getItem("sw_cache_ver") !== SW_VER) {
             localStorage.setItem("sw_cache_ver", SW_VER);
             if ("serviceWorker" in navigator) {

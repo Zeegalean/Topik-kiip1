@@ -13,6 +13,7 @@ import { AuthModal } from './components/AuthModal';
 import { TopikKiipGuide } from './components/TopikKiipGuide';
 import { Step1Upload } from './components/Step1Upload';
 import { Step2OcrReview } from './components/Step2OcrReview';
+import { ReviewAndCorrect } from './components/ReviewAndCorrect';
 import { Step2FormTemplate } from './components/Step2FormTemplate';
 import { Step3PdfPreview } from './components/Step3PdfPreview';
 import { Step4EmailSender } from './components/Step4EmailSender';
@@ -355,8 +356,21 @@ export default function App() {
   const handleConfirmOcrInjection = (confirmedDraft: ExtractedDocumentData) => {
     setExtractedOcrDraft(confirmedDraft);
     setFormData((prev) => mergeExtractedIntoFormData(prev, confirmedDraft, true));
+    setCurrentStep(2.5);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleFinalizeReviewAndCorrect = (
+    updatedFormFields: Partial<ApplicationFormData>,
+    updatedDraft: ExtractedDocumentData
+  ) => {
+    setExtractedOcrDraft(updatedDraft);
+    setFormData((prev) => ({
+      ...mergeExtractedIntoFormData(prev, updatedDraft, true),
+      ...updatedFormFields,
+    }));
     setHasConfirmedOcrReview(true);
-    setCurrentStep(3);
+    setCurrentStep(isStep1Ready ? 3 : 1);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -410,6 +424,13 @@ export default function App() {
   if (!formData.socinetPw || !formData.socinetPw.trim()) missingStep1Items.push('Socinet Password (사회통합정보망 비밀번호)');
 
   const isStep1Ready = missingStep1Items.length === 0;
+  const hasAnyUploadedDoc = Boolean(
+    docs.arcFront ||
+      docs.arcBack ||
+      (docs.topikCertList && docs.topikCertList.length > 0) ||
+      (docs.passportList && docs.passportList.length > 0)
+  );
+  const canOpenVerification = hasAnyUploadedDoc || isStep1Ready;
 
   const handleGuideNavAction = (action: NavActionId) => {
     switch (action) {
@@ -428,7 +449,7 @@ export default function App() {
         break;
       case 'step2':
         setActiveTab('flow');
-        setCurrentStep(isStep1Ready ? 2 : 1);
+        setCurrentStep(canOpenVerification ? 2 : 1);
         window.scrollTo({ top: 0, behavior: 'smooth' });
         break;
     case 'step3':
@@ -495,10 +516,13 @@ export default function App() {
   };
 
   const handleNavigateStep = (s: number) => {
-    if (s > 1 && !isStep1Ready) {
+    if ((s === 2 || s === 2.5) && !canOpenVerification) {
       return;
     }
-    if (s >= 3 && (currentStep === 2 || (!hasConfirmedOcrReview && Object.keys(extractedOcrDraft).length > 0))) {
+    if (s > 2.5 && !isStep1Ready) {
+      return;
+    }
+    if (s >= 3 && (currentStep === 2 || currentStep === 2.5 || (!hasConfirmedOcrReview && Object.keys(extractedOcrDraft).length > 0))) {
       setFormData((prev) => mergeExtractedIntoFormData(prev, extractedOcrDraft, true));
       setHasConfirmedOcrReview(true);
     }
@@ -533,6 +557,7 @@ export default function App() {
           currentStep={currentStep}
           setCurrentStep={handleNavigateStep}
           isStep1Ready={isStep1Ready}
+          canOpenVerification={canOpenVerification}
           isAdmin={isAdmin}
           lang={lang}
           setLang={setLang}
@@ -567,13 +592,14 @@ export default function App() {
             currentStep={currentStep}
             onSelectStep={handleNavigateStep}
             isStep1Ready={isStep1Ready}
+            canOpenVerification={canOpenVerification}
             isPaid={isPaid}
             lang={lang}
           />
         )}
         <div className="flex flex-col lg:flex-row items-start justify-center gap-6">
           {/* Primary Content Column */}
-          <div className="flex-1 min-w-0 w-full max-w-4xl">
+          <div className={`flex-1 min-w-0 w-full ${currentStep === 2 || currentStep === 2.5 ? 'max-w-none' : 'max-w-4xl'}`}>
             {activeTab === 'about' ? (
               <AboutMePage
                 lang={lang}
@@ -604,6 +630,12 @@ export default function App() {
                     onOcrCompleted={handleOcrCompleted}
                     lang={lang}
                     onNext={() => setCurrentStep(2)}
+                    onOpenVerification={() => {
+                      setActiveTab('flow');
+                      setCurrentStep(2);
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }}
+                    hasConfirmedOcrReview={hasConfirmedOcrReview}
                     onOpenSocinetNotice={() => setIsSocinetNoticeOpen(true)}
                     isLoggedIn={user.isLoggedIn}
                     onOpenAuth={() => setIsAuthModalOpen(true)}
@@ -622,9 +654,36 @@ export default function App() {
                     rawTextPreview={ocrRawText}
                     ocrModel={ocrModel}
                     isScanning={isRescanningOcr}
+                    isStep1Ready={isStep1Ready}
+                    missingStep1Count={missingStep1Items.length}
                     onRescanOcr={handleRescanOcrFromReview}
                     onBack={() => setCurrentStep(1)}
                     onConfirmInject={handleConfirmOcrInjection}
+                  />
+                )}
+
+                {currentStep === 2.5 && (
+                  <ReviewAndCorrect
+                    lang={lang}
+                    docs={docs}
+                    formData={formData}
+                    draft={extractedOcrDraft}
+                    initialSnapshot={ocrInitialSnapshot}
+                    confidenceMap={ocrConfidenceMap}
+                    rawTextPreview={ocrRawText}
+                    isScanning={isRescanningOcr}
+                    isStep1Ready={isStep1Ready}
+                    missingStep1Count={missingStep1Items.length}
+                    onRescanOcr={handleRescanOcrFromReview}
+                    onBackToStep2={() => {
+                      setCurrentStep(2);
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }}
+                    onGoToStep1Upload={() => {
+                      setCurrentStep(1);
+                      window.scrollTo({ top: 0, behavior: 'smooth' });
+                    }}
+                    onFinalizeForPdfForm={handleFinalizeReviewAndCorrect}
                   />
                 )}
 
@@ -638,7 +697,7 @@ export default function App() {
                     setSigSettings={setSigSettings}
                     lang={lang}
                     onNext={() => setCurrentStep(4)}
-                    onPrev={() => setCurrentStep(2)}
+                    onPrev={() => setCurrentStep(2.5)}
                     formRef={formRef}
                     isPaid={isPaid}
                     setIsPaid={handleSetIsPaid}

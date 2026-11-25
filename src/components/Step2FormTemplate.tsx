@@ -957,6 +957,89 @@ export const Step2FormTemplate: React.FC<Step2FormTemplateProps> = ({
         </div>
       </div>
 
+      {/* Verified OCR Injected Record Summary (Name, ARC Number, Entry Date) */}
+      <div className="no-print bg-white border border-slate-200 rounded-xl p-4 sm:p-5 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2 pb-2.5 border-b border-slate-100">
+          <div className="flex items-center gap-2 text-xs sm:text-sm font-bold text-slate-900">
+            <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+            <span>
+              {lang === 'ko'
+                ? '검증 단계(OCR)에서 반영된 핵심 신원·입국 정보'
+                : lang === 'en'
+                ? 'Verified Identity & Entry Data Injected from OCR Verification Step'
+                : 'ព័ត៌មានស្នូលដែលបានផ្ទៀងផ្ទាត់ និងបញ្ចូលពីជំហ៊ានផ្ទៀងផ្ទាត់ OCR'}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={onPrev}
+            className="text-xs font-semibold text-blue-600 hover:text-blue-800 hover:underline cursor-pointer whitespace-nowrap shrink-0"
+          >
+            {lang === 'ko'
+              ? '2.5단계(검토·수정)에서 다시 수정 →'
+              : lang === 'en'
+              ? 'Review & Correct (Step 2.5) →'
+              : 'ពិនិត្យ និងកែតម្រូវ (ជំហាន 2.5) →'}
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+          <div className="space-y-1">
+            <label className="block font-semibold text-slate-600">
+              {lang === 'ko' ? '성명 (Name)' : lang === 'en' ? 'Name (성명)' : 'ឈ្មោះ (Name / 성명)'}
+            </label>
+            <input
+              type="text"
+              value={formData.name}
+              onChange={(e) => handleNameChange(e.target.value.toUpperCase())}
+              placeholder="SOK SRORNG"
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-bold uppercase text-slate-900 bg-slate-50/50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+
+          <div className="space-y-1">
+            <label className="block font-semibold text-slate-600">
+              {lang === 'ko' ? '외국인등록번호 (ARC)' : lang === 'en' ? 'ARC Number (외국인등록번호)' : 'លេខកាត ARC (외국인등록번호)'}
+            </label>
+            <div className="flex items-center gap-1.5">
+              <input
+                type="text"
+                maxLength={6}
+                value={formData.regNumber1}
+                onChange={(e) =>
+                  setFormData((p) => ({ ...p, regNumber1: e.target.value.replace(/[^0-9]/g, '').slice(0, 6) }))
+                }
+                placeholder="YYMMDD"
+                className="w-full px-2 py-2 border border-slate-300 rounded-lg text-xs font-mono font-bold text-center tabular-nums text-slate-900 bg-slate-50/50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              <span className="text-slate-400 font-bold">-</span>
+              <input
+                type="text"
+                maxLength={7}
+                value={formData.regNumber2}
+                onChange={(e) =>
+                  setFormData((p) => ({ ...p, regNumber2: e.target.value.replace(/[^0-9]/g, '').slice(0, 7) }))
+                }
+                placeholder="5XXXXXX"
+                className="w-full px-2 py-2 border border-slate-300 rounded-lg text-xs font-mono font-bold text-center tabular-nums text-slate-900 bg-slate-50/50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+            </div>
+          </div>
+
+          <div className="space-y-1">
+            <label className="block font-semibold text-slate-600">
+              {lang === 'ko' ? '입국일 (Entry Date)' : lang === 'en' ? 'Entry Date (입국일)' : 'ថ្ងៃចូលកូរ៉េ (Entry Date / 입국일)'}
+            </label>
+            <input
+              type="date"
+              value={formData.entryDate || ''}
+              onChange={(e) => setFormData((p) => ({ ...p, entryDate: e.target.value }))}
+              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono font-bold tabular-nums text-slate-900 bg-slate-50/50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+            />
+          </div>
+        </div>
+      </div>
+
       {/* Signature Placement & Transparency Floating Controls */}
       <div className="no-print bg-indigo-50/70 border border-indigo-200 rounded-2xl p-4 sm:p-5 shadow-xs">
         <div className="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">

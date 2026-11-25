@@ -10,6 +10,7 @@ export const INITIAL_FORM_DATA: ApplicationFormData = {
   visaStatus: 'E-9-1',
   passportNo: '',
   passportExpiry: '',
+  entryDate: '',
   address: '',
   phone: '',
   mobile: '',
@@ -45,6 +46,7 @@ export const SAMPLE_FORM_DATA: ApplicationFormData = {
   socinetPw: 'socinet2026*',
   passportNo: 'N01847291',
   passportExpiry: '2031-08-15',
+  entryDate: '2022-04-10',
   address: '충청남도 서산시 수석산업로 85-9 (수석동)',
   docVerificationNo: ['9849', '2820', '3579', '7920'],
   examNumber: '0010197000017',
@@ -98,8 +100,11 @@ export function generateSampleArcFront(): string {
     <text x="260" y="315" font-family="sans-serif" font-size="13" fill="#334155">체류자격 (Status):</text>
     <text x="420" y="315" font-family="sans-serif" font-size="15" fill="#0f172a" font-weight="bold">E-9-1 (비전문취업)</text>
     
-    <text x="260" y="350" font-family="sans-serif" font-size="13" fill="#334155">발급일자 (Issue Date):</text>
-    <text x="420" y="350" font-family="sans-serif" font-size="15" fill="#0f172a" font-weight="bold">0000. 00. 00</text>
+    <text x="260" y="346" font-family="sans-serif" font-size="13" fill="#334155">발급일자 (Issue Date):</text>
+    <text x="420" y="346" font-family="sans-serif" font-size="15" fill="#0f172a" font-weight="bold">2022. 04. 15</text>
+
+    <text x="260" y="378" font-family="sans-serif" font-size="13" fill="#334155">입국일자 (Entry Date):</text>
+    <text x="420" y="378" font-family="sans-serif" font-size="15" fill="#0f172a" font-weight="bold">2022. 04. 10</text>
 
     <!-- Bottom seal -->
     <line x1="50" y1="400" x2="750" y2="400" stroke="#cbd5e1" stroke-width="2"/>

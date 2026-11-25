@@ -26,7 +26,8 @@ export type OcrConfidenceKey =
   | 'validUntil'
   | 'grade'
   | 'passportNo'
-  | 'passportExpiry';
+  | 'passportExpiry'
+  | 'entryDate';
 
 export type OcrConfidenceSource =
   | 'ai-vision'
@@ -53,6 +54,7 @@ export interface ExtractedDocumentData {
   visaStatus?: string | null;
   passportNo?: string | null;
   passportExpiry?: string | null;
+  entryDate?: string | null;
   address?: string | null;
   docVerificationNo?: string[] | string | null;
   examNumber?: string | null;
@@ -1212,6 +1214,19 @@ export function parseOcrCorpusToData(
     }
   }
 
+  // 13. Entry Date into Korea (입국일 / 입국일자 / Date of Entry)
+  const entrySourceText = [arcFrontText, passportText, arcBackText].filter(Boolean).join('\n');
+  if (entrySourceText) {
+    const entryMatch =
+      entrySourceText.match(/(?:최\s*초\s*입\s*국\s*일(?:\s*자)?|입\s*국\s*일(?:\s*자)?|Date\s*of\s*Entry|Entry\s*Date|Arriv(?:al|ed)\s*Date)[^\d\n]{0,24}(\d{4}\s*[.\-년/]\s*\d{1,2}\s*[.\-월/]\s*\d{1,2}|\d{1,2}\s+[A-Za-z]{3,9}[.,]?\s+\d{4}|[A-Za-z]{3,9}[.,]?\s+\d{1,2},?\s+\d{4})/i);
+    if (entryMatch) {
+      const parsedEntry = parseFlexibleDateClient(entryMatch[1], 1995, 2035);
+      if (parsedEntry) {
+        result.entryDate = parsedEntry;
+      }
+    }
+  }
+
   return result;
 }
 
@@ -1228,6 +1243,7 @@ export function countExtractedFields(data: ExtractedDocumentData | null | undefi
   if (data.address && data.address.trim().length >= 5 && !data.address.startsWith('00000')) count++;
   if (data.passportNo && data.passportNo.trim().length >= 6) count++;
   if (data.passportExpiry && !data.passportExpiry.startsWith('0000')) count++;
+  if (data.entryDate && !data.entryDate.startsWith('0000')) count++;
   if (data.examNumber && data.examNumber.trim().length >= 6 && !/^0+$/.test(data.examNumber)) count++;
   if (data.round && data.round.trim() && data.round !== '0' && data.round !== '000') count++;
   if (data.grade && /^[1-6]급$/.test(data.grade.trim())) count++;
@@ -1291,6 +1307,7 @@ export function mergeExtractedDrafts(
     visaStatus: hasRealStr(a.visaStatus) ? a.visaStatus : (b.visaStatus || ''),
     passportNo: hasRealStr(a.passportNo) ? a.passportNo : (b.passportNo || ''),
     passportExpiry: hasRealStr(a.passportExpiry) ? a.passportExpiry : (b.passportExpiry || ''),
+    entryDate: hasRealStr(a.entryDate) ? a.entryDate : (b.entryDate || ''),
     address: hasRealStr(a.address) ? a.address : (b.address || ''),
     docVerificationNo: hasRealDocVer(a.docVerificationNo) ? a.docVerificationNo : (b.docVerificationNo || ['', '', '', '']),
     examNumber: hasRealStr(a.examNumber) ? a.examNumber : (b.examNumber || ''),
@@ -1591,6 +1608,7 @@ export function formDataToExtractedDraft(data: ApplicationFormData): ExtractedDo
     visaStatus: data.visaStatus || '',
     passportNo: data.passportNo || '',
     passportExpiry: cleanStr(data.passportExpiry, ['0000-00-00']),
+    entryDate: cleanStr(data.entryDate || '', ['0000-00-00']),
     address: cleanStr(data.address, ['00000 0000 000', '00000']),
     docVerificationNo: Array.isArray(data.docVerificationNo)
       ? data.docVerificationNo.map((p) => (p === '0000' ? '' : p))
@@ -1745,6 +1763,11 @@ export function mergeExtractedIntoFormData(
     passportExpiry: forceOverwrite
       ? (ext.passportExpiry || '')
       : ext.passportExpiry || prev.passportExpiry || '',
+    entryDate: forceOverwrite
+      ? (ext.entryDate || '')
+      : ext.entryDate && !isPlaceholderDate(ext.entryDate)
+      ? ext.entryDate
+      : prev.entryDate || '',
     address: finalAddress,
     docVerificationNo: docParts,
     examNumber: finalExamNo,
@@ -2022,6 +2045,16 @@ export function buildPipelineConfidenceMap(params: {
     docMetrics.usedSecondPassPassport
   );
 
+  map.entryDate = pickConfidence(
+    'entryDate',
+    Boolean(merged.entryDate && merged.entryDate.trim().length >= 8),
+    Boolean(serverData.entryDate),
+    Boolean(digitalParsed.entryDate),
+    Boolean(localParsed.entryDate),
+    Math.max(docMetrics.frontConf, docMetrics.passportConf),
+    docMetrics.usedSecondPassFront && !docMetrics.usedSecondPassPassport
+  );
+
   return map;
 }
 
@@ -2242,6 +2275,20 @@ export function evaluateDraftConfidence(
   out.passportExpiry = resolve('passportExpiry', passExpVal.length > 0 && !passExpVal.startsWith('0000'), (base) => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(passExpVal)) {
       return { score: Math.min(base, 48), reason: 'Use YYYY-MM-DD format for passport expiry' };
+    }
+    return { score: base };
+  });
+
+  // 15. Entry Date (입국일 / Entry Date)
+  const entryVal = (draft.entryDate || '').trim();
+  out.entryDate = resolve('entryDate', entryVal.length > 0 && !entryVal.startsWith('0000'), (base) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(entryVal)) {
+      return { score: Math.min(base, 48), reason: 'Use YYYY-MM-DD format for Entry Date (입국일)' };
+    }
+    const year = parseInt(entryVal.slice(0, 4), 10);
+    const currentYear = new Date().getFullYear();
+    if (year < 1995 || year > currentYear + 1) {
+      return { score: Math.min(base, 54), reason: 'Check Entry Date year against ARC / Passport' };
     }
     return { score: base };
   });

@@ -520,6 +520,15 @@ function sanitizeExtractedData(raw: any): Record<string, any> {
     }
   }
 
+  // 11. Entry Date into Korea (입국일 / 입국일자 / Date of Entry)
+  if (raw?.entryDate && !String(raw.entryDate).startsWith('0000')) {
+    const rawEntry = String(raw.entryDate).trim();
+    const parsedEntry = parseFlexibleDate(rawEntry, 1995, 2035);
+    if (parsedEntry) {
+      result.entryDate = parsedEntry;
+    }
+  }
+
   return result;
 }
 
@@ -1036,6 +1045,7 @@ CRITICAL INSTRUCTIONS FOR ALIEN REGISTRATION CARD (외국인등록증) & PASSPOR
 7. address: Latest Korean residence address on the back of the card (체류지 / 체류지 변경사항 table). Read EVERY row carefully (including road name 도로명, building number 건물번호, and multi-line wrapped 동/호 details), ignore the printed fine notice ("새로운 체류지... 14일 이내..."), and return ONLY the row with the MOST RECENT 신고일 (Report Date) or bottom-most entered row.
 8. passportNo: Passport Number (여권번호 / Passport No.) if a passport is uploaded.
 9. passportExpiry: Passport Date of Expiry formatted as YYYY-MM-DD.
+10. entryDate: Date of Entry into Korea (입국일 / 입국일자 / Date of Entry / Korean arrival stamp date) formatted as YYYY-MM-DD if visible on the ARC or Passport (otherwise fallback to ARC 발급일자 / Issue Date only if labeled as entry/registration date; leave empty "" if not visible).
 
 CRITICAL INSTRUCTIONS FOR TOPIK SCORE CERTIFICATE (한국어능력시험 성적증명서):
 1. docVerificationNo: 문서확인번호 (16 digits at top-right header, returned as array of 4 strings of 4 digits each).
@@ -1095,6 +1105,7 @@ Return ONLY structured JSON according to the schema.
         grade: { type: Type.STRING, description: "등급 (1급~6급)" },
         passportNo: { type: Type.STRING, description: "Passport Number if visible" },
         passportExpiry: { type: Type.STRING, description: "Passport Expiry Date YYYY-MM-DD if visible" },
+        entryDate: { type: Type.STRING, description: "Date of Entry into Korea (입국일 / Entry Date) YYYY-MM-DD if visible" },
         fieldConfidence: {
           type: Type.OBJECT,
           description: "0-100 integer visual legibility confidence per extracted field",
@@ -1114,6 +1125,7 @@ Return ONLY structured JSON according to the schema.
             grade: { type: Type.INTEGER },
             passportNo: { type: Type.INTEGER },
             passportExpiry: { type: Type.INTEGER },
+            entryDate: { type: Type.INTEGER },
           },
         },
       },

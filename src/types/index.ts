@@ -36,6 +36,7 @@ export interface ApplicationFormData {
   visaStatus: string;
   passportNo: string; // Passport Number (여권번호 / លេខលិខិតឆ្លងដែន)
   passportExpiry: string; // Passport Expiry Date (여권 유효기간 / កាលបរិច្ឆេទផុតកំណត់)
+  entryDate?: string; // Entry Date into Korea (입국일 / ថ្ងៃចូលប្រទេសកូរ៉េ) YYYY-MM-DD
   address: string;
   phone: string;
   mobile: string;

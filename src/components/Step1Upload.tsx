@@ -72,6 +72,8 @@ interface Step1UploadProps {
   ) => void;
   lang: Language;
   onNext: () => void;
+  onOpenVerification?: () => void;
+  hasConfirmedOcrReview?: boolean;
   onOpenSocinetNotice?: () => void;
   isLoggedIn?: boolean;
   onOpenAuth?: () => void;
@@ -87,6 +89,8 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
   onOcrCompleted,
   lang,
   onNext,
+  onOpenVerification,
+  hasConfirmedOcrReview = false,
   onOpenSocinetNotice,
   isLoggedIn = true,
   onOpenAuth,
@@ -322,6 +326,13 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
         combined.match(/(E-9-1|E-7-4|E-7-1|E-9|D-2-1|D-2|F-2-R|F-2)/i);
       if (visaMatch) {
         res.visaStatus = cleanVisaStatus(visaMatch[1]);
+      }
+
+      const entryMatch = combined.match(
+        /(?:입국일자|입국일|Entry\s*Date|Date\s*of\s*Entry)[^0-9]{0,24}(\d{4})[.\-\s년/]+(\d{1,2})[.\-\s월/]+(\d{1,2})/i
+      );
+      if (entryMatch) {
+        res.entryDate = `${entryMatch[1]}-${entryMatch[2].padStart(2, '0')}-${entryMatch[3].padStart(2, '0')}`;
       }
 
       // Parse latest address from 체류지 변경사항 based on 신고일 (Report Date)
@@ -1106,36 +1117,61 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
                   ព័ត៌មានអ្នកដាក់ពាក្យដែលចាប់បានពីកាត ARC / លិខិតឆ្លងដែន (អាចកែសម្រួលបានភ្លាមៗ)
                 </span>
               </div>
-              <button
-                type="button"
-                onClick={() =>
-                  handleExtractDocuments(
-                    docs.topikCertList[0]?.dataUrl,
-                    docs.arcFront,
-                    docs.arcBack,
-                    docs.passportList[0]?.dataUrl
-                  )
-                }
-                disabled={isExtractingTopik}
-                className="px-3 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white text-xs font-bold flex items-center gap-1.5 shadow-2xs cursor-pointer transition-colors"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${isExtractingTopik ? 'animate-spin' : ''}`} />
-                <span>{isExtractingTopik ? 'កំពុងស្កេន OCR...' : 'ស្កេនចាប់ព័ត៌មានម្តងទៀត'}</span>
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleExtractDocuments(
+                      docs.topikCertList[0]?.dataUrl,
+                      docs.arcFront,
+                      docs.arcBack,
+                      docs.passportList[0]?.dataUrl
+                    )
+                  }
+                  disabled={isExtractingTopik}
+                  className="px-3 py-1.5 rounded-lg bg-white hover:bg-slate-50 disabled:opacity-60 text-slate-700 border border-slate-300 text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors whitespace-nowrap shrink-0"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isExtractingTopik ? 'animate-spin' : ''}`} />
+                  <span>{isExtractingTopik ? 'កំពុងស្កេន OCR...' : 'ស្កេន OCR ម្តងទៀត'}</span>
+                </button>
+                {onOpenVerification && (
+                  <button
+                    type="button"
+                    onClick={onOpenVerification}
+                    disabled={isExtractingTopik}
+                    className="px-3.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:opacity-60 text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors whitespace-nowrap shrink-0"
+                  >
+                    <span>
+                      {lang === 'ko'
+                        ? hasConfirmedOcrReview
+                          ? '검증 단계 다시 보기'
+                          : '원본과 나란히 검증하기'
+                        : lang === 'en'
+                        ? hasConfirmedOcrReview
+                          ? 'Re-open Verification Step'
+                          : 'Open Verification Step'
+                        : hasConfirmedOcrReview
+                        ? 'ពិនិត្យផ្ទៀងផ្ទាត់ OCR ម្តងទៀត'
+                        : 'ផ្ទៀងផ្ទាត់ OCR ទល់មុខឯកសារ'}
+                    </span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
             </div>
 
             {isExtractingTopik && (
               <div className="flex items-center gap-2 text-xs text-blue-800 bg-white/90 px-3 py-2 rounded-xl border border-blue-200 font-semibold animate-pulse">
                 <RefreshCw className="w-4 h-4 animate-spin text-blue-600 shrink-0" />
-                <span>កំពុងស្កេនចាប់ឈ្មោះ លេខកាត ARC និងអាសយដ្ឋានដោយស្វ័យប្រវត្តិ សូមរង់ចាំបន្តិច...</span>
+                <span>កំពុងស្កេនចាប់ឈ្មោះ លេខកាត ARC ថ្ងៃចូលកូរ៉េ និងអាសយដ្ឋានដោយស្វ័យប្រវត្តិ សូមរង់ចាំបន្តិច...</span>
               </div>
             )}
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 bg-white p-3.5 rounded-xl border border-blue-200">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 bg-white p-3.5 rounded-xl border border-blue-200">
               {/* Applicant Full Name */}
               <div className="space-y-1">
                 <label className="block text-[11px] font-bold text-slate-600">
-                  ឈ្មោះពេញ (성명 / Name in English):
+                  ឈ្មោះពេញ (성명 / Name):
                 </label>
                 <input
                   type="text"
@@ -1155,7 +1191,7 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
               {/* ARC Number */}
               <div className="space-y-1">
                 <label className="block text-[11px] font-bold text-slate-600">
-                  លេខកាត ARC (외국인등록번호 13 ខ្ទង់):
+                  លេខកាត ARC (외국인등록번호):
                 </label>
                 <div className="flex items-center gap-1">
                   <input
@@ -1167,7 +1203,7 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
                       const val = e.target.value.replace(/[^0-9]/g, '').slice(0, 6);
                       setExtractedDraft((prev) => ({ ...prev, regNumber1: val }));
                     }}
-                    className="w-full px-2 py-1.5 text-xs font-mono font-bold text-slate-900 text-center bg-slate-50 border border-slate-300 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:bg-white"
+                    className="w-full px-2 py-1.5 text-xs font-mono font-bold text-slate-900 text-center bg-slate-50 border border-slate-300 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:bg-white tabular-nums"
                   />
                   <span className="text-slate-400 font-bold">-</span>
                   <input
@@ -1185,9 +1221,24 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
                         : extractedDraft.gender;
                       setExtractedDraft((prev) => ({ ...prev, regNumber2: val, gender }));
                     }}
-                    className="w-full px-2 py-1.5 text-xs font-mono font-bold text-slate-900 text-center bg-slate-50 border border-slate-300 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:bg-white"
+                    className="w-full px-2 py-1.5 text-xs font-mono font-bold text-slate-900 text-center bg-slate-50 border border-slate-300 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:bg-white tabular-nums"
                   />
                 </div>
+              </div>
+
+              {/* Entry Date */}
+              <div className="space-y-1">
+                <label className="block text-[11px] font-bold text-slate-600">
+                  ថ្ងៃចូលកូរ៉េ (입국일 / Entry Date):
+                </label>
+                <input
+                  type="date"
+                  value={extractedDraft.entryDate || ''}
+                  onChange={(e) =>
+                    setExtractedDraft((prev) => ({ ...prev, entryDate: e.target.value }))
+                  }
+                  className="w-full px-2 py-1.5 text-xs font-mono font-bold text-slate-900 bg-slate-50 border border-slate-300 rounded-lg focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:bg-white tabular-nums"
+                />
               </div>
 
               {/* Visa Status */}
