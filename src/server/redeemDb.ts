@@ -13,6 +13,7 @@ export interface RedeemCodeRecord {
   source: string;
   note: string;
   assigned_to: string;
+  id_card_name: string;
   created_at: string;
   used_at: string | null;
 }
@@ -98,6 +99,46 @@ function generateSecureCode(prefix = 'KIIP-26'): string {
   return `${cleanPrefix}-${suffix}`;
 }
 
+const GENERIC_ASSIGNEE_PLACEHOLDERS = new Set([
+  '',
+  'admin_confirmed',
+  'admin_paid',
+  'paid_customer',
+  'web_user',
+  'guest@kiip-portal.kr',
+  'telegram_user',
+  'customer',
+]);
+
+export function sanitizeApplicantName(raw?: string): string {
+  return String(raw || '')
+    .replace(/[\u0000-\u001F\u007F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 100);
+}
+
+export function isGenericAssigneePlaceholder(raw?: string): boolean {
+  const normalized = String(raw || '').trim().toLowerCase();
+  return GENERIC_ASSIGNEE_PLACEHOLDERS.has(normalized);
+}
+
+export function formatPaidAssigneeLabel(idCardName?: string, fallbackContact?: string): string {
+  const cleanName = sanitizeApplicantName(idCardName);
+  const cleanContact = String(fallbackContact || '')
+    .replace(/[\u0000-\u001F\u007F]/g, ' ')
+    .trim()
+    .slice(0, 120);
+  const hasRealContact = Boolean(cleanContact && !isGenericAssigneePlaceholder(cleanContact));
+
+  if (cleanName && hasRealContact && cleanContact.toLowerCase() !== cleanName.toLowerCase()) {
+    return `${cleanName} (${cleanContact})`.slice(0, 160);
+  }
+  if (cleanName) return cleanName.slice(0, 160);
+  if (hasRealContact) return cleanContact.slice(0, 160);
+  return cleanContact || 'web_user';
+}
+
 function mapRedeemRow(r: any): RedeemCodeRecord {
   return {
     id: Number(r.id),
@@ -107,6 +148,7 @@ function mapRedeemRow(r: any): RedeemCodeRecord {
     source: String(r.source || 'database'),
     note: String(r.note || ''),
     assigned_to: String(r.assigned_to || ''),
+    id_card_name: String(r.id_card_name || ''),
     created_at: String(r.created_at || ''),
     used_at: r.used_at ? String(r.used_at) : null,
   };
@@ -129,12 +171,24 @@ function ensureRedeemSchemaMigrations(db: DatabaseSync): void {
          OR (assigned_to != '' AND status = 'Unused');
     `);
   }
+  const hasIdCardName = cols.some((c) => c.name === 'id_card_name');
+  if (!hasIdCardName) {
+    db.exec(`ALTER TABLE redeem_codes ADD COLUMN id_card_name TEXT NOT NULL DEFAULT '';`);
+  }
+
+  const receiptCols = db.prepare('PRAGMA table_info(verified_receipts)').all() as Array<{ name: string }>;
+  const hasReceiptIdCardName = receiptCols.some((c) => c.name === 'id_card_name');
+  if (!hasReceiptIdCardName) {
+    db.exec(`ALTER TABLE verified_receipts ADD COLUMN id_card_name TEXT NOT NULL DEFAULT '';`);
+  }
+
   db.exec(`
     UPDATE redeem_codes
     SET code_compact = REPLACE(REPLACE(UPPER(code), '-', ''), '_', '')
     WHERE code_compact = '' OR code_compact IS NULL;
     CREATE INDEX IF NOT EXISTS idx_redeem_codes_compact ON redeem_codes(code_compact);
     CREATE INDEX IF NOT EXISTS idx_redeem_codes_paid ON redeem_codes(status, is_paid);
+    CREATE INDEX IF NOT EXISTS idx_redeem_codes_id_card_name ON redeem_codes(id_card_name);
   `);
 }
 
@@ -450,7 +504,7 @@ export function queryRedeemCodes(params?: {
     conditions.push('status = ?');
     whereArgs.push(statusFilter);
   } else if (statusFilter === 'Paid') {
-    conditions.push(`status = 'Unused' AND is_paid = 1`);
+    conditions.push(`is_paid = 1`);
   } else if (statusFilter === 'Unpaid') {
     conditions.push(`status = 'Unused' AND is_paid = 0`);
   }
@@ -458,8 +512,10 @@ export function queryRedeemCodes(params?: {
   if (rawSearch) {
     const escaped = rawSearch.replace(/[\\%_]/g, '\\$&');
     const likePattern = `%${escaped}%`;
-    conditions.push(`(code LIKE ? ESCAPE '\\' OR note LIKE ? ESCAPE '\\' OR assigned_to LIKE ? ESCAPE '\\')`);
-    whereArgs.push(likePattern, likePattern, likePattern);
+    conditions.push(
+      `(code LIKE ? ESCAPE '\\' OR note LIKE ? ESCAPE '\\' OR assigned_to LIKE ? ESCAPE '\\' OR id_card_name LIKE ? ESCAPE '\\')`
+    );
+    whereArgs.push(likePattern, likePattern, likePattern, likePattern);
   }
 
   const whereSql = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -472,13 +528,15 @@ export function queryRedeemCodes(params?: {
   const offset = (page - 1) * safePageSize;
 
   const orderSql =
-    statusFilter === 'Unused' || statusFilter === 'Used' || statusFilter === 'Revoked' || statusFilter === 'Paid' || statusFilter === 'Unpaid'
+    statusFilter === 'Paid'
+      ? "CASE status WHEN 'Unused' THEN 0 WHEN 'Used' THEN 1 ELSE 2 END, COALESCE(used_at, created_at) DESC, id DESC"
+      : statusFilter === 'Unused' || statusFilter === 'Used' || statusFilter === 'Revoked' || statusFilter === 'Unpaid'
       ? 'is_paid DESC, id DESC'
       : "CASE status WHEN 'Unused' THEN 0 WHEN 'Used' THEN 1 ELSE 2 END, is_paid DESC, id DESC";
 
   const rawRows = db
     .prepare(
-      `SELECT id, code, status, is_paid, source, note, assigned_to, created_at, used_at
+      `SELECT id, code, status, is_paid, source, note, assigned_to, id_card_name, created_at, used_at
        FROM redeem_codes
        ${whereSql}
        ORDER BY ${orderSql}
@@ -518,7 +576,7 @@ export function generateUnusedRedeemCodes(
      VALUES (?, ?, 'Unused', 'admin', ?, '', ?)`
   );
   const selectStmt = db.prepare(
-    `SELECT id, code, status, is_paid, source, note, assigned_to, created_at, used_at
+    `SELECT id, code, status, is_paid, source, note, assigned_to, id_card_name, created_at, used_at
      FROM redeem_codes WHERE code = ?`
   );
 
@@ -619,7 +677,7 @@ export function checkRedeemCodeStatus(rawCode: string): {
   const db = getRedeemDb();
   let existing = db
     .prepare(
-      `SELECT id, code, status, is_paid, source, note, assigned_to, created_at, used_at
+      `SELECT id, code, status, is_paid, source, note, assigned_to, id_card_name, created_at, used_at
        FROM redeem_codes WHERE code = ?`
     )
     .get(code) as any;
@@ -627,7 +685,7 @@ export function checkRedeemCodeStatus(rawCode: string): {
   if (!existing && compact.length >= 4) {
     existing = db
       .prepare(
-        `SELECT id, code, status, is_paid, source, note, assigned_to, created_at, used_at
+        `SELECT id, code, status, is_paid, source, note, assigned_to, id_card_name, created_at, used_at
          FROM redeem_codes WHERE code_compact = ?
          ORDER BY CASE status WHEN 'Unused' THEN 0 ELSE 1 END, is_paid DESC, id ASC
          LIMIT 1`
@@ -641,6 +699,34 @@ export function checkRedeemCodeStatus(rawCode: string): {
 }
 
 /**
+ * Checks whether an exact normalized ID Card (ARC) Name already has a Paid, non-Revoked
+ * record in redeem_codes so the same verified paying user can auto-unlock without paying twice.
+ * Strictly requires exact normalized match, minimum 4 chars, and non-placeholder name.
+ */
+export function findPaidRedeemByIdCardName(rawApplicantName: string): RedeemCodeRecord | null {
+  const cleanName = sanitizeApplicantName(rawApplicantName);
+  if (!cleanName || cleanName.length < 4 || isGenericAssigneePlaceholder(cleanName)) {
+    return null;
+  }
+
+  const db = getRedeemDb();
+  const row = db
+    .prepare(
+      `SELECT id, code, status, is_paid, source, note, assigned_to, id_card_name, created_at, used_at
+       FROM redeem_codes
+       WHERE is_paid = 1
+         AND status != 'Revoked'
+         AND id_card_name != ''
+         AND UPPER(TRIM(id_card_name)) = UPPER(TRIM(?))
+       ORDER BY CASE status WHEN 'Used' THEN 0 ELSE 1 END, id DESC
+       LIMIT 1`
+    )
+    .get(cleanName) as any;
+
+  return row ? mapRedeemRow(row) : null;
+}
+
+/**
  * Atomically verifies a Redeem Code and marks it 'Used' ONLY if status is 'Unused' AND is_paid = 1.
  * Unpaid Google Sheet (10,000) / pool codes require verified payment first (returns 402 PAYMENT_REQUIRED).
  */
@@ -648,7 +734,8 @@ export type RedeemErrorCode = 'EMPTY' | 'NOT_FOUND' | 'ALREADY_USED' | 'REVOKED'
 
 export function verifyAndBurnRedeemCode(
   rawCode: string,
-  usedBy = ''
+  usedBy = '',
+  applicantName = ''
 ): { ok: boolean; statusCode: number; errorCode?: RedeemErrorCode; error?: string; record?: RedeemCodeRecord } {
   const code = normalizeCode(rawCode);
   const compact = compactCode(rawCode);
@@ -663,13 +750,14 @@ export function verifyAndBurnRedeemCode(
 
   const db = getRedeemDb();
   const safeUser = String(usedBy || '').trim().slice(0, 160);
+  const safeIdCardName = sanitizeApplicantName(applicantName);
   const nowIso = new Date().toISOString();
 
   db.exec('BEGIN IMMEDIATE');
   try {
     let existing = db
       .prepare(
-        `SELECT id, code, status, is_paid, source, note, assigned_to, created_at, used_at
+        `SELECT id, code, status, is_paid, source, note, assigned_to, id_card_name, created_at, used_at
          FROM redeem_codes WHERE code = ?`
       )
       .get(code) as any;
@@ -677,7 +765,7 @@ export function verifyAndBurnRedeemCode(
     if (!existing && compact.length >= 4) {
       existing = db
         .prepare(
-          `SELECT id, code, status, is_paid, source, note, assigned_to, created_at, used_at
+          `SELECT id, code, status, is_paid, source, note, assigned_to, id_card_name, created_at, used_at
            FROM redeem_codes WHERE code_compact = ?
            ORDER BY CASE status WHEN 'Unused' THEN 0 ELSE 1 END, is_paid DESC, id ASC
            LIMIT 1`
@@ -726,12 +814,31 @@ export function verifyAndBurnRedeemCode(
       };
     }
 
-    const assignee = existing.assigned_to || safeUser || 'web_user';
+    const existingIdCardName = sanitizeApplicantName(existing.id_card_name);
+    const nextIdCardName = existingIdCardName || safeIdCardName;
+
+    let nextNote = String(existing.note || '');
+    if (
+      existingIdCardName &&
+      safeIdCardName &&
+      existingIdCardName.toUpperCase() !== safeIdCardName.toUpperCase()
+    ) {
+      const mismatchTag = ` [⚠ Redeemed by ID: ${safeIdCardName}]`;
+      nextNote = `${nextNote}${mismatchTag}`.trim().slice(0, 200);
+    }
+
+    const existingAssigned = String(existing.assigned_to || '').trim();
+    const assignee = !isGenericAssigneePlaceholder(existingAssigned)
+      ? existingIdCardName || !safeIdCardName
+        ? existingAssigned
+        : formatPaidAssigneeLabel(safeIdCardName, existingAssigned)
+      : formatPaidAssigneeLabel(nextIdCardName, safeUser || existingAssigned || 'web_user');
+
     db.prepare(
       `UPDATE redeem_codes
-       SET status = 'Used', used_at = ?, assigned_to = ?
+       SET status = 'Used', used_at = ?, assigned_to = ?, id_card_name = ?, note = ?
        WHERE id = ? AND status = 'Unused' AND is_paid = 1`
-    ).run(nowIso, assignee, existing.id);
+    ).run(nowIso, assignee, nextIdCardName, nextNote, existing.id);
 
     db.exec('COMMIT');
     return {
@@ -742,6 +849,8 @@ export function verifyAndBurnRedeemCode(
         status: 'Used',
         used_at: nowIso,
         assigned_to: assignee,
+        id_card_name: nextIdCardName,
+        note: nextNote,
       }),
     };
   } catch (err) {
@@ -762,19 +871,21 @@ export function verifyAndBurnRedeemCode(
 export function reserveUnusedRedeemCode(params: {
   source: 'kr_receipt' | 'telegram_bot' | 'admin_paid';
   assignedTo: string;
+  idCardName?: string;
   note: string;
   fallbackPrefix?: string;
 }): RedeemCodeRecord {
   const db = getRedeemDb();
-  const safeAssignee = String(params.assignedTo || 'customer').trim().slice(0, 160);
-  const safeNote = String(params.note || '').trim().slice(0, 160);
+  const safeIdCardName = sanitizeApplicantName(params.idCardName);
+  const safeAssignee = formatPaidAssigneeLabel(safeIdCardName, params.assignedTo || 'customer');
+  const safeNote = String(params.note || '').trim().slice(0, 200);
   const nowIso = new Date().toISOString();
 
   db.exec('BEGIN IMMEDIATE');
   try {
     const candidate = db
       .prepare(
-        `SELECT id, code, status, is_paid, source, note, assigned_to, created_at, used_at
+        `SELECT id, code, status, is_paid, source, note, assigned_to, id_card_name, created_at, used_at
          FROM redeem_codes
          WHERE status = 'Unused' AND is_paid = 0 AND (assigned_to IS NULL OR assigned_to = '')
          ORDER BY CASE source WHEN 'google_sheets' THEN 0 ELSE 1 END, id ASC
@@ -787,14 +898,15 @@ export function reserveUnusedRedeemCode(params: {
       const nextNote = safeNote || candidate.note || 'Paid';
       db.prepare(
         `UPDATE redeem_codes
-         SET is_paid = 1, assigned_to = ?, note = ?, source = ?
+         SET is_paid = 1, assigned_to = ?, id_card_name = ?, note = ?, source = ?
          WHERE id = ?`
-      ).run(safeAssignee, nextNote, nextSource, candidate.id);
+      ).run(safeAssignee, safeIdCardName, nextNote, nextSource, candidate.id);
       db.exec('COMMIT');
       return mapRedeemRow({
         ...candidate,
         is_paid: 1,
         assigned_to: safeAssignee,
+        id_card_name: safeIdCardName,
         note: nextNote,
         source: nextSource,
       });
@@ -805,13 +917,13 @@ export function reserveUnusedRedeemCode(params: {
       params.fallbackPrefix || (params.source === 'telegram_bot' ? 'KIIP-TG' : params.source === 'admin_paid' ? 'KIIP-PAID' : 'KIIP-KR')
     );
     db.prepare(
-      `INSERT INTO redeem_codes (code, code_compact, status, is_paid, source, note, assigned_to, created_at)
-       VALUES (?, ?, 'Unused', 1, ?, ?, ?, ?)`
-    ).run(newCode, compactCode(newCode), params.source, safeNote, safeAssignee, nowIso);
+      `INSERT INTO redeem_codes (code, code_compact, status, is_paid, source, note, assigned_to, id_card_name, created_at)
+       VALUES (?, ?, 'Unused', 1, ?, ?, ?, ?, ?)`
+    ).run(newCode, compactCode(newCode), params.source, safeNote, safeAssignee, safeIdCardName, nowIso);
 
     const created = db
       .prepare(
-        `SELECT id, code, status, is_paid, source, note, assigned_to, created_at, used_at
+        `SELECT id, code, status, is_paid, source, note, assigned_to, id_card_name, created_at, used_at
          FROM redeem_codes WHERE code = ?`
       )
       .get(newCode) as any;
@@ -837,14 +949,15 @@ export interface VerifiedReceiptReservationResult {
 
 /**
  * Atomically checks for duplicate receipt replays (by image SHA-256 or transfer timestamp+amount fingerprint),
- * reserves the next unpaid 'Unused' Redeem Code (prioritizing the 10,000 Google Sheet codes), marks it Paid,
- * and records the verified receipt inside one SQLite transaction.
+ * reserves the next unpaid 'Unused' Redeem Code (prioritizing the 10,000 Google Sheet codes), marks it Paid
+ * with the user's ID Card Name, and records the verified receipt inside one SQLite transaction.
  */
 export function recordVerifiedReceiptAndReserveCode(params: {
   imageSha256: string;
   transferFingerprint: string;
   source: 'kr_receipt' | 'telegram_bot';
   assignedTo: string;
+  idCardName?: string;
   note: string;
   bankName: string;
   recipientName: string;
@@ -855,8 +968,9 @@ export function recordVerifiedReceiptAndReserveCode(params: {
   const db = getRedeemDb();
   const safeHash = String(params.imageSha256 || '').trim().toLowerCase().slice(0, 128);
   const safeFp = String(params.transferFingerprint || '').trim().slice(0, 180);
-  const safeAssignee = String(params.assignedTo || 'customer').trim().slice(0, 160);
-  const safeNote = String(params.note || '').trim().slice(0, 160);
+  const safeIdCardName = sanitizeApplicantName(params.idCardName);
+  const safeAssignee = formatPaidAssigneeLabel(safeIdCardName, params.assignedTo || 'customer');
+  const safeNote = String(params.note || '').trim().slice(0, 200);
   const safeBank = String(params.bankName || '').trim().slice(0, 80);
   const safeRecipient = String(params.recipientName || '').trim().slice(0, 100);
   const safeAmount = Math.max(0, Math.round(Number(params.amountKrw) || 0));
@@ -891,7 +1005,7 @@ export function recordVerifiedReceiptAndReserveCode(params: {
 
     const candidate = db
       .prepare(
-        `SELECT id, code, status, is_paid, source, note, assigned_to, created_at, used_at
+        `SELECT id, code, status, is_paid, source, note, assigned_to, id_card_name, created_at, used_at
          FROM redeem_codes
          WHERE status = 'Unused' AND is_paid = 0 AND (assigned_to IS NULL OR assigned_to = '')
          ORDER BY CASE source WHEN 'google_sheets' THEN 0 ELSE 1 END, id ASC
@@ -906,13 +1020,14 @@ export function recordVerifiedReceiptAndReserveCode(params: {
       const nextNote = safeNote || candidate.note || 'Paid';
       db.prepare(
         `UPDATE redeem_codes
-         SET is_paid = 1, assigned_to = ?, note = ?, source = ?
+         SET is_paid = 1, assigned_to = ?, id_card_name = ?, note = ?, source = ?
          WHERE id = ?`
-      ).run(safeAssignee, nextNote, nextSource, candidate.id);
+      ).run(safeAssignee, safeIdCardName, nextNote, nextSource, candidate.id);
       reservedRecord = mapRedeemRow({
         ...candidate,
         is_paid: 1,
         assigned_to: safeAssignee,
+        id_card_name: safeIdCardName,
         note: nextNote,
         source: nextSource,
       });
@@ -921,13 +1036,13 @@ export function recordVerifiedReceiptAndReserveCode(params: {
         params.fallbackPrefix || (params.source === 'telegram_bot' ? 'KIIP-TG' : 'KIIP-KR')
       );
       db.prepare(
-        `INSERT INTO redeem_codes (code, code_compact, status, is_paid, source, note, assigned_to, created_at)
-         VALUES (?, ?, 'Unused', 1, ?, ?, ?, ?)`
-      ).run(newCode, compactCode(newCode), params.source, safeNote, safeAssignee, nowIso);
+        `INSERT INTO redeem_codes (code, code_compact, status, is_paid, source, note, assigned_to, id_card_name, created_at)
+         VALUES (?, ?, 'Unused', 1, ?, ?, ?, ?, ?)`
+      ).run(newCode, compactCode(newCode), params.source, safeNote, safeAssignee, safeIdCardName, nowIso);
 
       const created = db
         .prepare(
-          `SELECT id, code, status, is_paid, source, note, assigned_to, created_at, used_at
+          `SELECT id, code, status, is_paid, source, note, assigned_to, id_card_name, created_at, used_at
            FROM redeem_codes WHERE code = ?`
         )
         .get(newCode) as any;
@@ -936,8 +1051,8 @@ export function recordVerifiedReceiptAndReserveCode(params: {
 
     db.prepare(
       `INSERT INTO verified_receipts
-        (image_sha256, transfer_fingerprint, redeem_code, bank_name, recipient_name, amount_krw, transfer_timestamp, user_email, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        (image_sha256, transfer_fingerprint, redeem_code, bank_name, recipient_name, amount_krw, transfer_timestamp, user_email, id_card_name, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       safeHash || crypto.randomBytes(16).toString('hex'),
       safeFp,
@@ -947,6 +1062,7 @@ export function recordVerifiedReceiptAndReserveCode(params: {
       safeAmount,
       safeTs,
       safeAssignee,
+      safeIdCardName,
       nowIso
     );
 
@@ -966,34 +1082,37 @@ export function setRedeemCodePaid(
   rawCode: string,
   isPaid: boolean,
   assignedTo?: string,
-  note?: string
+  note?: string,
+  idCardName?: string
 ): RedeemCodeRecord | null {
   const code = normalizeCode(rawCode);
   if (!code) return null;
   const db = getRedeemDb();
   const existing = db
     .prepare(
-      `SELECT id, code, status, is_paid, source, note, assigned_to, created_at, used_at
+      `SELECT id, code, status, is_paid, source, note, assigned_to, id_card_name, created_at, used_at
        FROM redeem_codes WHERE code = ?`
     )
     .get(code) as any;
   if (!existing) return null;
 
   const nextPaid = isPaid ? 1 : 0;
+  const incomingIdCard = sanitizeApplicantName(idCardName);
+  const nextIdCardName = isPaid ? incomingIdCard || sanitizeApplicantName(existing.id_card_name) : '';
   const nextAssignee = isPaid
-    ? String(assignedTo || existing.assigned_to || 'admin_paid').trim().slice(0, 160)
+    ? formatPaidAssigneeLabel(nextIdCardName, assignedTo || existing.assigned_to || 'admin_paid')
     : '';
   const nextNote = note !== undefined && note.trim()
-    ? String(note).trim().slice(0, 160)
+    ? String(note).trim().slice(0, 200)
     : existing.note;
 
   db.prepare(
-    `UPDATE redeem_codes SET is_paid = ?, assigned_to = ?, note = ? WHERE id = ?`
-  ).run(nextPaid, nextAssignee, nextNote, existing.id);
+    `UPDATE redeem_codes SET is_paid = ?, assigned_to = ?, id_card_name = ?, note = ? WHERE id = ?`
+  ).run(nextPaid, nextAssignee, nextIdCardName, nextNote, existing.id);
 
   const updated = db
     .prepare(
-      `SELECT id, code, status, is_paid, source, note, assigned_to, created_at, used_at
+      `SELECT id, code, status, is_paid, source, note, assigned_to, id_card_name, created_at, used_at
        FROM redeem_codes WHERE id = ?`
     )
     .get(existing.id) as any;
@@ -1002,12 +1121,18 @@ export function setRedeemCodePaid(
 
 export function issueNextPaidRedeemCode(params?: {
   assignedTo?: string;
+  idCardName?: string;
   note?: string;
 }): RedeemCodeRecord {
+  const rawAssigned = String(params?.assignedTo || '').trim().slice(0, 160);
+  const rawIdCard = sanitizeApplicantName(params?.idCardName);
+  const effectiveIdCard =
+    rawIdCard || (!isGenericAssigneePlaceholder(rawAssigned) ? sanitizeApplicantName(rawAssigned) : '');
   return reserveUnusedRedeemCode({
     source: 'admin_paid',
-    assignedTo: String(params?.assignedTo || 'paid_customer').trim().slice(0, 160),
-    note: String(params?.note || 'Admin Payment Confirmed (ABA / Bank)').trim().slice(0, 160),
+    assignedTo: rawAssigned || effectiveIdCard || 'paid_customer',
+    idCardName: effectiveIdCard,
+    note: String(params?.note || 'Admin Payment Confirmed (ABA / Bank)').trim().slice(0, 200),
     fallbackPrefix: 'KIIP-PAID',
   });
 }

@@ -21,6 +21,7 @@ export interface KoreanReceiptAnalysisResult {
   amountKrw: number;
   bankName: string;
   recipientName: string;
+  senderName?: string;
   statusText: string;
   transferTimestamp: string;
   transferFingerprint: string;
@@ -373,10 +374,11 @@ Inspect the uploaded screenshot carefully and extract ONLY what is genuinely vis
 5. bankName: bank or app name shown on the receipt.
 6. recipientName: exact recipient / beneficiary name visible on the receipt (받는분 / 입금계좌 예금주 / 받는 사람). Return "" if not visible.
 7. recipientAccountDigits: digits visible for the recipient account number (입금계좌번호), digits only. Return "" if not visible.
-8. transferDateTimeRaw: exact transfer date and time string visible on the screenshot (거래일시 / 이체일시 / 송금일시). Return "" if not visible.
-9. transferDateIso: normalized transfer date in "YYYY-MM-DD" (KST). If year is omitted on the receipt (e.g. "11월 25일"), infer current KST year from ${kstDateTimeLabel}. Return "" if date is not visible.
-10. transferTime24h: normalized transfer time in 24-hour "HH:MM" (KST). Return "" if time is not visible.
-11. verdictKhmer: return "ពិត" ONLY if ALL conditions are clearly satisfied (genuine completed bank transfer + recipient matches "${expectedHolder}" + amount >= 35000 + valid transfer date/time visible); otherwise return "មិនពិត".
+8. senderName: exact sender / depositor name visible on the receipt if shown (보내는분 / 출금계좌 예금주 / 송금인 / 내 통장 표시). Return "" if not visible.
+9. transferDateTimeRaw: exact transfer date and time string visible on the screenshot (거래일시 / 이체일시 / 송금일시). Return "" if not visible.
+10. transferDateIso: normalized transfer date in "YYYY-MM-DD" (KST). If year is omitted on the receipt (e.g. "11월 25일"), infer current KST year from ${kstDateTimeLabel}. Return "" if date is not visible.
+11. transferTime24h: normalized transfer time in 24-hour "HH:MM" (KST). Return "" if time is not visible.
+12. verdictKhmer: return "ពិត" ONLY if ALL conditions are clearly satisfied (genuine completed bank transfer + recipient matches "${expectedHolder}" + amount >= 35000 + valid transfer date/time visible); otherwise return "មិនពិត".
 
 Return ONLY valid JSON matching the schema.`;
 
@@ -390,6 +392,7 @@ Return ONLY valid JSON matching the schema.`;
       bankName: { type: Type.STRING },
       recipientName: { type: Type.STRING },
       recipientAccountDigits: { type: Type.STRING },
+      senderName: { type: Type.STRING },
       transferDateTimeRaw: { type: Type.STRING },
       transferDateIso: { type: Type.STRING },
       transferTime24h: { type: Type.STRING },
@@ -442,6 +445,7 @@ Return ONLY valid JSON matching the schema.`;
         const amountMatched = amountKrw >= 35000;
         const bankName = String(parsed.bankName || 'Korea Bank').slice(0, 60);
         const recipientName = String(parsed.recipientName || '').trim().slice(0, 100);
+        const senderName = String(parsed.senderName || '').trim().slice(0, 100);
         const accountDigits = String(parsed.recipientAccountDigits || '').replace(/\D/g, '');
         const transferDateTimeRaw = String(parsed.transferDateTimeRaw || '').trim().slice(0, 80);
         const transferDateIso = String(parsed.transferDateIso || '').trim().slice(0, 20);
@@ -620,6 +624,7 @@ Return ONLY valid JSON matching the schema.`;
           amountKrw,
           bankName,
           recipientName: recipientName || expectedHolder,
+          senderName,
           statusText: statusText || '이체완료',
           transferTimestamp,
           transferFingerprint,

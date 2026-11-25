@@ -21,6 +21,8 @@ import {
   Unlock,
   BadgeCheck,
   Cloud,
+  UserCheck,
+  AlertTriangle,
 } from 'lucide-react';
 import { doc, setDoc, deleteDoc, serverTimestamp } from 'firebase/firestore';
 import { db, OperationType, handleFirestoreError } from '../utils/firebase';
@@ -150,8 +152,24 @@ interface RedeemCodeRow {
   source: string;
   note: string;
   assigned_to: string;
+  id_card_name?: string;
   created_at: string;
   used_at: string | null;
+}
+
+const GENERIC_PLACEHOLDER_SET = new Set([
+  '',
+  'admin_confirmed',
+  'admin_paid',
+  'paid_customer',
+  'web_user',
+  'guest@kiip-portal.kr',
+  'telegram_user',
+  'customer',
+]);
+
+function isGenericPlaceholder(val?: string): boolean {
+  return GENERIC_PLACEHOLDER_SET.has(String(val || '').trim().toLowerCase());
 }
 
 interface RedeemStats {
@@ -300,6 +318,7 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
       source?: string;
       note?: string;
       assigned_to?: string;
+      id_card_name?: string;
     }) => {
       if (!isFirebaseRootAdmin) return;
       const codeId = String(item.code || '').trim().toUpperCase();
@@ -312,7 +331,7 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
           isPaid: Boolean(item.is_paid),
           source: String(item.source || 'admin').slice(0, 32) || 'admin',
           note: String(item.note || '').slice(0, 200),
-          assignedTo: String(item.assigned_to || '').slice(0, 120),
+          assignedTo: String(item.id_card_name || item.assigned_to || '').slice(0, 120),
           updatedAt: serverTimestamp(),
         });
       } catch (err) {
@@ -358,6 +377,7 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
         },
         body: JSON.stringify({
           assignedTo: issueCustomer.trim() || 'paid_customer',
+          idCardName: issueCustomer.trim(),
           note: issueNote.trim() || 'Admin Payment Confirmed',
         }),
       });
@@ -402,6 +422,7 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
         body: JSON.stringify({
           isPaid: nextPaid,
           assignedTo: nextPaid ? row.assigned_to || 'admin_confirmed' : '',
+          idCardName: nextPaid ? row.id_card_name || '' : '',
           note: nextPaid ? row.note || 'Admin Payment Confirmed' : row.note,
         }),
       });
@@ -415,6 +436,7 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
             source: row.source,
             note: row.note,
             assigned_to: nextPaid ? row.assigned_to || 'admin_confirmed' : '',
+            id_card_name: nextPaid ? row.id_card_name || '' : '',
           }
         );
         setFeedback({
@@ -808,7 +830,7 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
             type="text"
             value={issueCustomer}
             onChange={(e) => setIssueCustomer(e.target.value)}
-            placeholder={isKm ? 'ឈ្មោះអតិថិជន / Telegram / FB (មិនបាច់ដាក់ក៏បាន)' : 'Customer name / Telegram / FB (optional)'}
+            placeholder={isKm ? 'ឈ្មោះលើ ID Card / អតិថិជន (ឧ. SOK DARA)' : 'ID Card Name / Customer (e.g. SOK DARA)'}
             className="px-3 py-2 bg-white border border-emerald-300 rounded-xl text-xs"
           />
           <input
@@ -1099,7 +1121,7 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
                 type="text"
                 value={searchInput}
                 onChange={(e) => setSearchInput(e.target.value)}
-                placeholder={isKm ? 'ស្វែងរកលេខកូដ...' : 'Search code / note...'}
+                placeholder={isKm ? 'ស្វែងរកកូដ ឬ ឈ្មោះ ID Card...' : 'Search code / ID Card name...'}
                 className="pl-8 pr-7 py-1.5 w-44 sm:w-52 rounded-lg bg-white border border-slate-200 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-indigo-500/30 focus:border-indigo-400"
               />
               {searchInput && (
@@ -1164,8 +1186,9 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
                 <th className="p-3">Redeem Code</th>
                 <th className="p-3">Status</th>
                 <th className="p-3">{isKm ? 'ការបង់ប្រាក់' : 'Payment'}</th>
+                <th className="p-3">{isKm ? 'ឈ្មោះលើ ID Card (Paid User)' : 'ID Card Name (Paid User)'}</th>
                 <th className="p-3">Source</th>
-                <th className="p-3">Assigned / Note</th>
+                <th className="p-3">{isKm ? 'វិក្កយបត្រ / សម្គាល់ (Audit Note)' : 'Receipt / Audit Note'}</th>
                 <th className="p-3">Used At</th>
                 <th className="p-3 text-right">Actions</th>
               </tr>
@@ -1173,7 +1196,7 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
             <tbody className="divide-y divide-slate-100">
               {rows.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="p-6 text-center text-slate-400">
+                  <td colSpan={8} className="p-6 text-center text-slate-400">
                     {loading
                       ? isKm
                         ? 'កំពុងអានទិន្នន័យពី Database...'
@@ -1184,7 +1207,19 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
                   </td>
                 </tr>
               ) : (
-                rows.map((r) => (
+                rows.map((r) => {
+                  const cleanIdCardName = (r.id_card_name || '').trim();
+                  const cleanAssigned = (r.assigned_to || '').trim();
+                  const displayName =
+                    cleanIdCardName || (!isGenericPlaceholder(cleanAssigned) ? cleanAssigned : '');
+                  const hasSeparateAssignee =
+                    Boolean(cleanIdCardName) &&
+                    Boolean(cleanAssigned) &&
+                    !isGenericPlaceholder(cleanAssigned) &&
+                    cleanAssigned.toLowerCase() !== cleanIdCardName.toLowerCase();
+                  const hasMismatchFlag = (r.note || '').includes('⚠ Redeemed by ID:');
+
+                  return (
                   <tr key={r.id} className="hover:bg-slate-50/80">
                     <td className="p-3 font-mono font-black text-slate-900 flex items-center gap-1.5">
                       <span>{r.code}</span>
@@ -1239,10 +1274,37 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
                         )}
                       </span>
                     </td>
+                    <td className="p-3">
+                      {displayName ? (
+                        <div className="space-y-0.5 max-w-[200px]">
+                          <div
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-indigo-50 border border-indigo-200 text-indigo-900 font-black text-[11px] max-w-full"
+                            title={displayName}
+                          >
+                            <UserCheck className="w-3 h-3 text-indigo-600 shrink-0" />
+                            <span className="truncate">{displayName}</span>
+                          </div>
+                          {hasSeparateAssignee && (
+                            <p className="text-[10px] text-slate-500 truncate" title={cleanAssigned}>
+                              {cleanAssigned}
+                            </p>
+                          )}
+                        </div>
+                      ) : r.is_paid ? (
+                        <span className="text-[11px] text-amber-700 font-semibold">
+                          {cleanAssigned || (isKm ? 'មិនមានឈ្មោះ ID' : 'No ID Name')}
+                        </span>
+                      ) : (
+                        <span className="text-slate-300">—</span>
+                      )}
+                    </td>
                     <td className="p-3 text-slate-600 font-medium">{r.source}</td>
                     <td className="p-3 text-slate-600">
-                      <div className="truncate max-w-[200px]" title={r.note}>
-                        {r.assigned_to ? <span className="font-bold text-indigo-700 mr-1">{r.assigned_to} ·</span> : null}
+                      <div
+                        className={`truncate max-w-[220px] ${hasMismatchFlag ? 'text-rose-700 font-bold' : ''}`}
+                        title={r.note}
+                      >
+                        {hasMismatchFlag && <AlertTriangle className="w-3 h-3 inline mr-1 text-rose-600" />}
                         {r.note || '-'}
                       </div>
                     </td>
@@ -1303,7 +1365,8 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
                       </div>
                     </td>
                   </tr>
-                ))
+                  );
+                })
               )}
             </tbody>
           </table>

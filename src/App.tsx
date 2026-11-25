@@ -184,9 +184,57 @@ export default function App() {
 
   // Payment & Watermark Unlock State (Strictly in-memory per session — never persisted in localStorage)
   const [isPaid, setIsPaid] = useState<boolean>(false);
+  const [sessionUnlockedDirectly, setSessionUnlockedDirectly] = useState<boolean>(false);
+  const [autoUnlockedIdName, setAutoUnlockedIdName] = useState<string>('');
   const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
   const [pendingStepAfterPayment, setPendingStepAfterPayment] = useState<number | null>(null);
   const [autoDownloadPdfTrigger, setAutoDownloadPdfTrigger] = useState<number>(0);
+
+  const handleSetIsPaid = (val: boolean) => {
+    setIsPaid(val);
+    setSessionUnlockedDirectly(val);
+    if (!val) setAutoUnlockedIdName('');
+  };
+
+  // Auto-unlock without paying again when the exact same ID Card (ARC) Name is already marked Paid in Redeem Codes DB
+  useEffect(() => {
+    const normalizedName = (formData.name || '').replace(/\s+/g, ' ').trim().toUpperCase();
+
+    // If user changed the ID Card name to someone else and hasn't paid directly in this session, re-lock immediately
+    if (autoUnlockedIdName && autoUnlockedIdName !== normalizedName && !sessionUnlockedDirectly) {
+      setAutoUnlockedIdName('');
+      setIsPaid(false);
+    }
+
+    if (!normalizedName || normalizedName.length < 4) return;
+    if (sessionUnlockedDirectly || autoUnlockedIdName === normalizedName) return;
+
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      try {
+        const resp = await fetch('/api/payments/check-id-paid', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ applicantName: (formData.name || '').trim() }),
+        });
+        if (!resp.ok || cancelled) return;
+        const data = await resp.json().catch(() => ({}));
+        if (!cancelled && data?.success && data?.paid) {
+          setAutoUnlockedIdName(normalizedName);
+          setIsPaid(true);
+          setIsPaymentModalOpen(false);
+        }
+      } catch {
+        // Non-blocking lookup
+      }
+    }, 450);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [formData.name, sessionUnlockedDirectly, autoUnlockedIdName]);
 
   // Form element ref for high-resolution canvas snapshot
   const formRef = useRef<HTMLDivElement | null>(null);
@@ -252,6 +300,8 @@ export default function App() {
     setOcrRawText('');
     setHasConfirmedOcrReview(false);
     setIsPaid(false);
+    setSessionUnlockedDirectly(false);
+    setAutoUnlockedIdName('');
     setActiveTab('flow');
   };
 
@@ -591,39 +641,55 @@ export default function App() {
                     onPrev={() => setCurrentStep(2)}
                     formRef={formRef}
                     isPaid={isPaid}
-                    setIsPaid={setIsPaid}
+                    setIsPaid={handleSetIsPaid}
                     onOpenPayment={() => setIsPaymentModalOpen(true)}
                     hasConfirmedOcrReview={hasConfirmedOcrReview}
                   />
                 )}
 
                 {currentStep === 4 && (
-                  <Step3PdfPreview
-                    formData={formData}
-                    setFormData={setFormData}
-                    docs={docs}
-                    setDocs={setDocs}
-                    sigSettings={sigSettings}
-                    setSigSettings={setSigSettings}
-                    lang={lang}
-                    onNext={() => {
-                      if (!isPaid) {
-                        setPendingStepAfterPayment(5);
+                  <>
+                    {autoUnlockedIdName && isPaid && (
+                      <div className="mb-3 p-3 rounded-2xl bg-emerald-50 border border-emerald-300 text-emerald-900 text-xs sm:text-sm font-bold flex items-center gap-2 shadow-2xs">
+                        <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-emerald-600 text-white text-xs font-black shrink-0">
+                          ✓
+                        </span>
+                        <span>
+                          {lang === 'ko'
+                            ? `이미 결제된 신분증(ARC) 이름(${formData.name})이 확인되어 자동으로 잠금 해제되었습니다.`
+                            : lang === 'en'
+                            ? `Verified Paid ID Card Name (${formData.name}) recognized — automatically unlocked with no additional payment required!`
+                            : `ប្រព័ន្ធបានស្គាល់ឈ្មោះលើ ID Card (${formData.name}) ដែលបានបង់ប្រាក់រួចក្នុង Database — ដោះសោដោយស្វ័យប្រវត្តិ មិនបាច់បង់លុយម្តងទៀតទេ!`}
+                        </span>
+                      </div>
+                    )}
+                    <Step3PdfPreview
+                      formData={formData}
+                      setFormData={setFormData}
+                      docs={docs}
+                      setDocs={setDocs}
+                      sigSettings={sigSettings}
+                      setSigSettings={setSigSettings}
+                      lang={lang}
+                      onNext={() => {
+                        if (!isPaid) {
+                          setPendingStepAfterPayment(5);
+                          setIsPaymentModalOpen(true);
+                        } else {
+                          setCurrentStep(5);
+                        }
+                      }}
+                      onPrev={() => setCurrentStep(3)}
+                      formRef={formRef}
+                      isPaid={isPaid}
+                      setIsPaid={handleSetIsPaid}
+                      onOpenPayment={() => {
+                        setPendingStepAfterPayment(null);
                         setIsPaymentModalOpen(true);
-                      } else {
-                        setCurrentStep(5);
-                      }
-                    }}
-                    onPrev={() => setCurrentStep(3)}
-                    formRef={formRef}
-                    isPaid={isPaid}
-                    setIsPaid={setIsPaid}
-                    onOpenPayment={() => {
-                      setPendingStepAfterPayment(null);
-                      setIsPaymentModalOpen(true);
-                    }}
-                    autoDownloadTrigger={autoDownloadPdfTrigger}
-                  />
+                      }}
+                      autoDownloadTrigger={autoDownloadPdfTrigger}
+                    />
+                  </>
                 )}
 
                 {currentStep === 5 && (
@@ -633,6 +699,8 @@ export default function App() {
                     onPrev={() => setCurrentStep(4)}
                     onRestart={() => {
                       setIsPaid(false);
+                      setSessionUnlockedDirectly(false);
+                      setAutoUnlockedIdName('');
                       setCurrentStep(1);
                     }}
                   />
@@ -656,6 +724,7 @@ export default function App() {
         }}
         onPaymentSuccess={(options) => {
           setIsPaid(true);
+          setSessionUnlockedDirectly(true);
           setIsPaymentModalOpen(false);
           if (options?.autoDownloadPdf) {
             setActiveTab('flow');

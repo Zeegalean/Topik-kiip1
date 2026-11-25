@@ -174,6 +174,8 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           code: raw,
+          userEmail: auth.currentUser?.email || '',
+          applicantName: (formData?.name || '').trim(),
           mode,
           lang,
           firebaseIdToken: firebaseIdToken || undefined,

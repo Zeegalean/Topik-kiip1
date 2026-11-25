@@ -28,7 +28,23 @@ export default async function handler(req: any, res: any) {
     const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : req.body || {};
     const receiptImage = String(body?.receiptImage || '');
     const userEmail = String(body?.userEmail || 'guest@kiip-portal.kr').slice(0, 254);
+    const applicantName = String(body?.applicantName || '').replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100);
+    const senderNameInput = String(body?.senderNameInput || '').replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100);
     const lang = String(body?.lang || 'km').slice(0, 10);
+
+    if (!senderNameInput || senderNameInput.length < 2) {
+      return res.status(400).json({
+        success: false,
+        verdict: 'មិនពិត',
+        verdictBoolean: false,
+        error:
+          lang === 'ko'
+            ? '송금인(보내는 분) 이름을 입력해 주세요.'
+            : lang === 'en'
+            ? 'Please enter the transfer Sender Name before verifying your receipt.'
+            : 'សូមបំពេញឈ្មោះអ្នកផ្ញើរប្រាក់ជាមុនសិន ទើបអាចផ្ទៀងផ្ទាត់វិក្កយបត្របាន!',
+      });
+    }
 
     const commaIdx = receiptImage.indexOf(',');
     if (!receiptImage.startsWith('data:image/') || commaIdx === -1) {
@@ -108,6 +124,7 @@ export default async function handler(req: any, res: any) {
         detected: {
           bankName: analysis.bankName,
           recipientName: analysis.recipientName,
+          senderName: analysis.senderName || '',
           amountKrw: analysis.amountKrw,
           statusText: analysis.statusText,
           transferTimestamp: analysis.transferTimestamp,
@@ -136,16 +153,18 @@ export default async function handler(req: any, res: any) {
       seenTransferFingerprints.add(analysis.transferFingerprint);
     }
 
-    const unlockCode = createSignedPaidRedeemCode(`${imageSha256}:${userEmail}`);
+    const unlockCode = createSignedPaidRedeemCode(`${imageSha256}:${applicantName || userEmail}`);
 
     return res.status(200).json({
       success: true,
       verdict: 'ពិត',
       verdictBoolean: true,
       unlockCode,
+      idCardName: applicantName,
       verifiedAmount: analysis.amountKrw,
       bankName: analysis.bankName,
       recipientName: analysis.recipientName,
+      senderName: analysis.senderName || '',
       statusText: analysis.statusText,
       transferTimestamp: analysis.transferTimestamp,
       checks: analysis.checks,

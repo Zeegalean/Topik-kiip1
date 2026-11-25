@@ -13,6 +13,7 @@ export default async function handler(req: any, res: any) {
   try {
     const body = typeof req.body === 'string' ? JSON.parse(req.body || '{}') : req.body || {};
     const code = String(body?.code || '').trim().toUpperCase();
+    const applicantName = String(body?.applicantName || '').replace(/[\u0000-\u001F\u007F]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 100);
     const lang = String(body?.lang || 'km').slice(0, 10);
 
     if (!code || code.length < 4) {
@@ -48,6 +49,7 @@ export default async function handler(req: any, res: any) {
         valid: true,
         source: 'kr_receipt',
         code,
+        idCardName: applicantName,
         message: 'Verified & unlocked',
       });
     }

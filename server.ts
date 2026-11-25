@@ -24,6 +24,9 @@ import {
   checkRedeemCodeStatus,
   setRedeemCodePaid,
   issueNextPaidRedeemCode,
+  findPaidRedeemByIdCardName,
+  sanitizeApplicantName,
+  formatPaidAssigneeLabel,
   listServerPromoCodes,
   upsertServerPromoCode,
   deleteServerPromoCode,
@@ -1678,9 +1681,32 @@ async function lookupFirestorePromoCode(
   }
 }
 
+app.post('/api/payments/check-id-paid', paymentRateLimiter, (req, res) => {
+  try {
+    const applicantName = sanitizeApplicantName(req.body?.applicantName);
+    if (!applicantName || applicantName.length < 4) {
+      return res.json({ success: true, paid: false });
+    }
+    const matched = findPaidRedeemByIdCardName(applicantName);
+    if (!matched) {
+      return res.json({ success: true, paid: false });
+    }
+    grantUnlockCookie(req, res, 'id_card_paid', matched.code);
+    return res.json({
+      success: true,
+      paid: true,
+      idCardName: matched.id_card_name,
+    });
+  } catch (err) {
+    console.error('[CheckIdPaid] Lookup error:', err);
+    return res.status(500).json({ success: false, paid: false });
+  }
+});
+
 app.post('/api/payments/verify-redeem', paymentRateLimiter, async (req, res) => {
   const rawCode = String(req.body?.code || '').trim().toUpperCase();
   const userEmail = String(req.body?.userEmail || '').trim().slice(0, 160);
+  const applicantName = sanitizeApplicantName(req.body?.applicantName);
   const lang = String(req.body?.lang || 'km').trim().toLowerCase();
   const mode: 'redeem' | 'promo' = req.body?.mode === 'promo' ? 'promo' : 'redeem';
   const firebaseIdToken = String(req.body?.firebaseIdToken || '').trim();
@@ -1781,11 +1807,11 @@ app.post('/api/payments/verify-redeem', paymentRateLimiter, async (req, res) => 
   // MODE B: PAID REDEEM CODE BOX (Google Sheet 10,000 codes & Redeem DB — MUST BE PAID FIRST!)
   // ============================================================================
   try {
-    let dbCheck = verifyAndBurnRedeemCode(rawCode, userEmail || 'web_user');
+    let dbCheck = verifyAndBurnRedeemCode(rawCode, userEmail || 'web_user', applicantName);
     if (!dbCheck.ok && dbCheck.statusCode === 404) {
       const syncResult = await ensureGoogleSheetSynced({ cooldownMs: 30_000 });
       if (syncResult?.success && syncResult.rowsRead > 0) {
-        dbCheck = verifyAndBurnRedeemCode(rawCode, userEmail || 'web_user');
+        dbCheck = verifyAndBurnRedeemCode(rawCode, userEmail || 'web_user', applicantName);
       }
     }
     if (dbCheck.ok && dbCheck.record) {
@@ -1799,6 +1825,7 @@ app.post('/api/payments/verify-redeem', paymentRateLimiter, async (req, res) => 
         success: true,
         type: dbCheck.record.source || 'redeem',
         code: dbCheck.record.code,
+        idCardName: dbCheck.record.id_card_name || applicantName,
         status: 'Used',
       });
     }
@@ -2843,7 +2870,24 @@ app.post('/api/payments/verify-kr-receipt', paymentRateLimiter, async (req, res)
   try {
     const receiptImage = String(req.body?.receiptImage || '');
     const userEmail = String(req.body?.userEmail || 'guest@kiip-portal.kr').slice(0, 254);
+    const applicantName = sanitizeApplicantName(req.body?.applicantName);
+    const senderNameInput = sanitizeApplicantName(req.body?.senderNameInput);
     const lang = String(req.body?.lang || 'km').slice(0, 10);
+
+    if (!senderNameInput || senderNameInput.length < 2) {
+      return res.status(400).json({
+        success: false,
+        verdict: 'មិនពិត',
+        verdictBoolean: false,
+        error:
+          lang === 'ko'
+            ? '송금인(보내는 분) 이름을 입력해 주세요.'
+            : lang === 'en'
+            ? 'Please enter the transfer Sender Name before verifying your receipt.'
+            : 'សូមបំពេញឈ្មោះអ្នកផ្ញើរប្រាក់ជាមុនសិន ទើបអាចផ្ទៀងផ្ទាត់វិក្កយបត្របាន!',
+      });
+    }
+
     const commaIdx = receiptImage.indexOf(',');
     if (!receiptImage.startsWith('data:image/') || commaIdx === -1) {
       return res.status(400).json({
@@ -2945,12 +2989,19 @@ app.post('/api/payments/verify-kr-receipt', paymentRateLimiter, async (req, res)
       });
     }
 
+    const detectedSender = sanitizeApplicantName(analysis.senderName);
+    const senderDetail =
+      detectedSender && detectedSender.toUpperCase() !== senderNameInput.toUpperCase()
+        ? ` · Sender: ${senderNameInput} (Receipt: ${detectedSender})`
+        : ` · Sender: ${senderNameInput}`;
+    const paidAssignee = formatPaidAssigneeLabel(applicantName, userEmail);
     const reservation = recordVerifiedReceiptAndReserveCode({
       imageSha256,
       transferFingerprint: analysis.transferFingerprint,
       source: 'kr_receipt',
-      assignedTo: userEmail,
-      note: `Korea Bank (${analysis.bankName}) ₩${analysis.amountKrw.toLocaleString()} · ${analysis.transferTimestamp}`,
+      assignedTo: paidAssignee,
+      idCardName: applicantName,
+      note: `Korea Bank (${analysis.bankName}) ₩${analysis.amountKrw.toLocaleString()} · ${analysis.transferTimestamp}${senderDetail}`,
       bankName: analysis.bankName,
       recipientName: analysis.recipientName,
       amountKrw: analysis.amountKrw,
@@ -3018,7 +3069,7 @@ app.post('/api/payments/verify-kr-receipt', paymentRateLimiter, async (req, res)
 
     serverPaymentsLog.unshift({
       id: `pay_kr_${Date.now()}`,
-      userEmail,
+      userEmail: applicantName ? `${applicantName} (${userEmail})` : userEmail,
       amount: analysis.amountKrw,
       currency: 'KRW',
       method: `Korea Bank (${analysis.bankName})`,
@@ -3029,7 +3080,7 @@ app.post('/api/payments/verify-kr-receipt', paymentRateLimiter, async (req, res)
     if (process.env.TELEGRAM_ADMIN_CHAT_ID) {
       await sendTelegramMessage(
         process.env.TELEGRAM_ADMIN_CHAT_ID,
-        `✅ AI Verified Korea Bank Transfer (Verdict: ពិត)\nBank: ${analysis.bankName}\nRecipient: ${analysis.recipientName}\nAmount: ₩${analysis.amountKrw.toLocaleString()}\nTime: ${analysis.transferTimestamp}\nUser: ${userEmail}\nIssued Redeem Code: ${unlockCode}`
+        `✅ AI Verified Korea Bank Transfer (Verdict: ពិត)\nID Card Name: ${applicantName || 'Not provided'}\nDeclared Sender: ${senderNameInput}${detectedSender ? `\nReceipt OCR Sender: ${detectedSender}` : ''}\nBank: ${analysis.bankName}\nRecipient: ${analysis.recipientName}\nAmount: ₩${analysis.amountKrw.toLocaleString()}\nTime: ${analysis.transferTimestamp}\nUser: ${userEmail}\nIssued Redeem Code: ${unlockCode}`
       );
     }
 
@@ -3038,9 +3089,12 @@ app.post('/api/payments/verify-kr-receipt', paymentRateLimiter, async (req, res)
       verdict: 'ពិត',
       verdictBoolean: true,
       unlockCode,
+      idCardName: applicantName,
+      senderNameInput,
       verifiedAmount: analysis.amountKrw,
       bankName: analysis.bankName,
       recipientName: analysis.recipientName,
+      senderName: analysis.senderName || '',
       statusText: analysis.statusText,
       transferTimestamp: analysis.transferTimestamp,
       checks: analysis.checks,
@@ -3317,8 +3371,9 @@ app.get('/api/admin/redeem-codes/check', requireAdminAuth, (req, res) => {
 app.post('/api/admin/redeem-codes/issue-paid', requireAdminAuth, (req, res) => {
   try {
     const assignedTo = String(req.body?.assignedTo || 'paid_customer').trim().slice(0, 160);
-    const note = String(req.body?.note || 'Admin Payment Confirmed (ABA / Bank)').trim().slice(0, 160);
-    const record = issueNextPaidRedeemCode({ assignedTo, note });
+    const idCardName = sanitizeApplicantName(req.body?.idCardName);
+    const note = String(req.body?.note || 'Admin Payment Confirmed (ABA / Bank)').trim().slice(0, 200);
+    const record = issueNextPaidRedeemCode({ assignedTo, idCardName, note });
     return res.json({
       success: true,
       record,
@@ -3335,8 +3390,9 @@ app.patch('/api/admin/redeem-codes/:code/paid', requireAdminAuth, (req, res) => 
     const code = String(req.params.code || '');
     const isPaid = Boolean(req.body?.isPaid);
     const assignedTo = typeof req.body?.assignedTo === 'string' ? req.body.assignedTo : undefined;
+    const idCardName = typeof req.body?.idCardName === 'string' ? req.body.idCardName : undefined;
     const note = typeof req.body?.note === 'string' ? req.body.note : undefined;
-    const record = setRedeemCodePaid(code, isPaid, assignedTo, note);
+    const record = setRedeemCodePaid(code, isPaid, assignedTo, note, idCardName);
     if (!record) {
       return res.status(404).json({ success: false, error: 'Redeem code not found' });
     }

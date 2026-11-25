@@ -62,9 +62,11 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   onClose,
   onPaymentSuccess,
   lang = 'km',
+  formData,
   userEmail,
 }) => {
   const t = getTranslation(lang);
+  const idCardName = (formData?.name || '').trim();
   const [activeTab, setActiveTab] = useState<'khqr' | 'krbank' | 'redeem'>('krbank');
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingStep, setProcessingStep] = useState<string>('');
@@ -92,6 +94,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
 
   // Korea Bank Screenshot Auto-Verify State (5-Step Automated Flow)
   const [receiptPreview, setReceiptPreview] = useState<string | null>(null);
+  const [receiptSenderName, setReceiptSenderName] = useState<string>('');
   const [verifyingReceipt, setVerifyingReceipt] = useState(false);
   const [receiptError, setReceiptError] = useState<string | null>(null);
   const [receiptChecks, setReceiptChecks] = useState<{
@@ -268,6 +271,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         body: JSON.stringify({
           code: trimmed,
           userEmail: userEmail || '',
+          applicantName: idCardName,
           mode: source,
           lang,
           firebaseIdToken: firebaseIdToken || undefined,
@@ -444,6 +448,18 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       return;
     }
 
+    const cleanSenderInput = receiptSenderName.trim();
+    if (cleanSenderInput.length < 2) {
+      setReceiptError(
+        isKm
+          ? 'សូមបំពេញឈ្មោះអ្នកផ្ញើរប្រាក់ (ម្ចាស់គណនីធនាគារដែលបានផ្ទេរ) ជាមុនសិន ទើបអាចចុចផ្ទៀងផ្ទាត់បាន!'
+          : isKo
+          ? '먼저 송금인(보내는 분) 이름을 입력해 주세요.'
+          : 'Please enter the Sender Name (bank transfer sender) before verifying.'
+      );
+      return;
+    }
+
     setReceiptError(null);
     setReceiptChecks(null);
     setReceiptDetected(null);
@@ -456,6 +472,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         body: JSON.stringify({
           receiptImage: receiptPreview,
           userEmail: userEmail || 'guest@kiip-portal.kr',
+          applicantName: idCardName,
+          senderNameInput: cleanSenderInput,
           lang,
         }),
       });
@@ -1102,6 +1120,18 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                             ? `AI가 받는 분(${krConfig.accountHolder}), 금액(₩35,000), 이체완료 상태, 거래일시(시간)를 자동 검증한 뒤 리딤 코드를 즉시 발급합니다.`
                             : `AI automatically verifies recipient (${krConfig.accountHolder}), amount (₩35,000), transfer completion status, and transfer timestamp before issuing your Redeem Code.`}
                         </p>
+                        {idCardName && (
+                          <div className="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-indigo-50 border border-indigo-200 text-[11px] font-bold text-indigo-900">
+                            <ShieldCheck className="w-3.5 h-3.5 text-indigo-600 shrink-0" />
+                            <span>
+                              {isKm
+                                ? `ឈ្មោះលើ ID Card នឹងកត់ត្រា Mark Paid៖ ${idCardName}`
+                                : isKo
+                                ? `신분증(ARC) 이름 결제 기록: ${idCardName}`
+                                : `ID Card Name recorded on Paid report: ${idCardName}`}
+                            </span>
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -1151,12 +1181,76 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                       )}
                     </label>
 
+                    {/* Required Sender Name Input (must be filled before Verify button activates) */}
+                    <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <label
+                          htmlFor="kr-receipt-sender-name"
+                          className="text-xs font-black text-slate-900 flex items-center gap-1"
+                        >
+                          <span>
+                            {isKm
+                              ? 'ឈ្មោះអ្នកផ្ញើរប្រាក់ (Sender Name)'
+                              : isKo
+                              ? '송금인 이름 (보내는 분)'
+                              : 'Sender Name (Bank Account Holder)'}
+                          </span>
+                          <span className="text-rose-600">*</span>
+                        </label>
+                        {idCardName && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setReceiptSenderName(idCardName);
+                              setReceiptError(null);
+                            }}
+                            className="px-2.5 py-1 rounded-lg bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 text-indigo-700 font-bold text-[11px] cursor-pointer transition-colors"
+                          >
+                            {isKm
+                              ? `ប្រើឈ្មោះ ID Card (${idCardName})`
+                              : isKo
+                              ? `ID 이름 입력 (${idCardName})`
+                              : `Use ID Card Name (${idCardName})`}
+                          </button>
+                        )}
+                      </div>
+                      <input
+                        id="kr-receipt-sender-name"
+                        type="text"
+                        maxLength={100}
+                        value={receiptSenderName}
+                        onChange={(e) => {
+                          setReceiptSenderName(e.target.value);
+                          if (receiptError) setReceiptError(null);
+                        }}
+                        placeholder={
+                          isKm
+                            ? 'វាយឈ្មោះអ្នកផ្ញើរប្រាក់លើវិក្កយបត្រ (ឧ. SOK DARA ឬ ឈ្មោះម្ចាស់គណនីផ្ទេរ)...'
+                            : isKo
+                            ? '이체한 송금인 이름을 입력하세요 (예: SOK DARA)...'
+                            : 'Enter the transfer sender name shown on your bank account...'
+                        }
+                        className={`w-full px-3 py-2.5 rounded-xl bg-white border text-xs sm:text-sm font-bold text-slate-900 focus:outline-none focus:ring-2 transition-colors ${
+                          receiptSenderName.trim().length >= 2
+                            ? 'border-emerald-400 focus:ring-emerald-400/30'
+                            : 'border-slate-300 focus:ring-blue-400/30'
+                        }`}
+                      />
+                      <p className="text-[11px] text-slate-500">
+                        {isKm
+                          ? 'ត្រូវបំពេញឈ្មោះអ្នកផ្ញើរប្រាក់ និង Upload រូបភាពវិក្កយបត្រជាមុនសិន ទើបប៊ូតុងផ្ទៀងផ្ទាត់ AI បើកដំណើរការ។'
+                          : isKo
+                          ? '영수증 업로드와 송금인 이름 입력을 모두 완료해야 AI 검증 버튼이 활성화됩니다.'
+                          : 'Both the receipt screenshot and Sender Name are required to enable AI verification.'}
+                      </p>
+                    </div>
+
                     {/* Primary AI Verify Button */}
                     <button
                       type="button"
-                      disabled={!receiptPreview || verifyingReceipt}
+                      disabled={!receiptPreview || receiptSenderName.trim().length < 2 || verifyingReceipt}
                       onClick={handleVerifyKrReceipt}
-                      className="w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-blue-600 to-emerald-600 hover:from-blue-700 hover:to-emerald-700 text-white font-black text-xs sm:text-sm shadow-md flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 transition-all"
+                      className="w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-blue-600 to-emerald-600 hover:from-blue-700 hover:to-emerald-700 text-white font-black text-xs sm:text-sm shadow-md flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed transition-all"
                     >
                       {verifyingReceipt ? (
                         <>
