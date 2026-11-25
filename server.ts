@@ -1283,7 +1283,7 @@ function localizeCodeError(errorCode: UnlockErrorCode, lang: string): string {
 
 async function lookupFirestorePromoCode(
   code: string,
-  firebaseIdToken: string
+  firebaseIdToken?: string
 ): Promise<{
   code: string;
   centerId: string;
@@ -1293,20 +1293,25 @@ async function lookupFirestorePromoCode(
   expiresAt: string;
   isActive: boolean;
 } | null> {
-  if (!firebaseIdToken || firebaseIdToken.length > 8192) return null;
+  if (!FIREBASE_PROJECT_ID) return null;
   const safeCode = String(code || '')
     .trim()
     .toUpperCase()
     .replace(/[^A-Z0-9_-]/g, '')
     .slice(0, 64);
-  if (safeCode.length < 3) return null;
+  if (safeCode.length < 3 || !/^[A-Z0-9_-]{3,64}$/.test(safeCode)) return null;
   try {
-    const verifiedUser = await verifyFirebaseIdToken(firebaseIdToken);
-    if (!verifiedUser) return null;
+    const headers: Record<string, string> = {};
+    if (firebaseIdToken && firebaseIdToken.length <= 8192) {
+      const verifiedUser = await verifyFirebaseIdToken(firebaseIdToken);
+      if (verifiedUser) {
+        headers.Authorization = `Bearer ${firebaseIdToken}`;
+      }
+    }
     const fsResp = await fetch(
       `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(FIREBASE_PROJECT_ID)}/databases/${encodeURIComponent(FIREBASE_DATABASE_ID)}/documents/promoCodes/${encodeURIComponent(safeCode)}`,
       {
-        headers: { Authorization: `Bearer ${firebaseIdToken}` },
+        headers,
         signal: AbortSignal.timeout(6000),
       }
     ).catch(() => null);
@@ -1362,10 +1367,11 @@ app.post('/api/payments/verify-redeem', paymentRateLimiter, async (req, res) => 
 
     try {
       let promoCheck = verifyAndIncrementServerPromoCode(rawCode);
-      // If not yet mirrored in Server SQLite, verify live against Cloud Firestore /promoCodes/{CODE}
-      // and automatically mirror it into SQLite so subsequent guest users can redeem it too!
-      if (!promoCheck.ok && promoCheck.errorCode === 'NOT_FOUND' && firebaseIdToken) {
-        const fsPromo = await lookupFirestorePromoCode(rawCode, firebaseIdToken);
+      // If not yet mirrored in Server SQLite (or if Admin updated its status/limit/expiry in Firestore),
+      // verify live by exact code ID against Cloud Firestore /promoCodes/{CODE} (works for BOTH guests and signed-in users!)
+      // and automatically mirror it into SQLite!
+      if (!promoCheck.ok) {
+        const fsPromo = await lookupFirestorePromoCode(rawCode, firebaseIdToken || undefined);
         if (fsPromo) {
           upsertServerPromoCode({
             code: fsPromo.code,
@@ -1503,8 +1509,8 @@ app.post('/api/payments/verify-redeem', paymentRateLimiter, async (req, res) => 
     });
   }
 
-  if (firebaseIdToken) {
-    const fsPromo = await lookupFirestorePromoCode(rawCode, firebaseIdToken);
+  {
+    const fsPromo = await lookupFirestorePromoCode(rawCode, firebaseIdToken || undefined);
     if (fsPromo) {
       upsertServerPromoCode({
         code: fsPromo.code,

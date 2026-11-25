@@ -199,9 +199,9 @@ service cloud.firestore {
       allow delete: if isValidId(payId) && isAdmin();
     }
 
-    // Promotion Codes collection (Only Admin can list; users can get an exact code ID to verify & increment usageCount by 1)
+    // Promotion Codes collection (Only Root Admin can list; exact-ID lookup allows verifying a known Promo Code with zero PII; writes strictly protected)
     match /promoCodes/{codeId} {
-      allow get: if isValidId(codeId) && (isSignedIn() || isAdmin());
+      allow get: if isValidId(codeId);
       allow list: if isRootAdmin();
       allow create: if isValidId(codeId) && isAdmin() &&
         isValidPromoCode(incoming(), codeId) &&

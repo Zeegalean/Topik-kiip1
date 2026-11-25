@@ -336,122 +336,173 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
     // 2. Fetch real Cloud Firestore collections (when signed in as authorized Firebase Admin)
     if (isFirebaseRootAdmin) {
+      let anyFirestoreSucceeded = false;
+      let firstFirestoreErr: string | null = null;
+
+      // 2a. Fetch & mirror promoCodes FIRST so an error in any other collection never blocks promo sync!
       try {
-        let usersCount = 0;
-        try {
-          const usersSnap = await getDocs(collection(db, 'users'));
-          usersCount = usersSnap.size;
-        } catch (err) {
-          handleFirestoreError(err, OperationType.LIST, 'users');
-        }
-        setRegisteredUsersCount(usersCount);
-
-        try {
-          const docsSnap = await getDocs(collection(db, 'documents'));
-          docsSnap.forEach((d) => {
-            const data = d.data();
-            docsById.set(d.id, {
-              id: d.id,
-              applicantName: String(data.applicantName || 'Applicant'),
-              pageCount: Number(data.pageCount) || 1,
-              isPaid: Boolean(data.isPaid),
-              centerId: data.centerId ? String(data.centerId) : undefined,
-              createdAt: formatFirestoreDate(data.createdAt),
-            });
+        const promosSnap = await getDocs(collection(db, 'promoCodes'));
+        anyFirestoreSucceeded = true;
+        const fsPromoList: PromoCodeItem[] = [];
+        promosSnap.forEach((d) => {
+          const data = d.data();
+          const key = String(data.code || d.id).toUpperCase();
+          const item: PromoCodeItem = {
+            id: key,
+            code: key,
+            centerId: String(data.centerId || 'general'),
+            monthLabel: data.monthLabel ? String(data.monthLabel) : undefined,
+            usageLimit: Number(data.usageLimit) || 50,
+            usageCount: Number(data.usageCount) || 0,
+            expiresAt: String(data.expiresAt || ''),
+            isActive: data.isActive !== false,
+            createdAt: formatFirestoreDate(data.createdAt),
+          };
+          fsPromoList.push(item);
+          const existing = promosByCode.get(key);
+          promosByCode.set(key, {
+            ...item,
+            usageCount: Math.max(item.usageCount, existing?.usageCount || 0),
           });
-        } catch (err) {
-          handleFirestoreError(err, OperationType.LIST, 'documents');
-        }
-
-        try {
-          const paymentsSnap = await getDocs(collection(db, 'payments'));
-          paymentsSnap.forEach((d) => {
-            const data = d.data();
-            paysById.set(d.id, {
-              id: d.id,
-              userEmail: String(data.userEmail || 'user@kiip.kr'),
-              amount: Number(data.amount) || 0,
-              currency: String(data.currency || 'KRW'),
-              method: String(data.method || 'ABA PayWay QR'),
-              status: String(data.status || 'completed'),
-              createdAt: formatFirestoreDate(data.createdAt),
-              promoCodeUsed: String(data.promoCodeUsed || '-'),
-              centerId: data.centerId ? String(data.centerId) : undefined,
-            });
-          });
-        } catch (err) {
-          handleFirestoreError(err, OperationType.LIST, 'payments');
-        }
-
-        try {
-          const promosSnap = await getDocs(collection(db, 'promoCodes'));
-          const fsPromoList: PromoCodeItem[] = [];
-          promosSnap.forEach((d) => {
-            const data = d.data();
-            const key = String(data.code || d.id).toUpperCase();
-            const item: PromoCodeItem = {
-              id: key,
-              code: key,
-              centerId: String(data.centerId || 'general'),
-              monthLabel: data.monthLabel ? String(data.monthLabel) : undefined,
-              usageLimit: Number(data.usageLimit) || 50,
-              usageCount: Number(data.usageCount) || 0,
-              expiresAt: String(data.expiresAt || ''),
-              isActive: data.isActive !== false,
-              createdAt: formatFirestoreDate(data.createdAt),
-            };
-            fsPromoList.push(item);
-            const existing = promosByCode.get(key);
-            promosByCode.set(key, {
-              ...item,
-              usageCount: Math.max(item.usageCount, existing?.usageCount || 0),
-            });
-          });
-          // Automatically mirror ALL Firestore promo codes to server SQLite so guests/non-Google users can redeem them
-          if (tokenToUse && fsPromoList.length > 0) {
-            fetch('/api/admin/promo-codes', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                Authorization: `Bearer ${tokenToUse}`,
-              },
-              body: JSON.stringify({ promos: fsPromoList }),
-            }).catch(() => {});
+        });
+        // Automatically mirror ALL Firestore promo codes to server SQLite (awaited with 401 retry)
+        if (fsPromoList.length > 0) {
+          let syncToken = tokenToUse || (await ensureServerAdminToken(true));
+          if (syncToken) {
+            try {
+              let syncResp = await fetch('/api/admin/promo-codes', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  Authorization: `Bearer ${syncToken}`,
+                },
+                body: JSON.stringify({ promos: fsPromoList }),
+              });
+              if (syncResp.status === 401) {
+                const refreshed = await ensureServerAdminToken(true);
+                if (refreshed) {
+                  syncToken = refreshed;
+                  tokenToUse = refreshed;
+                  await fetch('/api/admin/promo-codes', {
+                    method: 'POST',
+                    headers: {
+                      'Content-Type': 'application/json',
+                      Authorization: `Bearer ${syncToken}`,
+                    },
+                    body: JSON.stringify({ promos: fsPromoList }),
+                  });
+                }
+              }
+            } catch {
+              // Non-blocking
+            }
           }
-        } catch (err) {
-          handleFirestoreError(err, OperationType.LIST, 'promoCodes');
         }
-
-        try {
-          const centersSnap = await getDocs(collection(db, 'centers'));
-          const cList: CenterItem[] = [];
-          centersSnap.forEach((d) => {
-            const data = d.data();
-            cList.push({
-              id: d.id,
-              centerName: String(data.centerName || d.id),
-              region: String(data.region || ''),
-              contactPhone: String(data.contactPhone || ''),
-              managerEmail: String(data.managerEmail || ''),
-              createdAt: formatFirestoreDate(data.createdAt),
-            });
-          });
-          cList.sort((a, b) => a.centerName.localeCompare(b.centerName));
-          setCenters(cList);
-          if (cList.length > 0 && !newCenterId) {
-            setNewCenterId(cList[0].id);
-          }
-        } catch (err) {
-          handleFirestoreError(err, OperationType.LIST, 'centers');
-        }
-
-        setFirestoreConnected(true);
       } catch (err: any) {
-        setFirestoreConnected(false);
+        try {
+          handleFirestoreError(err, OperationType.LIST, 'promoCodes');
+        } catch (wrapped: any) {
+          firstFirestoreErr = firstFirestoreErr || wrapped?.message || 'Permission denied';
+        }
+      }
+
+      // 2b. Users count
+      try {
+        const usersSnap = await getDocs(collection(db, 'users'));
+        anyFirestoreSucceeded = true;
+        setRegisteredUsersCount(usersSnap.size);
+      } catch (err: any) {
+        try {
+          handleFirestoreError(err, OperationType.LIST, 'users');
+        } catch (wrapped: any) {
+          firstFirestoreErr = firstFirestoreErr || wrapped?.message || 'Permission denied';
+        }
+      }
+
+      // 2c. Documents
+      try {
+        const docsSnap = await getDocs(collection(db, 'documents'));
+        anyFirestoreSucceeded = true;
+        docsSnap.forEach((d) => {
+          const data = d.data();
+          docsById.set(d.id, {
+            id: d.id,
+            applicantName: String(data.applicantName || 'Applicant'),
+            pageCount: Number(data.pageCount) || 1,
+            isPaid: Boolean(data.isPaid),
+            centerId: data.centerId ? String(data.centerId) : undefined,
+            createdAt: formatFirestoreDate(data.createdAt),
+          });
+        });
+      } catch (err: any) {
+        try {
+          handleFirestoreError(err, OperationType.LIST, 'documents');
+        } catch (wrapped: any) {
+          firstFirestoreErr = firstFirestoreErr || wrapped?.message || 'Permission denied';
+        }
+      }
+
+      // 2d. Payments
+      try {
+        const paymentsSnap = await getDocs(collection(db, 'payments'));
+        anyFirestoreSucceeded = true;
+        paymentsSnap.forEach((d) => {
+          const data = d.data();
+          paysById.set(d.id, {
+            id: d.id,
+            userEmail: String(data.userEmail || 'user@kiip.kr'),
+            amount: Number(data.amount) || 0,
+            currency: String(data.currency || 'KRW'),
+            method: String(data.method || 'ABA PayWay QR'),
+            status: String(data.status || 'completed'),
+            createdAt: formatFirestoreDate(data.createdAt),
+            promoCodeUsed: String(data.promoCodeUsed || '-'),
+            centerId: data.centerId ? String(data.centerId) : undefined,
+          });
+        });
+      } catch (err: any) {
+        try {
+          handleFirestoreError(err, OperationType.LIST, 'payments');
+        } catch (wrapped: any) {
+          firstFirestoreErr = firstFirestoreErr || wrapped?.message || 'Permission denied';
+        }
+      }
+
+      // 2e. Centers
+      try {
+        const centersSnap = await getDocs(collection(db, 'centers'));
+        anyFirestoreSucceeded = true;
+        const cList: CenterItem[] = [];
+        centersSnap.forEach((d) => {
+          const data = d.data();
+          cList.push({
+            id: d.id,
+            centerName: String(data.centerName || d.id),
+            region: String(data.region || ''),
+            contactPhone: String(data.contactPhone || ''),
+            managerEmail: String(data.managerEmail || ''),
+            createdAt: formatFirestoreDate(data.createdAt),
+          });
+        });
+        cList.sort((a, b) => a.centerName.localeCompare(b.centerName));
+        setCenters(cList);
+        if (cList.length > 0 && !newCenterId) {
+          setNewCenterId(cList[0].id);
+        }
+      } catch (err: any) {
+        try {
+          handleFirestoreError(err, OperationType.LIST, 'centers');
+        } catch (wrapped: any) {
+          firstFirestoreErr = firstFirestoreErr || wrapped?.message || 'Permission denied';
+        }
+      }
+
+      setFirestoreConnected(anyFirestoreSucceeded);
+      if (!anyFirestoreSucceeded && firstFirestoreErr) {
         setDataError(
           isKm
             ? 'មិនអាចទាញទិន្នន័យពី Cloud Firestore បានទេ។ សូមផ្ទៀងផ្ទាត់គណនី Google Admin (zeekhmerads@gmail.com)។'
-            : `Firestore sync error: ${err?.message || 'Permission denied'}`
+            : `Firestore sync error: ${firstFirestoreErr}`
         );
       }
     } else {

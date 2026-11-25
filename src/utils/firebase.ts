@@ -288,10 +288,6 @@ export async function verifyAndRedeemFirestorePromo(
     return { valid: false, reason: 'Invalid code format' };
   }
 
-  if (!auth.currentUser) {
-    return { valid: false };
-  }
-
   try {
     const promoRef = doc(db, 'promoCodes', normalized);
     const snap = await getDoc(promoRef);
@@ -312,10 +308,10 @@ export async function verifyAndRedeemFirestorePromo(
       return { valid: false, reason: 'Promo code usage limit reached' };
     }
 
-    if (auth.currentUser.emailVerified) {
+    if (auth.currentUser?.emailVerified) {
       await updateDoc(promoRef, {
         usageCount: increment(1),
-      });
+      }).catch(() => {});
     }
 
     return { valid: true, centerId: String(data.centerId || '') };
