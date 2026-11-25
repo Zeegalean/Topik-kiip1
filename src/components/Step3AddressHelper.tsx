@@ -22,6 +22,7 @@ import {
   searchAddressByBunji,
 } from '../data/koreanAddresses';
 import { validateKoreanAddress } from '../utils/koreanAddressValidator';
+import { DaumPostcodeModal } from './DaumPostcodeModal';
 
 interface Step3AddressHelperProps {
   address: string;
@@ -202,6 +203,9 @@ function getCopy(lang: Language) {
       selectedOfficeTag: 'កំពុងមើលលើផែនទី',
       noOfficeMatched: 'មិនទាន់ផ្គូផ្គងការិយាល័យទេ — សូមបញ្ចូល 시/도 និង 시/군/구 ឬចុចលើផែនទី។',
       filterByRegionBtn: 'ស្វែងរកអាសយដ្ឋានក្នុងតំបន់នេះ',
+      daumSearchBtn: 'ស្វែងរកតាម Daum Postcode',
+      daumVerifiedTag: 'ផ្ទៀងផ្ទាត់ដោយ Daum Postcode',
+      daumFallbackBtn: 'ស្វែងរកទូទាំងប្រទេសកូរ៉េតាម Daum Postcode API',
       categories: {
         ALL: 'ទាំងអស់',
         '공단/산업단지': 'តំបន់ឧស្សាហកម្ម',
@@ -245,6 +249,9 @@ function getCopy(lang: Language) {
       selectedOfficeTag: '선택한 관할청 정보',
       noOfficeMatched: '관할 관서가 아직 배정되지 않았습니다. 시/도와 시/군/구를 입력해 주세요.',
       filterByRegionBtn: '이 관할 지역 주소 검색하기',
+      daumSearchBtn: 'Daum 도로명주소 검색',
+      daumVerifiedTag: 'Daum 우편번호 공식 검증 완료',
+      daumFallbackBtn: 'Daum 우편번호 API로 전국 도로명주소 검색',
       categories: {
         ALL: '전체',
         '공단/산업단지': '공단/산업단지',
@@ -287,6 +294,9 @@ function getCopy(lang: Language) {
     selectedOfficeTag: 'Map Selection',
     noOfficeMatched: 'No jurisdiction matched yet — enter 시/도 and 시/군/구 or select a pin.',
     filterByRegionBtn: 'Search addresses in this region',
+    daumSearchBtn: 'Search Daum Postcode',
+    daumVerifiedTag: 'Verified via Daum Postcode API',
+    daumFallbackBtn: 'Search nationwide via Daum Postcode API',
     categories: {
       ALL: 'All',
       '공단/산업단지': 'Industrial',
@@ -323,6 +333,9 @@ export const Step3AddressHelper: React.FC<Step3AddressHelperProps> = ({
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>('ALL');
   const [detailUnit, setDetailUnit] = useState('');
   const [manualOfficeId, setManualOfficeId] = useState<string | null>(null);
+  const [isDaumModalOpen, setIsDaumModalOpen] = useState(false);
+  const [daumInitialQuery, setDaumInitialQuery] = useState('');
+  const [lastDaumMeta, setLastDaumMeta] = useState<{ zonecode: string; appliedAddress: string } | null>(null);
 
   const searchResults = useMemo(() => {
     const base = searchQuery.trim()
@@ -483,20 +496,50 @@ export const Step3AddressHelper: React.FC<Step3AddressHelperProps> = ({
                 )}
               </div>
 
-              <div className="relative">
-                <MapPin className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
-                <input
-                  id="step3-address-sync-input"
-                  type="text"
-                  value={address}
-                  onChange={(e) => {
-                    setManualOfficeId(null);
-                    onChangeAddress(e.target.value);
+              <div className="flex flex-col sm:flex-row gap-2">
+                <div className="relative flex-1 min-w-0">
+                  <MapPin className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <input
+                    id="step3-address-sync-input"
+                    type="text"
+                    value={address}
+                    onChange={(e) => {
+                      setManualOfficeId(null);
+                      onChangeAddress(e.target.value);
+                    }}
+                    placeholder={copy.currentAddressPlaceholder}
+                    className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-slate-300 bg-white text-sm font-medium text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setDaumInitialQuery(
+                      address && !address.startsWith('00000') ? address : searchQuery
+                    );
+                    setIsDaumModalOpen(true);
                   }}
-                  placeholder={copy.currentAddressPlaceholder}
-                  className="w-full pl-10 pr-4 py-2.5 rounded-xl border border-slate-300 bg-white text-sm font-medium text-slate-900 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-                />
+                  className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs sm:text-sm font-bold flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 shadow-xs cursor-pointer transition-colors"
+                >
+                  <Search className="w-4 h-4" />
+                  <span>{copy.daumSearchBtn}</span>
+                </button>
               </div>
+
+              {lastDaumMeta && lastDaumMeta.appliedAddress === address && (
+                <div className="flex items-center gap-2 text-xs text-emerald-700 font-medium">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                  <span>{copy.daumVerifiedTag}</span>
+                  {lastDaumMeta.zonecode ? (
+                    <>
+                      <span className="text-slate-300">·</span>
+                      <span className="font-mono tabular-nums font-semibold text-slate-700">
+                        [{lastDaumMeta.zonecode}]
+                      </span>
+                    </>
+                  ) : null}
+                </div>
+              )}
 
               {/* Subdivided City Quick-Insert 구 Helper */}
               {validation.guRequiredCity && validation.suggestedGus.length > 0 && (
@@ -628,8 +671,19 @@ export const Step3AddressHelper: React.FC<Step3AddressHelperProps> = ({
               {/* Matching Results */}
               <div className="max-h-60 overflow-y-auto divide-y divide-slate-100 bg-white">
                 {searchResults.length === 0 ? (
-                  <div className="px-4 py-6 text-center text-xs text-slate-500">
-                    {copy.noResults}
+                  <div className="px-4 py-6 text-center space-y-3">
+                    <p className="text-xs text-slate-500">{copy.noResults}</p>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDaumInitialQuery(searchQuery);
+                        setIsDaumModalOpen(true);
+                      }}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold cursor-pointer transition-colors"
+                    >
+                      <Search className="w-3.5 h-3.5" />
+                      <span>{copy.daumFallbackBtn}</span>
+                    </button>
                   </div>
                 ) : (
                   searchResults.map((item, idx) => {
@@ -938,6 +992,22 @@ export const Step3AddressHelper: React.FC<Step3AddressHelperProps> = ({
           </div>
         </div>
       )}
+
+      <DaumPostcodeModal
+        isOpen={isDaumModalOpen}
+        onClose={() => setIsDaumModalOpen(false)}
+        onSelectAddress={(fullAddress, meta) => {
+          setManualOfficeId(null);
+          setLastDaumMeta({
+            zonecode: meta.zonecode,
+            appliedAddress: fullAddress,
+          });
+          onChangeAddress(fullAddress);
+        }}
+        initialQuery={daumInitialQuery}
+        initialDetailUnit={detailUnit}
+        lang={lang}
+      />
     </section>
   );
 };

@@ -28,7 +28,9 @@ import {
   UserCheck,
   BookOpenCheck,
   ShieldCheck,
+  Search,
 } from 'lucide-react';
+import { DaumPostcodeModal } from './DaumPostcodeModal';
 
 interface Step2OcrReviewProps {
   lang: Language;
@@ -200,6 +202,7 @@ export const Step2OcrReview: React.FC<Step2OcrReviewProps> = ({
   // Track which fields the user has manually edited in Step 2
   const [editedKeys, setEditedKeys] = useState<Set<OcrConfidenceKey>>(() => new Set());
   const [fieldFilter, setFieldFilter] = useState<FieldFilterMode>('all');
+  const [isDaumModalOpen, setIsDaumModalOpen] = useState(false);
 
   // Clear manual edit flags when a fresh OCR rescan updates initialConfidenceSnapshot
   useEffect(() => {
@@ -1005,7 +1008,23 @@ export const Step2OcrReview: React.FC<Step2OcrReviewProps> = ({
                   <label className="block text-xs font-semibold text-slate-700">
                     체류지 ({isKm ? 'អាសយដ្ឋានពេញលេញជាភាសាកូរ៉េ — ជួរចុងក្រោយថ្មីបំផុត' : isKo ? '최신 체류지 도로명 주소' : 'Full Korean Residence Address'})
                   </label>
-                  <ConfidenceInlineMeter confidence={liveConfidence.address} lang={lang} />
+                  <div className="flex items-center gap-2.5">
+                    <ConfidenceInlineMeter confidence={liveConfidence.address} lang={lang} />
+                    <button
+                      type="button"
+                      onClick={() => setIsDaumModalOpen(true)}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-semibold whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+                    >
+                      <Search className="w-3 h-3" />
+                      <span>
+                        {isKm
+                          ? 'ស្វែងរកតាម Daum'
+                          : isKo
+                            ? 'Daum 주소검색'
+                            : 'Daum Postcode'}
+                      </span>
+                    </button>
+                  </div>
                 </div>
                 <textarea
                   rows={2}
@@ -1315,6 +1334,21 @@ export const Step2OcrReview: React.FC<Step2OcrReviewProps> = ({
           <ArrowRight className="w-4 h-4" />
         </button>
       </div>
+
+      <DaumPostcodeModal
+        isOpen={isDaumModalOpen}
+        onClose={() => setIsDaumModalOpen(false)}
+        onSelectAddress={(fullAddress) => {
+          markEdited('address');
+          setDraft((p) => ({ ...p, address: fullAddress }));
+        }}
+        initialQuery={
+          draft.address && !draft.address.startsWith('00000')
+            ? draft.address
+            : ''
+        }
+        lang={lang}
+      />
     </div>
   );
 };

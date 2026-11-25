@@ -50,12 +50,14 @@ import {
   ExternalLink,
   Stamp,
   Unlock,
-  Save
+  Save,
+  Search
 } from 'lucide-react';
 import { WatermarkOverlay } from './WatermarkOverlay';
 import confetti from 'canvas-confetti';
 import { RightClickProtectionToast } from './RightClickProtectionToast';
 import { Step3AddressHelper } from './Step3AddressHelper';
+import { DaumPostcodeModal } from './DaumPostcodeModal';
 
 interface Step2FormTemplateProps {
   formData: ApplicationFormData;
@@ -92,6 +94,7 @@ export const Step2FormTemplate: React.FC<Step2FormTemplateProps> = ({
 }) => {
   const [showRightClickNotice, setShowRightClickNotice] = useState(false);
   const [showStep2SocinetPw, setShowStep2SocinetPw] = useState(false);
+  const [isDaumAddressOpen, setIsDaumAddressOpen] = useState(false);
   const t = getTranslation(lang);
   const [isExtracting, setIsExtracting] = useState(false);
   const [extractSuccess, setExtractSuccess] = useState(false);
@@ -1435,15 +1438,38 @@ export const Step2FormTemplate: React.FC<Step2FormTemplateProps> = ({
                   체&nbsp;류&nbsp;지
                 </td>
                 <td colSpan={3} className="p-1 border border-black text-left">
-                  <input
-                    type="text"
-                    value={formData.address}
-                    onChange={(e) =>
-                      setFormData((p) => ({ ...p, address: e.target.value }))
-                    }
-                    className="w-full h-8 px-2 text-left bg-transparent border-0 font-num-kr font-bold text-[13px] text-black outline-none"
-                    placeholder="00000 0000 000"
-                  />
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="text"
+                      value={formData.address}
+                      onChange={(e) =>
+                        setFormData((p) => ({ ...p, address: e.target.value }))
+                      }
+                      className="flex-1 min-w-0 h-8 px-2 text-left bg-transparent border-0 font-num-kr font-bold text-[13px] text-black outline-none"
+                      placeholder="경기도 안산시 단원구 원곡공원로 35, 101동 202호"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setIsDaumAddressOpen(true)}
+                      title={
+                        lang === 'ko'
+                          ? 'Daum 우편번호 API로 공식 도로명주소 검색'
+                          : lang === 'km'
+                            ? 'ស្វែងរកអាសយដ្ឋានកូរ៉េផ្លូវការតាម Daum Postcode API'
+                            : 'Search official Korean address via Daum Postcode API'
+                      }
+                      className="no-print shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-blue-600 hover:bg-blue-700 text-white text-[11px] font-sans font-semibold whitespace-nowrap cursor-pointer transition-colors"
+                    >
+                      <Search className="w-3 h-3" />
+                      <span>
+                        {lang === 'ko'
+                          ? '주소검색'
+                          : lang === 'km'
+                            ? 'ស្វែងរក (Daum)'
+                            : 'Daum Search'}
+                      </span>
+                    </button>
+                  </div>
                 </td>
               </tr>
 
@@ -1943,6 +1969,21 @@ export const Step2FormTemplate: React.FC<Step2FormTemplateProps> = ({
         show={showRightClickNotice}
         onClose={() => setShowRightClickNotice(false)}
         onOpenPayment={onOpenPayment}
+        lang={lang}
+      />
+
+      {/* Official Daum Postcode Address Autocomplete Modal */}
+      <DaumPostcodeModal
+        isOpen={isDaumAddressOpen}
+        onClose={() => setIsDaumAddressOpen(false)}
+        onSelectAddress={(fullAddress) =>
+          setFormData((p) => ({ ...p, address: fullAddress }))
+        }
+        initialQuery={
+          formData.address && !formData.address.startsWith('00000')
+            ? formData.address
+            : ''
+        }
         lang={lang}
       />
     </div>
