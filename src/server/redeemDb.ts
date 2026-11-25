@@ -297,6 +297,20 @@ export function getRedeemDb(): DatabaseSync {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_promo_codes_compact ON promo_codes(code_compact);
+
+    CREATE TABLE IF NOT EXISTS verified_receipts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      image_sha256 TEXT NOT NULL UNIQUE,
+      transfer_fingerprint TEXT NOT NULL DEFAULT '',
+      redeem_code TEXT NOT NULL,
+      bank_name TEXT NOT NULL DEFAULT '',
+      recipient_name TEXT NOT NULL DEFAULT '',
+      amount_krw INTEGER NOT NULL DEFAULT 0,
+      transfer_timestamp TEXT NOT NULL DEFAULT '',
+      user_email TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_verified_receipts_fp ON verified_receipts(transfer_fingerprint);
   `);
 
   ensureRedeemSchemaMigrations(db);
@@ -780,6 +794,140 @@ export function reserveUnusedRedeemCode(params: {
 
     db.exec('COMMIT');
     return mapRedeemRow(created);
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      // ignore
+    }
+    throw err;
+  }
+}
+
+export interface VerifiedReceiptReservationResult {
+  ok: boolean;
+  duplicate?: boolean;
+  existingCode?: string;
+  record?: RedeemCodeRecord;
+}
+
+/**
+ * Atomically checks for duplicate receipt replays (by image SHA-256 or transfer timestamp+amount fingerprint),
+ * reserves the next unpaid 'Unused' Redeem Code (prioritizing the 10,000 Google Sheet codes), marks it Paid,
+ * and records the verified receipt inside one SQLite transaction.
+ */
+export function recordVerifiedReceiptAndReserveCode(params: {
+  imageSha256: string;
+  transferFingerprint: string;
+  source: 'kr_receipt' | 'telegram_bot';
+  assignedTo: string;
+  note: string;
+  bankName: string;
+  recipientName: string;
+  amountKrw: number;
+  transferTimestamp: string;
+  fallbackPrefix?: string;
+}): VerifiedReceiptReservationResult {
+  const db = getRedeemDb();
+  const safeHash = String(params.imageSha256 || '').trim().toLowerCase().slice(0, 128);
+  const safeFp = String(params.transferFingerprint || '').trim().slice(0, 180);
+  const safeAssignee = String(params.assignedTo || 'customer').trim().slice(0, 160);
+  const safeNote = String(params.note || '').trim().slice(0, 160);
+  const safeBank = String(params.bankName || '').trim().slice(0, 80);
+  const safeRecipient = String(params.recipientName || '').trim().slice(0, 100);
+  const safeAmount = Math.max(0, Math.round(Number(params.amountKrw) || 0));
+  const safeTs = String(params.transferTimestamp || '').trim().slice(0, 80);
+  const nowIso = new Date().toISOString();
+
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    if (safeHash) {
+      const existingByHash = db
+        .prepare('SELECT redeem_code FROM verified_receipts WHERE image_sha256 = ? LIMIT 1')
+        .get(safeHash) as { redeem_code: string } | undefined;
+      if (existingByHash) {
+        db.exec('COMMIT');
+        return { ok: false, duplicate: true, existingCode: existingByHash.redeem_code };
+      }
+    }
+
+    if (safeFp) {
+      const existingByFp = db
+        .prepare(
+          `SELECT redeem_code FROM verified_receipts
+           WHERE transfer_fingerprint != '' AND transfer_fingerprint = ?
+           LIMIT 1`
+        )
+        .get(safeFp) as { redeem_code: string } | undefined;
+      if (existingByFp) {
+        db.exec('COMMIT');
+        return { ok: false, duplicate: true, existingCode: existingByFp.redeem_code };
+      }
+    }
+
+    const candidate = db
+      .prepare(
+        `SELECT id, code, status, is_paid, source, note, assigned_to, created_at, used_at
+         FROM redeem_codes
+         WHERE status = 'Unused' AND is_paid = 0 AND (assigned_to IS NULL OR assigned_to = '')
+         ORDER BY CASE source WHEN 'google_sheets' THEN 0 ELSE 1 END, id ASC
+         LIMIT 1`
+      )
+      .get() as any;
+
+    let reservedRecord: RedeemCodeRecord;
+
+    if (candidate) {
+      const nextSource = candidate.source === 'google_sheets' ? 'google_sheets' : params.source;
+      const nextNote = safeNote || candidate.note || 'Paid';
+      db.prepare(
+        `UPDATE redeem_codes
+         SET is_paid = 1, assigned_to = ?, note = ?, source = ?
+         WHERE id = ?`
+      ).run(safeAssignee, nextNote, nextSource, candidate.id);
+      reservedRecord = mapRedeemRow({
+        ...candidate,
+        is_paid: 1,
+        assigned_to: safeAssignee,
+        note: nextNote,
+        source: nextSource,
+      });
+    } else {
+      const newCode = generateSecureCode(
+        params.fallbackPrefix || (params.source === 'telegram_bot' ? 'KIIP-TG' : 'KIIP-KR')
+      );
+      db.prepare(
+        `INSERT INTO redeem_codes (code, code_compact, status, is_paid, source, note, assigned_to, created_at)
+         VALUES (?, ?, 'Unused', 1, ?, ?, ?, ?)`
+      ).run(newCode, compactCode(newCode), params.source, safeNote, safeAssignee, nowIso);
+
+      const created = db
+        .prepare(
+          `SELECT id, code, status, is_paid, source, note, assigned_to, created_at, used_at
+           FROM redeem_codes WHERE code = ?`
+        )
+        .get(newCode) as any;
+      reservedRecord = mapRedeemRow(created);
+    }
+
+    db.prepare(
+      `INSERT INTO verified_receipts
+        (image_sha256, transfer_fingerprint, redeem_code, bank_name, recipient_name, amount_krw, transfer_timestamp, user_email, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      safeHash || crypto.randomBytes(16).toString('hex'),
+      safeFp,
+      reservedRecord.code,
+      safeBank,
+      safeRecipient,
+      safeAmount,
+      safeTs,
+      safeAssignee,
+      nowIso
+    );
+
+    db.exec('COMMIT');
+    return { ok: true, record: reservedRecord };
   } catch (err) {
     try {
       db.exec('ROLLBACK');

@@ -16,6 +16,7 @@ import {
   addCustomRedeemCodes,
   verifyAndBurnRedeemCode,
   reserveUnusedRedeemCode,
+  recordVerifiedReceiptAndReserveCode,
   updateRedeemCodeStatus,
   deleteRedeemCode,
   syncRedeemCodesFromGoogleSheet,
@@ -2467,42 +2468,256 @@ app.get('/api/admin/analytics', requireAdminAuth, (_req, res) => {
 // ============================================================================
 // KOREAN BANK TRANSFER RECEIPT VERIFICATION & TELEGRAM BOT AUTO-UNLOCK
 // ============================================================================
-async function analyzeKoreanBankReceiptWithGemini(
-  imageBase64: string,
-  mimeType: string
-): Promise<{
+interface KoreanReceiptChecks {
+  isReceipt: boolean;
+  recipientMatched: boolean;
+  amountMatched: boolean;
+  statusSuccess: boolean;
+  timeVerified: boolean;
+}
+
+interface KoreanReceiptAnalysisResult {
   isValidReceipt: boolean;
+  verdict: 'ពិត' | 'មិនពិត';
   amountKrw: number;
   bankName: string;
   recipientName: string;
+  statusText: string;
+  transferTimestamp: string;
+  transferFingerprint: string;
   transferCompleted: boolean;
+  checks: KoreanReceiptChecks;
   reason: string;
-}> {
+}
+
+function getCurrentKstInfo(): { nowMs: number; kstDateTimeLabel: string } {
+  const nowMs = Date.now();
+  const kst = new Date(nowMs + 9 * 60 * 60 * 1000);
+  const yyyy = kst.getUTCFullYear();
+  const mm = String(kst.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(kst.getUTCDate()).padStart(2, '0');
+  const hh = String(kst.getUTCHours()).padStart(2, '0');
+  const mi = String(kst.getUTCMinutes()).padStart(2, '0');
+  return {
+    nowMs,
+    kstDateTimeLabel: `${yyyy}-${mm}-${dd} ${hh}:${mi} KST`,
+  };
+}
+
+function parseKstTimestampFromReceipt(
+  dateIsoRaw: string,
+  time24hRaw: string,
+  rawText: string
+): { valid: boolean; utcMs: number | null; displayLabel: string; fingerprintPart: string; hasTime: boolean } {
+  const cleanDateIso = String(dateIsoRaw || '').trim();
+  const cleanTime24h = String(time24hRaw || '').trim();
+  const combinedRaw = String(rawText || '').trim();
+
+  let year = 0;
+  let month = 0;
+  let day = 0;
+  let hour: number | null = null;
+  let minute: number | null = null;
+
+  const isoDateMatch = cleanDateIso.match(/^(\d{4})[-./](\d{1,2})[-./](\d{1,2})$/);
+  if (isoDateMatch) {
+    year = Number(isoDateMatch[1]);
+    month = Number(isoDateMatch[2]);
+    day = Number(isoDateMatch[3]);
+  } else {
+    const rawDateMatch = combinedRaw.match(/(20\d{2})[.\-/년\s]+(\d{1,2})[.\-/월\s]+(\d{1,2})/);
+    if (rawDateMatch) {
+      year = Number(rawDateMatch[1]);
+      month = Number(rawDateMatch[2]);
+      day = Number(rawDateMatch[3]);
+    }
+  }
+
+  if (!year || month < 1 || month > 12 || day < 1 || day > 31) {
+    return { valid: false, utcMs: null, displayLabel: combinedRaw || '', fingerprintPart: '', hasTime: false };
+  }
+
+  const timeMatch =
+    cleanTime24h.match(/^(\d{1,2}):(\d{2})/) ||
+    combinedRaw.match(/(오전|오후|AM|PM)?\s*(\d{1,2})\s*[:시]\s*(\d{2})/i);
+
+  if (timeMatch) {
+    if (cleanTime24h.match(/^(\d{1,2}):(\d{2})/)) {
+      const m = cleanTime24h.match(/^(\d{1,2}):(\d{2})/)!;
+      hour = Number(m[1]);
+      minute = Number(m[2]);
+    } else {
+      const m = combinedRaw.match(/(오전|오후|AM|PM)?\s*(\d{1,2})\s*[:시]\s*(\d{2})/i)!;
+      const meridiem = (m[1] || '').toUpperCase();
+      let h = Number(m[2]);
+      const min = Number(m[3]);
+      if ((meridiem === '오후' || meridiem === 'PM') && h < 12) h += 12;
+      if ((meridiem === '오전' || meridiem === 'AM') && h === 12) h = 0;
+      hour = h;
+      minute = min;
+    }
+  }
+
+  const mmStr = String(month).padStart(2, '0');
+  const ddStr = String(day).padStart(2, '0');
+
+  if (hour !== null && minute !== null && hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59) {
+    const hhStr = String(hour).padStart(2, '0');
+    const miStr = String(minute).padStart(2, '0');
+    const utcMs = Date.parse(`${year}-${mmStr}-${ddStr}T${hhStr}:${miStr}:00+09:00`);
+    if (Number.isNaN(utcMs)) {
+      return { valid: false, utcMs: null, displayLabel: combinedRaw, fingerprintPart: '', hasTime: false };
+    }
+    return {
+      valid: true,
+      utcMs,
+      displayLabel: `${year}-${mmStr}-${ddStr} ${hhStr}:${miStr} (KST)`,
+      fingerprintPart: `${year}-${mmStr}-${ddStr}_${hhStr}:${miStr}`,
+      hasTime: true,
+    };
+  }
+
+  // Date only (no HH:MM shown) — interpret as midday KST for date freshness check
+  const utcMs = Date.parse(`${year}-${mmStr}-${ddStr}T12:00:00+09:00`);
+  if (Number.isNaN(utcMs)) {
+    return { valid: false, utcMs: null, displayLabel: combinedRaw, fingerprintPart: '', hasTime: false };
+  }
+  return {
+    valid: true,
+    utcMs,
+    displayLabel: `${year}-${mmStr}-${ddStr} (KST)`,
+    fingerprintPart: `${year}-${mmStr}-${ddStr}`,
+    hasTime: false,
+  };
+}
+
+function matchesExpectedKoreanRecipient(params: {
+  recipientName: string;
+  accountDigits: string;
+  expectedHolder: string;
+  expectedAccountDigits: string;
+}): boolean {
+  const { recipientName, accountDigits, expectedHolder, expectedAccountDigits } = params;
+  const expectedTail4 = expectedAccountDigits.slice(-4);
+  const expectedTail6 = expectedAccountDigits.slice(-6);
+
+  // If account digits are visible (>= 4 digits) and clearly belong to a DIFFERENT account, reject immediately
+  if (expectedTail4 && accountDigits.length >= 4 && !accountDigits.endsWith(expectedTail4)) {
+    return false;
+  }
+
+  const accountConfirmedStrong = Boolean(expectedTail6 && accountDigits.endsWith(expectedTail6));
+  const accountConfirmedTail4 = Boolean(expectedTail4 && accountDigits.endsWith(expectedTail4));
+
+  const cleanRecipient = recipientName
+    .toUpperCase()
+    .replace(/[^A-Z0-9가-힣\s*]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const compactRecipient = cleanRecipient.replace(/[\s*]/g, '');
+
+  const expectedTokens = expectedHolder
+    .toUpperCase()
+    .replace(/[^A-Z0-9가-힣\s]/g, ' ')
+    .split(/\s+/)
+    .filter((tok) => tok.length >= 2);
+  const compactExpected = expectedTokens.join('');
+
+  // Known Korean transliterations for default holder (EANG VEASNA)
+  const isDefaultHolder = compactExpected === 'EANGVEASNA';
+  const koreanAliases = isDefaultHolder
+    ? ['이앙베아스나', '응베아스나', '에앙베아스나', '앙베아스나', '베아스나']
+    : [];
+
+  let nameMatched = false;
+  if (compactRecipient && compactExpected) {
+    if (
+      compactRecipient.includes(compactExpected) ||
+      compactExpected.includes(compactRecipient) && compactRecipient.length >= 6
+    ) {
+      nameMatched = true;
+    } else if (expectedTokens.length >= 2) {
+      const matchedTokens = expectedTokens.filter((tok) => compactRecipient.includes(tok));
+      if (matchedTokens.length >= 2) {
+        nameMatched = true;
+      } else if (matchedTokens.length === 1 && accountConfirmedTail4) {
+        // E.g. Korean bank masked display "EANG***" paired with matching last-4 account digits
+        nameMatched = true;
+      }
+    } else if (expectedTokens.length === 1 && compactRecipient.includes(expectedTokens[0])) {
+      nameMatched = true;
+    }
+  }
+
+  if (!nameMatched && compactRecipient && koreanAliases.some((alias) => compactRecipient.includes(alias))) {
+    nameMatched = true;
+  }
+
+  // Require either a verified recipient name match OR strong 6-digit account number match (when bank hides full name)
+  if (nameMatched) return true;
+  if (accountConfirmedStrong && !cleanRecipient) return true;
+  return false;
+}
+
+async function analyzeKoreanBankReceiptWithGemini(
+  imageBase64: string,
+  mimeType: string,
+  lang = 'km'
+): Promise<KoreanReceiptAnalysisResult> {
+  const emptyChecks: KoreanReceiptChecks = {
+    isReceipt: false,
+    recipientMatched: false,
+    amountMatched: false,
+    statusSuccess: false,
+    timeVerified: false,
+  };
+
   const ai = getAiClient();
   if (!ai) {
     return {
       isValidReceipt: false,
+      verdict: 'មិនពិត',
       amountKrw: 0,
       bankName: '',
       recipientName: '',
+      statusText: '',
+      transferTimestamp: '',
+      transferFingerprint: '',
       transferCompleted: false,
-      reason: 'GEMINI_API_KEY is not configured on the server for automated receipt inspection.',
+      checks: emptyChecks,
+      reason:
+        lang === 'ko'
+          ? '서버에 자동 영수증 검증용 GEMINI_API_KEY가 설정되어 있지 않습니다.'
+          : lang === 'en'
+          ? 'GEMINI_API_KEY is not configured on the server for automated receipt inspection.'
+          : 'ម៉ាស៊ីនមេមិនទាន់កំណត់ GEMINI_API_KEY សម្រាប់ផ្ទៀងផ្ទាត់វិក្កយបត្រដោយស្វ័យប្រវត្តិទេ។',
     };
   }
 
   const krBank = getKoreaBankPaymentInfo();
   const expectedHolder = krBank.accountHolder;
-  const expectedAccountTail = krBank.accountNumber.replace(/\D/g, '').slice(-4);
+  const expectedAccountDigits = krBank.accountNumber.replace(/\D/g, '');
+  const { nowMs, kstDateTimeLabel } = getCurrentKstInfo();
+  const maxAgeHours = Math.max(1, Number(process.env.KR_RECEIPT_MAX_AGE_HOURS) || 72);
 
-  const prompt = `You are a Korean banking receipt verification specialist.
-Inspect this uploaded screenshot of a South Korean bank transfer confirmation (e.g., KB 국민은행, 신한은행, 우리은행, 하나은행, NH농협, 카카오뱅크, 토스뱅크, 케이뱅크, IBK기업은행, 새마을금고, etc.).
-Extract strictly what is visible in the image:
-1. isBankTransferScreenshot: true ONLY if this is a genuine bank transfer / remittance confirmation screen.
-2. transferCompleted: true ONLY if the transfer status clearly indicates completion (e.g., 이체완료, 송금완료, 출금완료, 이체 성공, Completed, Sent).
-3. amountKrw: numeric integer amount transferred in KRW (e.g., 35000). Return 0 if not clearly visible.
-4. bankName: bank or app name (e.g., KakaoBank, Toss, KB Kookmin, Shinhan, NH, Woori, Hana).
-5. recipientName: recipient name or account label visible on the receipt.
-6. recipientAccountDigits: digits visible for the recipient account number (if any).
+  const prompt = `You are a strict South Korean bank transfer receipt verification auditor.
+Current server time in Korea Standard Time (KST): ${kstDateTimeLabel}.
+Expected receiving account holder: "${expectedHolder}" (${krBank.bankName}, account ending in "${expectedAccountDigits.slice(-4)}").
+Expected minimum transfer amount: 35,000 KRW (₩35,000).
+
+Inspect the uploaded screenshot carefully and extract ONLY what is genuinely visible in the image:
+1. isBankTransferScreenshot: true ONLY if this is a real bank transfer / remittance confirmation screen (KB 국민은행, 신한, 우리, 하나, NH농협, 카카오뱅크, 토스뱅크, 케이뱅크, IBK, 새마을금고, etc.). Return false for unrelated photos, edited blanks, or pre-transfer input forms.
+2. transferCompleted: true ONLY if the screenshot clearly shows transfer completion/success (e.g., 이체완료, 송금완료, 출금완료, 이체 성공, Completed, Sent, Success). Return false for 예약이체 (scheduled), 실패 (failed), 취소 (cancelled), or confirm-before-sending screens.
+3. statusText: exact completion/status text visible in the image (e.g., "이체완료", "송금완료", "Completed").
+4. amountKrw: exact integer KRW amount transferred (e.g., 35000). Return 0 if not clearly visible.
+5. bankName: bank or app name shown on the receipt.
+6. recipientName: exact recipient / beneficiary name visible on the receipt (받는분 / 입금계좌 예금주 / 받는 사람). Return "" if not visible.
+7. recipientAccountDigits: digits visible for the recipient account number (입금계좌번호), digits only. Return "" if not visible.
+8. transferDateTimeRaw: exact transfer date and time string visible on the screenshot (거래일시 / 이체일시 / 송금일시). Return "" if not visible.
+9. transferDateIso: normalized transfer date in "YYYY-MM-DD" (KST). Return "" if date is not visible.
+10. transferTime24h: normalized transfer time in 24-hour "HH:MM" (KST). Return "" if time is not visible.
+11. verdictKhmer: return "ពិត" ONLY if ALL conditions are clearly satisfied (genuine completed bank transfer + recipient matches "${expectedHolder}" + amount >= 35000 + valid transfer date/time visible); otherwise return "មិនពិត".
+
 Return ONLY valid JSON matching the schema.`;
 
   const schema = {
@@ -2510,14 +2725,19 @@ Return ONLY valid JSON matching the schema.`;
     properties: {
       isBankTransferScreenshot: { type: Type.BOOLEAN },
       transferCompleted: { type: Type.BOOLEAN },
+      statusText: { type: Type.STRING },
       amountKrw: { type: Type.NUMBER },
       bankName: { type: Type.STRING },
       recipientName: { type: Type.STRING },
       recipientAccountDigits: { type: Type.STRING },
+      transferDateTimeRaw: { type: Type.STRING },
+      transferDateIso: { type: Type.STRING },
+      transferTime24h: { type: Type.STRING },
+      verdictKhmer: { type: Type.STRING },
     },
   };
 
-  for (const model of ['gemini-3.1-flash-lite', 'gemini-4-hydrogen'] as const) {
+  for (const model of ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'] as const) {
     try {
       const response = await ai.models.generateContent({
         model,
@@ -2535,74 +2755,193 @@ Return ONLY valid JSON matching the schema.`;
       const text = response.text;
       if (!text) continue;
       const parsed = JSON.parse(text.replace(/```json/gi, '').replace(/```/g, '').trim());
-      const amountKrw = Math.round(Number(parsed.amountKrw) || 0);
+
       const isReceipt = Boolean(parsed.isBankTransferScreenshot);
-      const completed = Boolean(parsed.transferCompleted);
+      const statusSuccess = Boolean(parsed.transferCompleted);
+      const statusText = String(parsed.statusText || (statusSuccess ? '이체완료' : '')).slice(0, 60);
+      const amountKrw = Math.round(Number(parsed.amountKrw) || 0);
+      const amountMatched = amountKrw >= 35000;
       const bankName = String(parsed.bankName || 'Korea Bank').slice(0, 60);
-      const recipientName = String(parsed.recipientName || '').slice(0, 80);
+      const recipientName = String(parsed.recipientName || '').trim().slice(0, 100);
       const accountDigits = String(parsed.recipientAccountDigits || '').replace(/\D/g, '');
+      const transferDateTimeRaw = String(parsed.transferDateTimeRaw || '').trim().slice(0, 80);
+      const transferDateIso = String(parsed.transferDateIso || '').trim().slice(0, 20);
+      const transferTime24h = String(parsed.transferTime24h || '').trim().slice(0, 10);
+
+      const recipientMatched = matchesExpectedKoreanRecipient({
+        recipientName,
+        accountDigits,
+        expectedHolder,
+        expectedAccountDigits,
+      });
+
+      const parsedTime = parseKstTimestampFromReceipt(
+        transferDateIso,
+        transferTime24h,
+        transferDateTimeRaw
+      );
+
+      const maxAgeMs = maxAgeHours * 60 * 60 * 1000;
+      const futureToleranceMs = 20 * 60 * 1000; // allow 20 min phone clock skew
+      let timeVerified = false;
+      let timeFailureReason = '';
+
+      if (!parsedTime.valid || parsedTime.utcMs === null) {
+        timeVerified = false;
+        timeFailureReason =
+          lang === 'ko'
+            ? '이체 일시(날짜·시간)가 보이지 않습니다. 거래일시가 포함된 전체 스크린샷을 업로드해 주세요.'
+            : lang === 'en'
+            ? 'Transfer date/time is not visible. Please upload the full screenshot showing the transfer timestamp.'
+            : 'រកមិនឃើញកាលបរិច្ឆេទ និងពេលវេលាផ្ទេរប្រាក់លើរូបភាពទេ។ សូមថត Screenshot ពេញដែលបង្ហាញកាលបរិច្ឆេទ និងម៉ោងផ្ទេរប្រាក់!';
+      } else {
+        const diffMs = nowMs - parsedTime.utcMs;
+        if (diffMs < -futureToleranceMs) {
+          timeVerified = false;
+          timeFailureReason =
+            lang === 'ko'
+              ? `영수증의 이체 시간(${parsedTime.displayLabel})이 현재 시각과 일치하지 않습니다.`
+              : lang === 'en'
+              ? `The receipt timestamp (${parsedTime.displayLabel}) is in the future and invalid.`
+              : `ពេលវេលាលើវិក្កយបត្រ (${parsedTime.displayLabel}) មិនត្រឹមត្រូវតាមពេលវេលាបច្ចុប្បន្នទេ។`;
+        } else if (diffMs > maxAgeMs) {
+          timeVerified = false;
+          timeFailureReason =
+            lang === 'ko'
+              ? `이체 시간(${parsedTime.displayLabel})이 유효 기간(${maxAgeHours}시간)을 초과했습니다. 최근 이체 내역을 업로드해 주세요.`
+              : lang === 'en'
+              ? `The transfer timestamp (${parsedTime.displayLabel}) is older than the ${maxAgeHours}-hour verification window.`
+              : `ពេលវេលាផ្ទេរប្រាក់ (${parsedTime.displayLabel}) ចាស់លើសកំណត់ (${maxAgeHours} ម៉ោង)។ សូមប្រើវិក្កយបត្រផ្ទេរប្រាក់ថ្មីៗនេះ!`;
+        } else {
+          timeVerified = true;
+        }
+      }
+
+      const checks: KoreanReceiptChecks = {
+        isReceipt,
+        recipientMatched,
+        amountMatched,
+        statusSuccess,
+        timeVerified,
+      };
+
+      const transferTimestamp = parsedTime.displayLabel || transferDateTimeRaw;
+      const transferFingerprint = parsedTime.fingerprintPart
+        ? `${parsedTime.fingerprintPart}|${amountKrw}|${recipientName.toUpperCase().replace(/\s+/g, '') || expectedHolder.toUpperCase().replace(/\s+/g, '')}`
+        : '';
 
       if (!isReceipt) {
         return {
           isValidReceipt: false,
+          verdict: 'មិនពិត',
           amountKrw,
           bankName,
           recipientName,
+          statusText,
+          transferTimestamp,
+          transferFingerprint,
           transferCompleted: false,
-          reason: 'រូបភាពនេះមិនមែនជាវិក្កយបត្រផ្ទេរប្រាក់ធនាគារកូរ៉េទេ។ សូមផ្ញើ Screenshot វិក្កយបត្រដែលមានពាក្យ 이체완료 / 송금완료។',
+          checks,
+          reason:
+            lang === 'ko'
+              ? '한국 은행 이체 확인 스크린샷이 아닙니다. 이체완료 화면을 업로드해 주세요.'
+              : lang === 'en'
+              ? 'This image is not a valid Korean bank transfer confirmation screenshot.'
+              : 'រូបភាពនេះមិនមែនជាវិក្កយបត្រផ្ទេរប្រាក់ធនាគារកូរ៉េទេ។ សូម Upload Screenshot វិក្កយបត្រដែលមានពាក្យ 이체완료 / 송금완료។',
         };
       }
-      if (!completed) {
+
+      if (!statusSuccess) {
         return {
           isValidReceipt: false,
+          verdict: 'មិនពិត',
           amountKrw,
           bankName,
           recipientName,
+          statusText,
+          transferTimestamp,
+          transferFingerprint,
           transferCompleted: false,
-          reason: 'វិក្កយបត្រមិនទាន់បង្ហាញស្ថានភាពផ្ទេរប្រាក់ជោគជ័យ (이체완료 / 송금완료) ទេ។',
+          checks,
+          reason:
+            lang === 'ko'
+              ? '이체 완료 상태(이체완료 / 송금완료)가 확인되지 않았습니다.'
+              : lang === 'en'
+              ? 'Transfer completion status (이체완료 / Completed) is not confirmed on this screenshot.'
+              : 'វិក្កយបត្រមិនទាន់បង្ហាញស្ថានភាពផ្ទេរប្រាក់ជោគជ័យ (이체완료 / 송금완료) ទេ។',
         };
       }
-      if (amountKrw < 35000) {
+
+      if (!recipientMatched) {
         return {
           isValidReceipt: false,
+          verdict: 'មិនពិត',
           amountKrw,
           bankName,
           recipientName,
+          statusText,
+          transferTimestamp,
+          transferFingerprint,
           transferCompleted: true,
-          reason: `ទឹកប្រាក់លើវិក្កយបត្រ (₩${amountKrw.toLocaleString()}) តិចជាងតម្លៃសេវា ₩35,000។`,
+          checks,
+          reason:
+            lang === 'ko'
+              ? `받는 분(${recipientName || '미확인'}) 또는 계좌번호가 지정 계좌(${expectedHolder})와 일치하지 않습니다.`
+              : lang === 'en'
+              ? `Recipient (${recipientName || 'Unrecognized'}) does not match the required account holder (${expectedHolder}).`
+              : `ឈ្មោះអ្នកទទួល (${recipientName || 'មិនឃើញ'}) ឬលេខគណនីមិនត្រូវគ្នានឹងគណនី ${expectedHolder} ទេ។ សូមពិនិត្យម្តងទៀត!`,
         };
       }
-      if (expectedAccountTail && accountDigits && !accountDigits.endsWith(expectedAccountTail)) {
+
+      if (!amountMatched) {
         return {
           isValidReceipt: false,
+          verdict: 'មិនពិត',
           amountKrw,
           bankName,
           recipientName,
+          statusText,
+          transferTimestamp,
+          transferFingerprint,
           transferCompleted: true,
-          reason: 'លេខគណនីអ្នកទទួលលើវិក្កយបត្រមិនត្រូវគ្នានឹងគណនីធនាគារកំណត់ទេ។',
+          checks,
+          reason:
+            lang === 'ko'
+              ? `이체 금액(₩${amountKrw.toLocaleString()})이 서비스 금액 ₩35,000 미만입니다.`
+              : lang === 'en'
+              ? `Transferred amount (₩${amountKrw.toLocaleString()}) is less than the required ₩35,000.`
+              : `ចំនួនទឹកប្រាក់លើវិក្កយបត្រ (₩${amountKrw.toLocaleString()}) តិចជាងតម្លៃសេវា ₩35,000។`,
         };
       }
-      if (expectedHolder && recipientName && !recipientName.toLowerCase().includes(expectedHolder.toLowerCase().slice(0, 3))) {
-        // Soft check only if account digits didn't already confirm
-        if (!expectedAccountTail || !accountDigits.endsWith(expectedAccountTail)) {
-          return {
-            isValidReceipt: false,
-            amountKrw,
-            bankName,
-            recipientName,
-            transferCompleted: true,
-            reason: 'ឈ្មោះអ្នកទទួលលើវិក្កយបត្រមិនត្រូវគ្នាទេ។ សូមពិនិត្យគណនីអ្នកទទួលម្តងទៀត។',
-          };
-        }
+
+      if (!timeVerified) {
+        return {
+          isValidReceipt: false,
+          verdict: 'មិនពិត',
+          amountKrw,
+          bankName,
+          recipientName,
+          statusText,
+          transferTimestamp,
+          transferFingerprint,
+          transferCompleted: true,
+          checks,
+          reason: timeFailureReason,
+        };
       }
 
       return {
         isValidReceipt: true,
+        verdict: 'ពិត',
         amountKrw,
         bankName,
-        recipientName,
+        recipientName: recipientName || expectedHolder,
+        statusText: statusText || '이체완료',
+        transferTimestamp,
+        transferFingerprint,
         transferCompleted: true,
-        reason: 'Verified',
+        checks,
+        reason: 'ពិត (Verified)',
       };
     } catch {
       continue;
@@ -2611,11 +2950,21 @@ Return ONLY valid JSON matching the schema.`;
 
   return {
     isValidReceipt: false,
+    verdict: 'មិនពិត',
     amountKrw: 0,
     bankName: '',
     recipientName: '',
+    statusText: '',
+    transferTimestamp: '',
+    transferFingerprint: '',
     transferCompleted: false,
-    reason: 'មិនអាចផ្ទៀងផ្ទាត់រូបភាពវិក្កយបត្របាននៅពេលនេះទេ។ សូមព្យាយាមម្តងទៀតជាមួយរូបភាពច្បាស់។',
+    checks: emptyChecks,
+    reason:
+      lang === 'ko'
+        ? '영수증 이미지를 판독할 수 없습니다. 글자가 선명한 스크린샷으로 다시 시도해 주세요.'
+        : lang === 'en'
+        ? 'Could not read the receipt image clearly. Please upload a sharper screenshot.'
+        : 'មិនអាចអានរូបភាពវិក្កយបត្របានច្បាស់នៅពេលនេះទេ។ សូមព្យាយាមម្តងទៀតជាមួយរូបភាពច្បាស់។',
   };
 }
 
@@ -2654,11 +3003,19 @@ app.post('/api/payments/verify-kr-receipt', paymentRateLimiter, async (req, res)
   try {
     const receiptImage = String(req.body?.receiptImage || '');
     const userEmail = String(req.body?.userEmail || 'guest@kiip-portal.kr').slice(0, 254);
+    const lang = String(req.body?.lang || 'km').slice(0, 10);
     const commaIdx = receiptImage.indexOf(',');
     if (!receiptImage.startsWith('data:image/') || commaIdx === -1) {
       return res.status(400).json({
         success: false,
-        error: 'សូម Upload រូបភាព Screenshot វិក្កយបត្រផ្ទេរប្រាក់ (PNG / JPG)!',
+        verdict: 'មិនពិត',
+        verdictBoolean: false,
+        error:
+          lang === 'ko'
+            ? '이체 확인 스크린샷 이미지(PNG / JPG)를 업로드해 주세요.'
+            : lang === 'en'
+            ? 'Please upload a transfer receipt screenshot image (PNG / JPG).'
+            : 'សូម Upload រូបភាព Screenshot វិក្កយបត្រផ្ទេរប្រាក់ (PNG / JPG)!',
       });
     }
 
@@ -2666,28 +3023,87 @@ app.post('/api/payments/verify-kr-receipt', paymentRateLimiter, async (req, res)
     const base64Data = receiptImage.substring(commaIdx + 1).replace(/\s/g, '');
     const mimeType = meta.split(';')[0]?.replace('data:', '') || 'image/jpeg';
 
+    if (!/^image\/(png|jpeg|jpg|webp)$/i.test(mimeType)) {
+      return res.status(400).json({
+        success: false,
+        verdict: 'មិនពិត',
+        verdictBoolean: false,
+        error:
+          lang === 'ko'
+            ? 'PNG, JPG 또는 WebP 이미지만 업로드할 수 있습니다.'
+            : lang === 'en'
+            ? 'Only PNG, JPG, or WebP screenshots are supported.'
+            : 'គាំទ្រតែរូបភាព PNG, JPG ឬ WebP ប៉ុណ្ណោះ។',
+      });
+    }
+
     if (base64Data.length < 100 || base64Data.length > 14 * 1024 * 1024) {
       return res.status(400).json({
         success: false,
-        error: 'ទំហំរូបភាពមិនត្រឹមត្រូវ (អតិបរមា 10MB)។',
+        verdict: 'មិនពិត',
+        verdictBoolean: false,
+        error:
+          lang === 'ko'
+            ? '이미지 크기가 올바르지 않습니다 (최대 10MB).'
+            : lang === 'en'
+            ? 'Invalid image size (maximum 10MB).'
+            : 'ទំហំរូបភាពមិនត្រឹមត្រូវ (អតិបរមា 10MB)។',
       });
     }
 
-    const analysis = await analyzeKoreanBankReceiptWithGemini(base64Data, mimeType);
+    const imageSha256 = crypto
+      .createHash('sha256')
+      .update(Buffer.from(base64Data, 'base64'))
+      .digest('hex');
+
+    const analysis = await analyzeKoreanBankReceiptWithGemini(base64Data, mimeType, lang);
     if (!analysis.isValidReceipt) {
       return res.status(422).json({
         success: false,
+        verdict: 'មិនពិត',
+        verdictBoolean: false,
         error: analysis.reason,
+        checks: analysis.checks,
+        detected: {
+          bankName: analysis.bankName,
+          recipientName: analysis.recipientName,
+          amountKrw: analysis.amountKrw,
+          statusText: analysis.statusText,
+          transferTimestamp: analysis.transferTimestamp,
+        },
       });
     }
 
-    const reserved = reserveUnusedRedeemCode({
+    const reservation = recordVerifiedReceiptAndReserveCode({
+      imageSha256,
+      transferFingerprint: analysis.transferFingerprint,
       source: 'kr_receipt',
       assignedTo: userEmail,
-      note: `Korea Bank (${analysis.bankName}) ₩${analysis.amountKrw.toLocaleString()}`,
+      note: `Korea Bank (${analysis.bankName}) ₩${analysis.amountKrw.toLocaleString()} · ${analysis.transferTimestamp}`,
+      bankName: analysis.bankName,
+      recipientName: analysis.recipientName,
+      amountKrw: analysis.amountKrw,
+      transferTimestamp: analysis.transferTimestamp,
       fallbackPrefix: 'KIIP-KR',
     });
-    const unlockCode = reserved.code;
+
+    if (!reservation.ok || reservation.duplicate || !reservation.record) {
+      return res.status(409).json({
+        success: false,
+        verdict: 'មិនពិត',
+        verdictBoolean: false,
+        duplicate: true,
+        checks: analysis.checks,
+        error:
+          lang === 'ko'
+            ? '이 이체 내역 스크린샷은 이미 리딤 코드 발급에 사용되었습니다. 중복 사용할 수 없습니다.'
+            : lang === 'en'
+            ? 'This transfer receipt screenshot has already been used to issue a Redeem Code.'
+            : 'រូបភាពវិក្កយបត្រផ្ទេរប្រាក់នេះត្រូវបានប្រើដើម្បីបញ្ចេញ Redeem Code រួចហើយ! មិនអាចប្រើវិក្កយបត្រដដែលម្តងទៀតបានទេ។',
+      });
+    }
+
+    const unlockCode = reservation.record.code;
     issuedUnlockCodes.set(unlockCode, {
       code: unlockCode,
       source: 'kr_receipt',
@@ -2710,20 +3126,28 @@ app.post('/api/payments/verify-kr-receipt', paymentRateLimiter, async (req, res)
     if (process.env.TELEGRAM_ADMIN_CHAT_ID) {
       await sendTelegramMessage(
         process.env.TELEGRAM_ADMIN_CHAT_ID,
-        `✅ Verified Korea Bank Transfer\nBank: ${analysis.bankName}\nAmount: ₩${analysis.amountKrw.toLocaleString()}\nUser: ${userEmail}\nIssued Code: ${unlockCode}`
+        `✅ AI Verified Korea Bank Transfer (Verdict: ពិត)\nBank: ${analysis.bankName}\nRecipient: ${analysis.recipientName}\nAmount: ₩${analysis.amountKrw.toLocaleString()}\nTime: ${analysis.transferTimestamp}\nUser: ${userEmail}\nIssued Redeem Code: ${unlockCode}`
       );
     }
 
     return res.json({
       success: true,
+      verdict: 'ពិត',
+      verdictBoolean: true,
       unlockCode,
       verifiedAmount: analysis.amountKrw,
       bankName: analysis.bankName,
+      recipientName: analysis.recipientName,
+      statusText: analysis.statusText,
+      transferTimestamp: analysis.transferTimestamp,
+      checks: analysis.checks,
     });
   } catch (err: any) {
     console.error('[KR Receipt] Verification failed:', err);
     return res.status(500).json({
       success: false,
+      verdict: 'មិនពិត',
+      verdictBoolean: false,
       error: 'មានបញ្ហាបច្ចេកទេសក្នុងការផ្ទៀងផ្ទាត់វិក្កយបត្រ។ សូមព្យាយាមម្តងទៀត។',
     });
   }
@@ -2779,10 +3203,11 @@ app.post('/api/telegram/webhook', async (req, res) => {
     );
     const imgBuf = Buffer.from(await imgResp.arrayBuffer());
     const base64Img = imgBuf.toString('base64');
+    const imageSha256 = crypto.createHash('sha256').update(imgBuf).digest('hex');
 
-    const analysis = await analyzeKoreanBankReceiptWithGemini(base64Img, 'image/jpeg');
+    const analysis = await analyzeKoreanBankReceiptWithGemini(base64Img, 'image/jpeg', 'km');
     if (!analysis.isValidReceipt) {
-      await sendTelegramMessage(chatId, `❌ ផ្ទៀងផ្ទាត់មិនជោគជ័យ៖ ${analysis.reason}`);
+      await sendTelegramMessage(chatId, `❌ ផ្ទៀងផ្ទាត់មិនជោគជ័យ (មិនពិត)៖ ${analysis.reason}`);
       return res.json({ ok: true });
     }
 
@@ -2790,13 +3215,28 @@ app.post('/api/telegram/webhook', async (req, res) => {
       ? `@${message.from.username}`
       : `tg_${chatId}`;
 
-    const reserved = reserveUnusedRedeemCode({
+    const reservation = recordVerifiedReceiptAndReserveCode({
+      imageSha256,
+      transferFingerprint: analysis.transferFingerprint,
       source: 'telegram_bot',
       assignedTo: `${senderLabel}@telegram`,
-      note: `Telegram Receipt (${analysis.bankName}) ₩${analysis.amountKrw.toLocaleString()}`,
+      note: `Telegram Receipt (${analysis.bankName}) ₩${analysis.amountKrw.toLocaleString()} · ${analysis.transferTimestamp}`,
+      bankName: analysis.bankName,
+      recipientName: analysis.recipientName,
+      amountKrw: analysis.amountKrw,
+      transferTimestamp: analysis.transferTimestamp,
       fallbackPrefix: 'KIIP-TG',
     });
-    const unlockCode = reserved.code;
+
+    if (!reservation.ok || reservation.duplicate || !reservation.record) {
+      await sendTelegramMessage(
+        chatId,
+        '❌ រូបភាពវិក្កយបត្រនេះត្រូវបានប្រើដើម្បីបញ្ចេញ Redeem Code រួចហើយ! មិនអាចប្រើម្តងទៀតបានទេ។'
+      );
+      return res.json({ ok: true });
+    }
+
+    const unlockCode = reservation.record.code;
     issuedUnlockCodes.set(unlockCode, {
       code: unlockCode,
       source: 'telegram_bot',
@@ -2818,13 +3258,13 @@ app.post('/api/telegram/webhook', async (req, res) => {
 
     await sendTelegramMessage(
       chatId,
-      `✅ ផ្ទៀងផ្ទាត់វិក្កយបត្រជោគជ័យ! (₩${analysis.amountKrw.toLocaleString()} · ${analysis.bankName})\n\n🔑 លេខកូដដោះសោរបស់អ្នក (Single-Use Unlock Code):\n${unlockCode}\n\nសូមចម្លងលេខកូដនេះយកទៅបញ្ចូលក្នុងប្រអប់ Promo / Redeem Code លើគេហទំព័រដើម្បីទាញយកឯកសារ Clean PDF ភ្លាមៗ!`
+      `✅ ផ្ទៀងផ្ទាត់វិក្កយបត្រជោគជ័យ (លទ្ធផល: ពិត)!\n🏦 ${analysis.bankName} · ₩${analysis.amountKrw.toLocaleString()}\n👤 អ្នកទទួល: ${analysis.recipientName}\n🕒 ពេលវេលា: ${analysis.transferTimestamp}\n\n🔑 លេខកូដដោះសោរបស់អ្នក (Redeem Code):\n${unlockCode}\n\nសូមចម្លងលេខកូដនេះយកទៅបញ្ចូលក្នុងប្រអប់ Redeem Code លើគេហទំព័រដើម្បីទាញយកឯកសារ Clean PDF ភ្លាមៗ!`
     );
 
     if (process.env.TELEGRAM_ADMIN_CHAT_ID && String(process.env.TELEGRAM_ADMIN_CHAT_ID) !== String(chatId)) {
       await sendTelegramMessage(
         process.env.TELEGRAM_ADMIN_CHAT_ID,
-        `🤖 Telegram Auto-Unlock Issued\nFrom: ${senderLabel}\nBank: ${analysis.bankName}\nAmount: ₩${analysis.amountKrw.toLocaleString()}\nCode: ${unlockCode}`
+        `🤖 Telegram Auto-Unlock Issued (ពិត)\nFrom: ${senderLabel}\nBank: ${analysis.bankName}\nRecipient: ${analysis.recipientName}\nAmount: ₩${analysis.amountKrw.toLocaleString()}\nTime: ${analysis.transferTimestamp}\nCode: ${unlockCode}`
       );
     }
 

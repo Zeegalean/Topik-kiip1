@@ -90,14 +90,39 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const [krConfig, setKrConfig] = useState(DEFAULT_KR_CONFIG);
   const [krConfigLoaded, setKrConfigLoaded] = useState(false);
 
-  // Korea Bank Screenshot Auto-Verify State
+  // Korea Bank Screenshot Auto-Verify State (5-Step Automated Flow)
   const [receiptPreview, setReceiptPreview] = useState<string | null>(null);
   const [verifyingReceipt, setVerifyingReceipt] = useState(false);
   const [receiptError, setReceiptError] = useState<string | null>(null);
+  const [receiptChecks, setReceiptChecks] = useState<{
+    isReceipt: boolean;
+    recipientMatched: boolean;
+    amountMatched: boolean;
+    statusSuccess: boolean;
+    timeVerified: boolean;
+  } | null>(null);
+  const [receiptDetected, setReceiptDetected] = useState<{
+    bankName?: string;
+    recipientName?: string;
+    amountKrw?: number;
+    statusText?: string;
+    transferTimestamp?: string;
+  } | null>(null);
   const [issuedKrCode, setIssuedKrCode] = useState<{
     code: string;
+    verdict: string;
     bankName: string;
+    recipientName: string;
     verifiedAmount: number;
+    statusText: string;
+    transferTimestamp: string;
+    checks: {
+      isReceipt: boolean;
+      recipientMatched: boolean;
+      amountMatched: boolean;
+      statusSuccess: boolean;
+      timeVerified: boolean;
+    };
   } | null>(null);
 
   const isKm = lang === 'km';
@@ -125,6 +150,9 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     setIsSuccess(false);
     setRedeemError(null);
     setPromoCodeError(null);
+    setReceiptError(null);
+    setReceiptChecks(null);
+    setReceiptDetected(null);
   }, [isOpen]);
 
   // 30-second countdown timer for saving/downloading on mobile before auto-advancing
@@ -336,15 +364,30 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
   const handleKrReceiptFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (!file.type.startsWith('image/')) {
+    const allowedMime = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp'];
+    if (!allowedMime.includes(file.type.toLowerCase())) {
       setReceiptError(
         isKm
-          ? 'សូមជ្រើសរើសរូបភាព Screenshot (PNG / JPG) តែប៉ុណ្ណោះ!'
-          : 'Please upload an image screenshot (PNG / JPG).'
+          ? 'សូមជ្រើសរើសរូបភាព Screenshot (PNG / JPG / WEBP) តែប៉ុណ្ណោះ!'
+          : isKo
+          ? '이체 확인증 이미지(PNG / JPG / WEBP)만 업로드할 수 있습니다.'
+          : 'Please upload an image screenshot (PNG / JPG / WEBP).'
+      );
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      setReceiptError(
+        isKm
+          ? 'ទំហំរូបភាពធំពេក (អតិបរមា 10MB)។ សូមជ្រើសរើសរូប Screenshot ដែលមានទំហំតូចជាងនេះ!'
+          : isKo
+          ? '이미지 용량이 너무 큽니다(최대 10MB). 더 작은 스크린샷을 선택해 주세요.'
+          : 'Image file is too large (max 10MB). Please choose a smaller screenshot.'
       );
       return;
     }
     setReceiptError(null);
+    setReceiptChecks(null);
+    setReceiptDetected(null);
     setIssuedKrCode(null);
     const reader = new FileReader();
     reader.onload = () => {
@@ -360,12 +403,17 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       setReceiptError(
         isKm
           ? 'សូម Upload រូបភាព Screenshot វិក្កយបត្របាញ់ប្រាក់កូរ៉េជាមុនសិន!'
+          : isKo
+          ? '먼저 한국 계좌이체 완료 스크린샷을 업로드해 주세요.'
           : 'Please upload your Korean bank transfer screenshot first.'
       );
       return;
     }
 
     setReceiptError(null);
+    setReceiptChecks(null);
+    setReceiptDetected(null);
+    setIssuedKrCode(null);
     setVerifyingReceipt(true);
     try {
       const resp = await fetch('/api/payments/verify-kr-receipt', {
@@ -374,41 +422,64 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         body: JSON.stringify({
           receiptImage: receiptPreview,
           userEmail: userEmail || 'guest@kiip-portal.kr',
+          lang,
         }),
       });
       const data = await resp.json().catch(() => ({}));
+      if (data?.checks) {
+        setReceiptChecks(data.checks);
+      }
+      if (data?.detected) {
+        setReceiptDetected(data.detected);
+      }
+
       if (!resp.ok || !data?.success || !data?.unlockCode) {
         setReceiptError(
           data?.error ||
             (isKm
-              ? 'មិនអាចផ្ទៀងផ្ទាត់វិក្កយបត្រស្វ័យប្រវត្តិបានទេ។ សូមផ្ញើរូប Screenshot ទៅ Facebook Page ឬ Telegram Bot ខាងក្រោមដើម្បីទទួលលេខកូដដោះសោ!'
-              : 'Could not auto-verify receipt. Please send your screenshot to Facebook Page or Telegram Bot below to get your unlock code.')
+              ? 'AI ឆ្លើយតប "មិនពិត" — មិនអាចផ្ទៀងផ្ទាត់វិក្កយបត្រស្វ័យប្រវត្តិបានទេ។ សូមពិនិត្យឈ្មោះអ្នកទទួល ទឹកប្រាក់ ₩35,000 ស្ថានភាពជោគជ័យ និងពេលវេលា ឬផ្ញើ Screenshot ទៅ Telegram Bot / Facebook Page ខាងក្រោម!'
+              : isKo
+              ? 'AI 검증 결과 "불일치" — 수취인, ₩35,000 금액, 이체완료 상태 및 이체 일시를 확인 후 다시 시도해 주세요.'
+              : 'AI returned FALSE — Could not auto-verify receipt. Please check recipient name, ₩35,000 amount, completed status, and timestamp.')
         );
         return;
       }
 
+      const verifiedChecks = data.checks || {
+        isReceipt: true,
+        recipientMatched: true,
+        amountMatched: true,
+        statusSuccess: true,
+        timeVerified: true,
+      };
+      setReceiptChecks(verifiedChecks);
       setIssuedKrCode({
         code: data.unlockCode,
-        bankName: data.bankName || 'Korean Bank',
-        verifiedAmount: Number(data.verifiedAmount) || 35000,
+        verdict: data.verdict || 'ពិត',
+        bankName: data.bankName || krConfig.bankName || 'Korean Bank',
+        recipientName: data.recipientName || krConfig.accountHolder || 'EANG VEASNA',
+        verifiedAmount: Number(data.verifiedAmount) || krConfig.amountKrw || 35000,
+        statusText: data.statusText || '이체완료',
+        transferTimestamp: data.transferTimestamp || '',
+        checks: verifiedChecks,
       });
 
-      // Automatically burn the single-use paid code and unlock Clean PDF
-      await fetch('/api/payments/verify-redeem', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: data.unlockCode, userEmail: userEmail || '', mode: 'redeem', lang }),
-      }).catch(() => {});
-
-      setTimeout(() => {
-        completeUnlock();
-      }, 1200);
+      // Pre-fill the Redeem Code box so customer can also inspect or apply with 1 click
+      setRedeemCode(data.unlockCode);
+      setRedeemError(null);
+      confetti({
+        particleCount: 90,
+        spread: 65,
+        origin: { y: 0.65 },
+        colors: ['#10b981', '#059669', '#fbbf24', '#3b82f6'],
+      });
     } catch {
       setReceiptError(
         isKm
-          ? 'មានបញ្ហាតភ្ជាប់ទៅប្រព័ន្ធផ្ទៀងផ្ទាត់។ សូមផ្ញើ Screenshot ទៅ Facebook Page ឬ Telegram Bot ខាងក្រោម!'
-          : 'Network error while verifying receipt. Please send your screenshot to Facebook or Telegram Bot below.'
+          ? 'មានបញ្ហាតភ្ជាប់ទៅប្រព័ន្ធ AI ផ្ទៀងផ្ទាត់។ សូមព្យាយាមម្តងទៀត ឬផ្ញើ Screenshot ទៅ Facebook Page / Telegram Bot ខាងក្រោម!'
+          : isKo
+          ? 'AI 검증 서버 연결 오류가 발생했습니다. 다시 시도하거나 아래 채널로 스크린샷을 보내 주세요.'
+          : 'Network error while connecting to AI receipt verification. Please try again or contact support below.'
       );
     } finally {
       setVerifyingReceipt(false);
@@ -844,177 +915,402 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
               </div>
             </div>
 
-            {/* TAB 1: KOREA BANK TRANSFER (KOOKMIN BANK) + TELEGRAM BOT & FACEBOOK SCREENSHOT */}
-            {activeTab === 'krbank' && (
-              <div className="space-y-4 text-left">
-                {/* Always-Visible Korean Bank Account Card */}
-                <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-50 via-teal-50 to-sky-50 border-2 border-emerald-300 space-y-3 shadow-xs">
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="flex items-center gap-2.5">
-                      <span className="p-2 rounded-xl bg-emerald-600 text-white shrink-0">
-                        <Landmark className="w-4 h-4" />
-                      </span>
-                      <div>
-                        <h4 className="text-xs sm:text-sm font-black text-emerald-950">
-                          {isKm
-                            ? '🇰🇷 បង់ប្រាក់តាមធនាគារកូរ៉េ (សម្រាប់អ្នកនៅកូរ៉េ)'
-                            : isKo
-                            ? '🇰🇷 한국 계좌이체 안내'
-                            : '🇰🇷 Korea Bank Transfer (For Users in Korea)'}
-                        </h4>
-                        <p className="text-[11px] text-emerald-800">
-                          {isKm
-                            ? 'ផ្ទេរប្រាក់ ₩35,000 ចូលលេខគណនីខាងក្រោម រួចផ្ញើរូប Screenshot'
-                            : 'Transfer ₩35,000 to the account below, then send your screenshot.'}
-                        </p>
-                      </div>
+            {/* TAB 1: 5-STEP AUTOMATED BANK TRANSFER & AI RECEIPT VERIFICATION */}
+            {activeTab === 'krbank' && (() => {
+              const activeAutoStep = issuedKrCode
+                ? 5
+                : verifyingReceipt
+                ? 4
+                : receiptPreview
+                ? 3
+                : 1;
+
+              const autoFlowSteps = [
+                { num: 1, label: isKm ? '១. ផ្ទេរ ₩35,000' : isKo ? '1. ₩35,000 이체' : '1. Transfer' },
+                { num: 2, label: isKm ? '២. ថត Screenshot' : isKo ? '2. 스크린샷 촬영' : '2. Screenshot' },
+                { num: 3, label: isKm ? '៣. Upload រូប' : isKo ? '3. 이미지 업로드' : '3. Upload' },
+                { num: 4, label: isKm ? '៤. AI ផ្ទៀងផ្ទាត់' : isKo ? '4. AI 시간·정보 검증' : '4. AI Verify' },
+                { num: 5, label: isKm ? '៥. ពិត · ចេញកូដ' : isKo ? '5. 확인 · 코드 발급' : '5. Redeem Code' },
+              ];
+
+              return (
+                <div className="space-y-4 text-left">
+                  {/* 5-Step Automated Process Indicator */}
+                  <div className="p-3 rounded-2xl bg-slate-50 border border-slate-200">
+                    <div className="grid grid-cols-5 gap-1.5">
+                      {autoFlowSteps.map((st) => {
+                        const done = st.num < activeAutoStep || (st.num === 5 && Boolean(issuedKrCode));
+                        const current = st.num === activeAutoStep && !done;
+                        return (
+                          <div
+                            key={st.num}
+                            className={`px-1.5 py-2 rounded-xl text-center border transition-colors ${
+                              done
+                                ? 'bg-emerald-50 border-emerald-300 text-emerald-900'
+                                : current
+                                ? 'bg-blue-600 border-blue-600 text-white shadow-xs'
+                                : 'bg-white border-slate-200 text-slate-500'
+                            }`}
+                          >
+                            <div className="text-[10px] sm:text-[11px] font-bold leading-tight truncate">
+                              {done ? '✓ ' : ''}
+                              {st.label}
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
-                    <span className="text-base font-black text-emerald-800 tabular-nums shrink-0 bg-white px-2.5 py-1 rounded-xl border border-emerald-200">
-                      ₩{krConfig.amountKrw.toLocaleString()}
-                    </span>
                   </div>
 
-                  {/* Bank Details Display */}
-                  <div className="p-3.5 bg-white rounded-xl border border-emerald-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                    <div className="space-y-1">
-                      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs">
-                        <span className="text-slate-500 font-semibold">
-                          {isKm ? 'ធនាគារ:' : 'Bank:'}
+                  {/* STEP 1: Bank Transfer Account Card (₩35,000) */}
+                  <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-50 via-teal-50 to-sky-50 border-2 border-emerald-300 space-y-3 shadow-xs">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-2.5">
+                        <span className="w-8 h-8 rounded-xl bg-emerald-600 text-white flex items-center justify-center font-black text-xs shrink-0 tabular-nums">
+                          1
                         </span>
-                        <span className="font-black text-slate-900">{krConfig.bankName}</span>
+                        <div>
+                          <h4 className="text-xs sm:text-sm font-black text-emerald-950">
+                            {isKm
+                              ? 'ជំហានទី១ · ផ្ទេរប្រាក់ ₩35,000 ចូលគណនីធនាគារខាងក្រោម'
+                              : isKo
+                              ? '1단계 · 아래 계좌로 ₩35,000 이체'
+                              : 'Step 1 · Transfer ₩35,000 to the Bank Account Below'}
+                          </h4>
+                          <p className="text-[11px] text-emerald-800">
+                            {isKm
+                              ? 'បន្ទាប់ពីផ្ទេរប្រាក់ជោគជ័យ សូមថត Screenshot វិក្កយបត្រទុកជាភស្ដុតាង (ជំហានទី២)'
+                              : isKo
+                              ? '이체 완료 후 거래내역 화면을 스크린샷으로 저장하세요 (2단계)'
+                              : 'After completing the transfer, take a screenshot of the confirmation screen (Step 2).'}
+                          </p>
+                        </div>
                       </div>
-                      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 text-xs">
-                        <span className="text-slate-500 font-semibold">
-                          {isKm ? 'ឈ្មោះគណនី:' : 'Holder:'}
-                        </span>
-                        <span className="font-black text-slate-900">{krConfig.accountHolder}</span>
+                      <span className="text-base font-black text-emerald-800 tabular-nums shrink-0 bg-white px-2.5 py-1 rounded-xl border border-emerald-200">
+                        ₩{krConfig.amountKrw.toLocaleString()}
+                      </span>
+                    </div>
+
+                    {/* Bank Details Display */}
+                    <div className="p-3.5 bg-white rounded-xl border border-emerald-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="space-y-1">
+                        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-xs">
+                          <span className="text-slate-500 font-semibold">
+                            {isKm ? 'ធនាគារ:' : isKo ? '은행:' : 'Bank:'}
+                          </span>
+                          <span className="font-black text-slate-900">{krConfig.bankName}</span>
+                        </div>
+                        <div className="flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-xs">
+                          <span className="text-slate-500 font-semibold">
+                            {isKm ? 'ឈ្មោះអ្នកទទួល:' : isKo ? '예금주:' : 'Recipient:'}
+                          </span>
+                          <span className="font-black text-slate-900">{krConfig.accountHolder}</span>
+                        </div>
+                        <div className="pt-0.5">
+                          <span className="text-[10.5px] font-bold text-emerald-700 block">
+                            {isKm ? 'លេខគណនី (Account Number):' : isKo ? '계좌번호:' : 'Account Number:'}
+                          </span>
+                          <p className="font-mono font-black text-lg sm:text-xl text-emerald-800 tracking-wider tabular-nums">
+                            {krConfig.accountNumber}
+                          </p>
+                        </div>
                       </div>
-                      <div className="pt-0.5">
-                        <span className="text-[10.5px] font-bold text-emerald-700 block">
-                          {isKm ? 'លេខគណនី (Account Number):' : 'Account Number:'}
+
+                      <button
+                        type="button"
+                        onClick={() => copyText(krConfig.accountNumber, setCopiedKrAccount)}
+                        className="px-3.5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer shadow-xs shrink-0 self-start sm:self-center whitespace-nowrap"
+                      >
+                        {copiedKrAccount ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                        <span>
+                          {copiedKrAccount
+                            ? isKm
+                              ? 'បានចម្លងរួច!'
+                              : isKo
+                              ? '복사됨!'
+                              : 'Copied!'
+                            : isKm
+                            ? 'ចម្លងលេខគណនី'
+                            : isKo
+                            ? '계좌번호 복사'
+                            : 'Copy Account'}
                         </span>
-                        <p className="font-mono font-black text-lg sm:text-xl text-emerald-800 tracking-wider tabular-nums">
-                          {krConfig.accountNumber}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* STEP 2 & STEP 3 & STEP 4: Screenshot Upload + AI Verification & Timestamp Check */}
+                  <div className="p-4 rounded-2xl border-2 border-blue-200 bg-white space-y-3.5 shadow-xs">
+                    <div className="flex items-start gap-2.5">
+                      <span className="w-8 h-8 rounded-xl bg-blue-600 text-white flex items-center justify-center font-black text-xs shrink-0 tabular-nums">
+                        2–4
+                      </span>
+                      <div className="min-w-0">
+                        <h4 className="text-xs sm:text-sm font-black text-slate-900">
+                          {isKm
+                            ? 'ជំហានទី២–៤ · ថត & Upload ស្គ្រីនសត ដើម្បីឱ្យ AI ផ្ទៀងផ្ទាត់ស្វ័យប្រវត្តិ'
+                            : isKo
+                            ? '2~4단계 · 이체 스크린샷 업로드 & AI 자동 검증'
+                            : 'Steps 2–4 · Upload Transfer Screenshot for Instant AI Verification'}
+                        </h4>
+                        <p className="text-[11px] text-slate-600 mt-0.5 leading-relaxed">
+                          {isKm
+                            ? `AI នឹងអានរូបភាពដោយស្វ័យប្រវត្តិ និងផ្ទៀងផ្ទាត់ ៤ ចំណុច៖ ឈ្មោះអ្នកទទួល (${krConfig.accountHolder}) · ចំនួនទឹកប្រាក់ ₩35,000 · ស្ថានភាពជោគជ័យ (이체완료) · និងកាលបរិច្ឆេទ/ពេលវេលាផ្ទេរប្រាក់។`
+                            : isKo
+                            ? `AI가 받는 분(${krConfig.accountHolder}), 금액(₩35,000), 이체완료 상태, 거래일시(시간)를 자동 검증한 뒤 리딤 코드를 즉시 발급합니다.`
+                            : `AI automatically verifies recipient (${krConfig.accountHolder}), amount (₩35,000), transfer completion status, and transfer timestamp before issuing your Redeem Code.`}
                         </p>
                       </div>
                     </div>
 
+                    {/* Upload Dropzone */}
+                    <label className="block w-full p-4 bg-slate-50 hover:bg-blue-50/50 rounded-xl border-2 border-dashed border-slate-300 hover:border-blue-400 text-center cursor-pointer transition-colors">
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp,image/*"
+                        onChange={handleKrReceiptFileChange}
+                        className="hidden"
+                      />
+                      {receiptPreview ? (
+                        <div className="space-y-2">
+                          <img
+                            src={receiptPreview}
+                            alt="Transfer receipt preview"
+                            className="max-h-52 mx-auto rounded-lg border border-slate-200 object-contain bg-white"
+                          />
+                          <p className="text-[11px] text-blue-700 font-bold">
+                            {isKm
+                              ? '✓ បានជ្រើសរើសរូប Screenshot រួចហើយ — ចុចទីនេះប្រសិនបើចង់ប្ដូររូបផ្សេង'
+                              : isKo
+                              ? '✓ 스크린샷이 선택되었습니다 — 클릭하여 다른 이미지 선택'
+                              : '✓ Screenshot selected — click to replace'}
+                          </p>
+                        </div>
+                      ) : (
+                        <div className="py-4 flex flex-col items-center gap-1.5 text-slate-500">
+                          <div className="w-10 h-10 rounded-full bg-blue-100 text-blue-600 flex items-center justify-center">
+                            <Upload className="w-5 h-5" />
+                          </div>
+                          <span className="text-xs sm:text-sm font-bold text-slate-800">
+                            {isKm
+                              ? 'ចុចទីនេះដើម្បី Upload រូបភាព Screenshot វិក្កយបត្រ (PNG / JPG)'
+                              : isKo
+                              ? '이체 확인 스크린샷 업로드 (PNG / JPG)'
+                              : 'Click to Upload Transfer Screenshot (PNG / JPG)'}
+                          </span>
+                          <span className="text-[11px] text-slate-500">
+                            {isKm
+                              ? 'ត្រូវបង្ហាញច្បាស់៖ ឈ្មោះអ្នកទទួល · ₩35,000 · 이체완료 · ថ្ងៃខែម៉ោងផ្ទេរប្រាក់'
+                              : isKo
+                              ? '필수 표시: 받는 분 · ₩35,000 · 이체완료 · 거래일시'
+                              : 'Must clearly show: Recipient · ₩35,000 · Completed · Date & Time'}
+                          </span>
+                        </div>
+                      )}
+                    </label>
+
+                    {/* Primary AI Verify Button */}
                     <button
                       type="button"
-                      onClick={() => copyText(krConfig.accountNumber, setCopiedKrAccount)}
-                      className="px-3.5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer shadow-xs shrink-0 self-start sm:self-center"
+                      disabled={!receiptPreview || verifyingReceipt}
+                      onClick={handleVerifyKrReceipt}
+                      className="w-full py-3.5 px-4 rounded-xl bg-gradient-to-r from-blue-600 to-emerald-600 hover:from-blue-700 hover:to-emerald-700 text-white font-black text-xs sm:text-sm shadow-md flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50 transition-all"
                     >
-                      {copiedKrAccount ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
-                      <span>
-                        {copiedKrAccount
-                          ? isKm
-                            ? 'បានចម្លងរួច!'
-                            : 'Copied!'
-                          : isKm
-                          ? 'ចម្លងលេខគណនី'
-                          : 'Copy Account'}
-                      </span>
+                      {verifyingReceipt ? (
+                        <>
+                          <RefreshCw className="w-4 h-4 animate-spin" />
+                          <span>
+                            {isKm
+                              ? 'ជំហានទី៤ · AI កំពុងអានព័ត៌មាន និងផ្ទៀងផ្ទាត់ពេលវេលា...'
+                              : isKo
+                              ? '4단계 · AI가 영수증 정보 및 거래시간을 검증하는 중...'
+                              : 'Step 4 · AI is verifying transfer details & timestamp...'}
+                          </span>
+                        </>
+                      ) : (
+                        <>
+                          <ShieldCheck className="w-4 h-4" />
+                          <span>
+                            {isKm
+                              ? 'បញ្ជូនទៅ AI ផ្ទៀងផ្ទាត់ & បញ្ចេញ Redeem Code ស្វ័យប្រវត្តិ'
+                              : isKo
+                              ? 'AI 자동 검증 및 리딤 코드 즉시 발급'
+                              : 'Verify Screenshot with AI & Issue Redeem Code'}
+                          </span>
+                        </>
+                      )}
                     </button>
-                  </div>
-                </div>
 
-                {/* Screenshot Delivery via Telegram Bot OR Facebook Page */}
-                {renderScreenshotDeliveryBox('krbank')}
+                    {/* Failed Verification Breakdown ("មិនពិត") */}
+                    {receiptError && (
+                      <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-900 text-xs space-y-2.5">
+                        <div className="flex items-start gap-2">
+                          <AlertCircle className="w-4 h-4 text-rose-600 shrink-0 mt-0.5" />
+                          <div className="space-y-0.5">
+                            <div className="font-black text-rose-800">
+                              {isKm
+                                ? 'លទ្ធផល AI៖ មិនពិត (មិនទាន់ឆ្លងកាត់ការផ្ទៀងផ្ទាត់)'
+                                : isKo
+                                ? 'AI 판정: 불일치 (검증 실패)'
+                                : 'AI Verdict: Not Verified (Failed)'}
+                            </div>
+                            <p className="text-rose-700 leading-relaxed">{receiptError}</p>
+                          </div>
+                        </div>
 
-                {/* Optional Direct In-Website Auto-Verify Receipt Upload */}
-                <div className="p-4 rounded-2xl border-2 border-dashed border-slate-300 bg-slate-50/70 space-y-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
-                      <Camera className="w-4 h-4 text-emerald-600 shrink-0" />
-                      {isKm
-                        ? 'ឬ Upload Screenshot ផ្ទាល់លើវេបសាយដើម្បីផ្ទៀងផ្ទាត់ស្វ័យប្រវត្តិ (Auto-Unlock)'
-                        : 'Or Upload Screenshot Here for Instant Auto-Verification'}
-                    </span>
-                  </div>
-
-                  <label className="block w-full p-4 bg-white hover:bg-emerald-50/40 rounded-xl border border-slate-200 text-center cursor-pointer transition-colors">
-                    <input
-                      type="file"
-                      accept="image/*"
-                      onChange={handleKrReceiptFileChange}
-                      className="hidden"
-                    />
-                    {receiptPreview ? (
-                      <div className="space-y-2">
-                        <img
-                          src={receiptPreview}
-                          alt="Transfer receipt preview"
-                          className="max-h-48 mx-auto rounded-lg border border-slate-200 object-contain"
-                        />
-                        <p className="text-[11px] text-emerald-700 font-bold">
-                          {isKm ? 'ចុចដើម្បីប្ដូររូប Screenshot ផ្សេង' : 'Click to replace screenshot'}
-                        </p>
-                      </div>
-                    ) : (
-                      <div className="py-3 flex flex-col items-center gap-1.5 text-slate-500">
-                        <Upload className="w-5 h-5 text-emerald-600" />
-                        <span className="text-xs font-bold text-slate-700">
-                          {isKm ? 'ចុចជ្រើសរើសរូប Screenshot វិក្កយបត្រ (PNG / JPG)' : 'Click to select receipt screenshot (PNG / JPG)'}
-                        </span>
-                        <span className="text-[10px] text-slate-400">
-                          {isKm ? 'រូបភាពត្រូវបានផ្ទៀងផ្ទាត់ភ្លាមៗក្នុង Memory ហើយមិនរក្សាទុកក្នុង Server ឡើយ' : 'Verified in-memory only — image is never stored on disk'}
-                        </span>
+                        {receiptChecks && (
+                          <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-rose-200/80 text-[11px]">
+                            {[
+                              {
+                                ok: receiptChecks.recipientMatched,
+                                label: isKm ? 'ឈ្មោះអ្នកទទួល' : isKo ? '받는 분 일치' : 'Recipient',
+                                val: receiptDetected?.recipientName || '',
+                              },
+                              {
+                                ok: receiptChecks.amountMatched,
+                                label: isKm ? 'ទឹកប្រាក់ ₩35,000' : isKo ? '금액 ₩35,000' : 'Amount ₩35,000',
+                                val: receiptDetected?.amountKrw ? `₩${receiptDetected.amountKrw.toLocaleString()}` : '',
+                              },
+                              {
+                                ok: receiptChecks.statusSuccess,
+                                label: isKm ? 'ស្ថានភាពជោគជ័យ' : isKo ? '이체완료 상태' : 'Transfer Success',
+                                val: receiptDetected?.statusText || '',
+                              },
+                              {
+                                ok: receiptChecks.timeVerified,
+                                label: isKm ? 'ពេលវេលាផ្ទេរប្រាក់' : isKo ? '거래 시간 검증' : 'Transfer Time',
+                                val: receiptDetected?.transferTimestamp || '',
+                              },
+                            ].map((chk, i) => (
+                              <div
+                                key={i}
+                                className={`px-2 py-1.5 rounded-lg border flex items-center gap-1.5 ${
+                                  chk.ok
+                                    ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+                                    : 'bg-white border-rose-200 text-rose-800'
+                                }`}
+                              >
+                                {chk.ok ? (
+                                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                                ) : (
+                                  <AlertCircle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
+                                )}
+                                <span className="truncate font-semibold">
+                                  {chk.label}
+                                  {chk.val ? `: ${chk.val}` : ''}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     )}
-                  </label>
 
-                  {receiptError && (
-                    <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-start gap-2">
-                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                      <span>{receiptError}</span>
-                    </div>
-                  )}
+                    {/* STEP 5: AI Verdict "ពិត" & Automatically Issued Redeem Code */}
+                    {issuedKrCode && (
+                      <div className="p-4 rounded-2xl bg-emerald-50 border-2 border-emerald-400 text-emerald-950 space-y-3 shadow-sm">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex items-center gap-2">
+                            <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                            <div>
+                              <div className="text-xs sm:text-sm font-black text-emerald-900">
+                                {isKm
+                                  ? `ជំហានទី៥ · លទ្ធផល AI៖ «${issuedKrCode.verdict}» — ផ្ទៀងផ្ទាត់ត្រឹមត្រូវទាំងអស់!`
+                                  : isKo
+                                  ? `5단계 · AI 판정: 확인 완료 (${issuedKrCode.verdict}) — 리딤 코드 자동 발급!`
+                                  : `Step 5 · AI Verdict: "${issuedKrCode.verdict}" (TRUE) — Redeem Code Issued!`}
+                              </div>
+                            </div>
+                          </div>
+                          <span className="text-xs font-black text-emerald-800 tabular-nums">
+                            {issuedKrCode.bankName} · ₩{issuedKrCode.verifiedAmount.toLocaleString()}
+                          </span>
+                        </div>
 
-                  {issuedKrCode && (
-                    <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-300 text-emerald-900 text-xs space-y-1.5">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-black flex items-center gap-1.5">
-                          <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                          {isKm
-                            ? `ផ្ទៀងផ្ទាត់ជោគជ័យ (${issuedKrCode.bankName} · ₩${issuedKrCode.verifiedAmount.toLocaleString()})!`
-                            : `Verified (${issuedKrCode.bankName} · ₩${issuedKrCode.verifiedAmount.toLocaleString()})!`}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => copyText(issuedKrCode.code, setCopiedKrCode)}
-                          className="px-2 py-0.5 rounded bg-emerald-200 text-emerald-950 font-mono font-bold text-[11px] flex items-center gap-1 cursor-pointer"
-                        >
-                          <span>{issuedKrCode.code}</span>
-                          {copiedKrCode ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                        </button>
+                        {/* 4 Verified Criteria Summary */}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-[11px] bg-white/90 p-2.5 rounded-xl border border-emerald-200">
+                          <div className="flex items-center gap-1.5 text-emerald-900">
+                            <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                            <span className="font-semibold">
+                              {isKm ? 'អ្នកទទួល:' : isKo ? '받는 분:' : 'Recipient:'}{' '}
+                              <strong>{issuedKrCode.recipientName}</strong>
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1.5 text-emerald-900 tabular-nums">
+                            <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                            <span className="font-semibold">
+                              {isKm ? 'ទឹកប្រាក់:' : isKo ? '금액:' : 'Amount:'}{' '}
+                              <strong>₩{issuedKrCode.verifiedAmount.toLocaleString()}</strong>
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1.5 text-emerald-900">
+                            <Check className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                            <span className="font-semibold">
+                              {isKm ? 'ស្ថានភាព:' : isKo ? '상태:' : 'Status:'}{' '}
+                              <strong>{issuedKrCode.statusText}</strong>
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-1.5 text-emerald-900 tabular-nums">
+                            <Clock className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                            <span className="font-semibold truncate">
+                              {isKm ? 'ពេលវេលា:' : isKo ? '거래일시:' : 'Time:'}{' '}
+                              <strong>{issuedKrCode.transferTimestamp || 'Verified'}</strong>
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Issued Redeem Code Display + Copy + 1-Click Apply & Download */}
+                        <div className="p-3 bg-white rounded-xl border-2 border-emerald-300 space-y-2.5">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div>
+                              <span className="text-[10.5px] font-bold uppercase tracking-wider text-emerald-700 block">
+                                {isKm
+                                  ? 'លេខកូដ Redeem Code ដែលប្រព័ន្ធបញ្ចេញដោយស្វ័យប្រវត្តិ៖'
+                                  : isKo
+                                  ? '자동 발급된 리딤 코드 (Redeem Code):'
+                                  : 'Automatically Issued Redeem Code:'}
+                              </span>
+                              <span className="font-mono font-black text-base sm:text-lg text-slate-900 tracking-wider select-all">
+                                {issuedKrCode.code}
+                              </span>
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => copyText(issuedKrCode.code, setCopiedKrCode)}
+                              className="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold text-xs flex items-center gap-1.5 cursor-pointer transition-colors"
+                            >
+                              {copiedKrCode ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                              <span>{copiedKrCode ? (isKm ? 'បានចម្លង!' : 'Copied!') : (isKm ? 'ចម្លងកូដ' : 'Copy')}</span>
+                            </button>
+                          </div>
+
+                          <button
+                            type="button"
+                            disabled={isProcessing}
+                            onClick={() => verifyCodeAndUnlock(issuedKrCode.code, 'redeem')}
+                            className="w-full py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:scale-[0.99] text-white font-black text-xs sm:text-sm shadow-md flex items-center justify-center gap-2 cursor-pointer transition-all disabled:opacity-50"
+                          >
+                            <Zap className="w-4 h-4 text-amber-300" />
+                            <span>
+                              {isKm
+                                ? 'ប្រើលេខកូដនេះ & ទាញយក Clean PDF ភ្លាមៗ'
+                                : isKo
+                                ? '이 코드로 즉시 잠금 해제 및 Clean PDF 다운로드'
+                                : 'Apply Redeem Code & Download Clean PDF Now'}
+                            </span>
+                            <ArrowRight className="w-4 h-4" />
+                          </button>
+                        </div>
                       </div>
-                      <p className="text-[11px] text-emerald-800">
-                        {isKm ? 'កំពុងដោះសោ Clean PDF ជូនអ្នកដោយស្វ័យប្រវត្តិ...' : 'Automatically unlocking your Clean PDF...'}
-                      </p>
-                    </div>
-                  )}
-
-                  <button
-                    type="button"
-                    disabled={!receiptPreview || verifyingReceipt}
-                    onClick={handleVerifyKrReceipt}
-                    className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-black text-xs sm:text-sm shadow-md flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
-                  >
-                    {verifyingReceipt ? (
-                      <>
-                        <RefreshCw className="w-4 h-4 animate-spin" />
-                        <span>{isKm ? 'កំពុងផ្ទៀងផ្ទាត់វិក្កយបត្រស្វ័យប្រវត្តិ...' : 'Verifying transfer receipt...'}</span>
-                      </>
-                    ) : (
-                      <>
-                        <ShieldCheck className="w-4 h-4" />
-                        <span>{isKm ? 'ផ្ទៀងផ្ទាត់វិក្កយបត្រ & ដោះសោស្វ័យប្រវត្តិ' : 'Verify Receipt & Auto-Unlock'}</span>
-                      </>
                     )}
-                  </button>
+                  </div>
+
+                  {/* Secondary Fallback: Manual Support via Telegram / Facebook if needed */}
+                  {renderScreenshotDeliveryBox('krbank')}
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
             {/* TAB 2: ABA PAYWAY / KHQR (USER'S OFFICIAL ABA QR IMAGE) */}
             {activeTab === 'khqr' && (
