@@ -26,7 +26,7 @@ import {
 import confetti from 'canvas-confetti';
 import { ApplicationFormData, Language } from '../types';
 import { getTranslation } from '../utils/translations';
-import { recordPaymentTransaction, verifyAndRedeemFirestorePromo } from '../utils/firebase';
+import { auth, recordPaymentTransaction, verifyAndRedeemFirestorePromo } from '../utils/firebase';
 
 interface PaymentModalProps {
   isOpen: boolean;
@@ -223,8 +223,11 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     // ONLY allow Firestore /promoCodes/{CODE} lookup inside the Promo Code box
     let shouldTryFirestore = source === 'promo';
 
-    // 1. Server verification (strict mode separation enforced server-side)
+    // 1. Server verification (strict mode separation enforced server-side; also verifies & mirrors Firestore promo codes)
     try {
+      const firebaseIdToken = auth.currentUser
+        ? await auth.currentUser.getIdToken().catch(() => '')
+        : '';
       const resp = await fetch('/api/payments/verify-redeem', {
         method: 'POST',
         credentials: 'include',
@@ -234,6 +237,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
           userEmail: userEmail || '',
           mode: source,
           lang,
+          firebaseIdToken: firebaseIdToken || undefined,
         }),
       });
       const data = await resp.json().catch(() => ({}));

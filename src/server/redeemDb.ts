@@ -153,6 +153,26 @@ function setAppSetting(db: DatabaseSync, key: string, value: string): void {
   ).run(key, String(value ?? ''), new Date().toISOString());
 }
 
+/**
+ * Returns a stable HMAC signing secret for Admin Bearer tokens and unlock cookies.
+ * Uses ADMIN_SESSION_SECRET env var if configured, otherwise persists a random 32-byte
+ * secret in SQLite app_settings so restarts never invalidate active Admin sessions.
+ */
+export function getOrCreateSessionSigningSecret(): string {
+  const envSecret = String(process.env.ADMIN_SESSION_SECRET || '').trim();
+  if (envSecret.length >= 16) {
+    return envSecret;
+  }
+  const db = getRedeemDb();
+  const existing = getAppSetting(db, 'admin_session_secret').trim();
+  if (existing.length >= 32) {
+    return existing;
+  }
+  const generated = crypto.randomBytes(32).toString('hex');
+  setAppSetting(db, 'admin_session_secret', generated);
+  return generated;
+}
+
 export function getSavedGoogleSheetConfig(): {
   sheetId: string;
   sheetName: string;

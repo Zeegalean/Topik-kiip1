@@ -712,6 +712,10 @@ export default function App() {
         lang={lang}
         adminToken={adminToken}
         adminUsername={adminUsername}
+        onAdminTokenRefreshed={(token, username) => {
+          setAdminToken(token);
+          if (username) setAdminUsername(username);
+        }}
         onAdminSessionLogout={handleAdminLogout}
       />
 

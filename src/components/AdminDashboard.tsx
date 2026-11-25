@@ -50,6 +50,7 @@ interface AdminDashboardProps {
   lang?: Language;
   adminToken?: string | null;
   adminUsername?: string | null;
+  onAdminTokenRefreshed?: (token: string, username: string) => void;
   onAdminSessionLogout?: () => void;
 }
 
@@ -123,10 +124,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   lang = 'km',
   adminToken = null,
   adminUsername = null,
+  onAdminTokenRefreshed,
   onAdminSessionLogout,
 }) => {
   const isKm = lang === 'km';
   const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
+  const [localAdminToken, setLocalAdminToken] = useState<string | null>(adminToken);
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'overview' | 'live' | 'redeemdb' | 'accounts' | 'promos' | 'centers' | 'payments'>('overview');
@@ -173,12 +176,20 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [newCenterEmail, setNewCenterEmail] = useState('');
   const [centerFeedback, setCenterFeedback] = useState<string | null>(null);
 
+  useEffect(() => {
+    if (adminToken) {
+      setLocalAdminToken(adminToken);
+    }
+  }, [adminToken]);
+
+  const effectiveAdminToken = localAdminToken || adminToken;
+
   const isFirebaseRootAdmin = Boolean(
     firebaseUser &&
       firebaseUser.emailVerified &&
       firebaseUser.email?.toLowerCase() === 'zeekhmerads@gmail.com'
   );
-  const isAuthorizedAdmin = Boolean(adminToken || isFirebaseRootAdmin);
+  const isAuthorizedAdmin = Boolean(effectiveAdminToken || isFirebaseRootAdmin);
 
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (user) => {
@@ -186,6 +197,43 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     });
     return () => unsub();
   }, []);
+
+  // Automatically exchange a verified Google Root Admin Firebase ID token for a real Server Admin Bearer token
+  // so Promo Codes & Redeem Codes ALWAYS synchronize to BOTH Server SQLite DB and Cloud Firestore!
+  const ensureServerAdminToken = useCallback(
+    async (forceRefresh = false): Promise<string | null> => {
+      if (!forceRefresh && effectiveAdminToken) {
+        return effectiveAdminToken;
+      }
+      if (!firebaseUser || !isFirebaseRootAdmin) {
+        return effectiveAdminToken || null;
+      }
+      try {
+        const idToken = await firebaseUser.getIdToken(forceRefresh);
+        const resp = await fetch('/api/admin/login-google', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idToken }),
+        });
+        const data = await resp.json().catch(() => null);
+        if (resp.ok && data?.success && data.token) {
+          setLocalAdminToken(data.token);
+          onAdminTokenRefreshed?.(data.token, data.username || firebaseUser.email || 'Admin');
+          return String(data.token);
+        }
+      } catch {
+        // Non-blocking
+      }
+      return effectiveAdminToken || null;
+    },
+    [effectiveAdminToken, firebaseUser, isFirebaseRootAdmin, onAdminTokenRefreshed]
+  );
+
+  useEffect(() => {
+    if (isOpen && isFirebaseRootAdmin && !effectiveAdminToken) {
+      ensureServerAdminToken(false);
+    }
+  }, [isOpen, isFirebaseRootAdmin, effectiveAdminToken, ensureServerAdminToken]);
 
   const loadAllRealData = useCallback(async () => {
     if (!isAuthorizedAdmin) return;
@@ -196,17 +244,33 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     const paysById = new Map<string, PaymentItem>();
     const promosByCode = new Map<string, PromoCodeItem>();
 
-    // 1. Fetch real server-side analytics & server-side promo codes (when authenticated with Admin Bearer token)
-    if (adminToken) {
+    let tokenToUse = await ensureServerAdminToken(false);
+
+    // 1. Fetch real server-side analytics & server-side promo codes (auto-refresh token on 401 if Google Admin)
+    if (tokenToUse) {
       try {
-        const [resp, promosResp] = await Promise.all([
+        let [resp, promosResp] = await Promise.all([
           fetch('/api/admin/analytics', {
-            headers: { Authorization: `Bearer ${adminToken}` },
+            headers: { Authorization: `Bearer ${tokenToUse}` },
           }),
           fetch('/api/admin/promo-codes', {
-            headers: { Authorization: `Bearer ${adminToken}` },
+            headers: { Authorization: `Bearer ${tokenToUse}` },
           }).catch(() => null),
         ]);
+        if ((resp.status === 401 || promosResp?.status === 401) && isFirebaseRootAdmin) {
+          const refreshed = await ensureServerAdminToken(true);
+          if (refreshed) {
+            tokenToUse = refreshed;
+            [resp, promosResp] = await Promise.all([
+              fetch('/api/admin/analytics', {
+                headers: { Authorization: `Bearer ${tokenToUse}` },
+              }),
+              fetch('/api/admin/promo-codes', {
+                headers: { Authorization: `Bearer ${tokenToUse}` },
+              }).catch(() => null),
+            ]);
+          }
+        }
         if (resp.ok) {
           const json = await resp.json();
           if (json?.success) {
@@ -343,13 +407,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               usageCount: Math.max(item.usageCount, existing?.usageCount || 0),
             });
           });
-          // Automatically mirror Firestore promo codes to server SQLite so guests/non-Google users can redeem them
-          if (adminToken && fsPromoList.length > 0) {
+          // Automatically mirror ALL Firestore promo codes to server SQLite so guests/non-Google users can redeem them
+          if (tokenToUse && fsPromoList.length > 0) {
             fetch('/api/admin/promo-codes', {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
-                Authorization: `Bearer ${adminToken}`,
+                Authorization: `Bearer ${tokenToUse}`,
               },
               body: JSON.stringify({ promos: fsPromoList }),
             }).catch(() => {});
@@ -407,7 +471,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setPaymentsList(sortedPays);
     setPromoCodes(sortedPromos);
     setLoadingData(false);
-  }, [isAuthorizedAdmin, adminToken, isFirebaseRootAdmin, isKm, newCenterId]);
+  }, [isAuthorizedAdmin, ensureServerAdminToken, isFirebaseRootAdmin, isKm, newCenterId]);
 
   useEffect(() => {
     if (isOpen && isAuthorizedAdmin) {
@@ -446,16 +510,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     } catch {
       // ignore
     }
-    if (adminToken) {
+    if (effectiveAdminToken) {
       try {
         await fetch('/api/admin/logout', {
           method: 'POST',
-          headers: { Authorization: `Bearer ${adminToken}` },
+          headers: { Authorization: `Bearer ${effectiveAdminToken}` },
         });
       } catch {
         // ignore
       }
     }
+    setLocalAdminToken(null);
     setFirebaseUser(null);
     onAdminSessionLogout?.();
   };
@@ -516,7 +581,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     e.preventDefault();
     setPromoFeedback(null);
 
-    if (!adminToken && !isFirebaseRootAdmin) {
+    if (!effectiveAdminToken && !isFirebaseRootAdmin) {
       setPromoFeedback(
         isKm
           ? 'សូមចូលគណនី Admin ជាមុនសិនដើម្បីបង្កើត Promo Code។'
@@ -538,24 +603,42 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     let savedFirestore = false;
     let lastError = '';
 
+    // Ensure we have a live Server Admin Bearer token (auto-exchanged from Google Root Admin if needed!)
+    let serverToken = await ensureServerAdminToken(false);
+
     // 1. Save to server SQLite DB so ALL users (even guests without Google login) can unlock immediately
-    if (adminToken) {
+    if (serverToken) {
+      const payloadBody = JSON.stringify({
+        code: codeStr,
+        centerId: chosenCenter,
+        monthLabel: newMonthLabel.slice(0, 32),
+        usageLimit: safeLimit,
+        expiresAt: newExpiresAt.slice(0, 32),
+        isActive: true,
+      });
       try {
-        const resp = await fetch('/api/admin/promo-codes', {
+        let resp = await fetch('/api/admin/promo-codes', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            Authorization: `Bearer ${adminToken}`,
+            Authorization: `Bearer ${serverToken}`,
           },
-          body: JSON.stringify({
-            code: codeStr,
-            centerId: chosenCenter,
-            monthLabel: newMonthLabel.slice(0, 32),
-            usageLimit: safeLimit,
-            expiresAt: newExpiresAt.slice(0, 32),
-            isActive: true,
-          }),
+          body: payloadBody,
         });
+        if (resp.status === 401 && isFirebaseRootAdmin) {
+          const refreshed = await ensureServerAdminToken(true);
+          if (refreshed) {
+            serverToken = refreshed;
+            resp = await fetch('/api/admin/promo-codes', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                Authorization: `Bearer ${serverToken}`,
+              },
+              body: payloadBody,
+            });
+          }
+        }
         const data = await resp.json().catch(() => ({}));
         if (resp.ok && data?.success) {
           savedServer = true;
@@ -595,10 +678,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
     if (savedServer || savedFirestore) {
       setNewCode('');
+      const syncTargets = [
+        savedServer ? 'Server DB ✓' : '',
+        savedFirestore ? 'Cloud Firestore ✓' : '',
+      ]
+        .filter(Boolean)
+        .join(' · ');
       setPromoFeedback(
         isKm
-          ? `✓ បានបង្កើត Promo Code "${codeStr}" រួចរាល់! អាចយកទៅប្រើដោះសោបានភ្លាមៗដោយមិនបាច់បង់ប្រាក់។`
-          : `✓ Created promo code "${codeStr}"! Ready for immediate unlock without payment.`
+          ? `✓ បានបង្កើត Promo Code "${codeStr}" រួចរាល់ (${syncTargets})! អាចយកទៅវាយក្នុង "ប្រអប់ Promo Code ផ្សេង" ដើម្បីដោះសោបានភ្លាមៗ។`
+          : `✓ Created promo code "${codeStr}" (${syncTargets})! Ready for immediate unlock in the Promo Code box.`
       );
       await loadAllRealData();
     } else {
@@ -607,13 +696,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const handleDeletePromo = async (id: string) => {
-    if (!adminToken && !isFirebaseRootAdmin) return;
-    if (adminToken) {
+    if (!effectiveAdminToken && !isFirebaseRootAdmin) return;
+    let serverToken = await ensureServerAdminToken(false);
+    if (serverToken) {
       try {
-        await fetch(`/api/admin/promo-codes/${encodeURIComponent(id)}`, {
+        let resp = await fetch(`/api/admin/promo-codes/${encodeURIComponent(id)}`, {
           method: 'DELETE',
-          headers: { Authorization: `Bearer ${adminToken}` },
+          headers: { Authorization: `Bearer ${serverToken}` },
         });
+        if (resp.status === 401 && isFirebaseRootAdmin) {
+          const refreshed = await ensureServerAdminToken(true);
+          if (refreshed) {
+            serverToken = refreshed;
+            await fetch(`/api/admin/promo-codes/${encodeURIComponent(id)}`, {
+              method: 'DELETE',
+              headers: { Authorization: `Bearer ${serverToken}` },
+            });
+          }
+        }
       } catch {
         // Non-blocking
       }
@@ -1125,7 +1225,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 {/* TAB 2: LIVE VISITORS (IP-TO-CITY WITH MASKED IPs) */}
                 {activeTab === 'live' && (
                   <LiveVisitorsMarquee
-                    adminToken={adminToken}
+                    adminToken={effectiveAdminToken}
                     lang={lang}
                     mode="panel"
                     onStatsUpdate={setLiveVisitorSummary}
@@ -1493,7 +1593,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 {/* TAB: REDEEM CODE DATABASE & GOOGLE SHEETS */}
                 {activeTab === 'redeemdb' && (
                   <RedeemDatabasePanel
-                    adminToken={adminToken}
+                    adminToken={effectiveAdminToken}
                     isFirebaseRootAdmin={isFirebaseRootAdmin}
                     lang={lang}
                   />
@@ -1501,14 +1601,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
                 {/* TAB: ADMIN & STAFF ACCOUNTS (ROOT ADMIN ONLY) */}
                 {activeTab === 'accounts' && (
-                  <AdminAccountsPanel adminToken={adminToken} lang={lang} />
+                  <AdminAccountsPanel adminToken={effectiveAdminToken} lang={lang} />
                 )}
               </div>
             </div>
 
             {/* Pinned Bottom Live Visitors Scrolling City Marquee (Masked IPs for Privacy) */}
             <LiveVisitorsMarquee
-              adminToken={adminToken}
+              adminToken={effectiveAdminToken}
               lang={lang}
               mode="marquee"
               onStatsUpdate={setLiveVisitorSummary}

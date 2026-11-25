@@ -28,6 +28,7 @@ import {
   deleteServerPromoCode,
   verifyAndIncrementServerPromoCode,
   checkServerPromoCodeExists,
+  getOrCreateSessionSigningSecret,
   listAdminAccounts,
   createOrUpdateAdminAccount,
   verifyDbAdminLogin,
@@ -1280,11 +1281,67 @@ function localizeCodeError(errorCode: UnlockErrorCode, lang: string): string {
   }
 }
 
+async function lookupFirestorePromoCode(
+  code: string,
+  firebaseIdToken: string
+): Promise<{
+  code: string;
+  centerId: string;
+  monthLabel: string;
+  usageLimit: number;
+  usageCount: number;
+  expiresAt: string;
+  isActive: boolean;
+} | null> {
+  if (!firebaseIdToken || firebaseIdToken.length > 8192) return null;
+  const safeCode = String(code || '')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_-]/g, '')
+    .slice(0, 64);
+  if (safeCode.length < 3) return null;
+  try {
+    const verifiedUser = await verifyFirebaseIdToken(firebaseIdToken);
+    if (!verifiedUser) return null;
+    const fsResp = await fetch(
+      `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(FIREBASE_PROJECT_ID)}/databases/${encodeURIComponent(FIREBASE_DATABASE_ID)}/documents/promoCodes/${encodeURIComponent(safeCode)}`,
+      {
+        headers: { Authorization: `Bearer ${firebaseIdToken}` },
+        signal: AbortSignal.timeout(6000),
+      }
+    ).catch(() => null);
+    if (!fsResp || !fsResp.ok) return null;
+    const fsDoc = (await fsResp.json().catch(() => null)) as any;
+    const fields = fsDoc?.fields;
+    if (!fields || typeof fields !== 'object') return null;
+
+    const readInt = (f: any, fallback: number): number => {
+      if (!f) return fallback;
+      if (f.integerValue !== undefined) return Number(f.integerValue);
+      if (f.doubleValue !== undefined) return Math.floor(Number(f.doubleValue));
+      return fallback;
+    };
+
+    return {
+      code: String(fields.code?.stringValue || safeCode).toUpperCase(),
+      centerId: String(fields.centerId?.stringValue || 'general'),
+      monthLabel: String(fields.monthLabel?.stringValue || ''),
+      usageLimit: Math.max(1, readInt(fields.usageLimit, 50)),
+      usageCount: Math.max(0, readInt(fields.usageCount, 0)),
+      expiresAt: String(fields.expiresAt?.stringValue || ''),
+      isActive: fields.isActive?.booleanValue !== false,
+    };
+  } catch {
+    return null;
+  }
+}
+
 app.post('/api/payments/verify-redeem', paymentRateLimiter, async (req, res) => {
   const rawCode = String(req.body?.code || '').trim().toUpperCase();
   const userEmail = String(req.body?.userEmail || '').trim().slice(0, 160);
   const lang = String(req.body?.lang || 'km').trim().toLowerCase();
   const mode: 'redeem' | 'promo' = req.body?.mode === 'promo' ? 'promo' : 'redeem';
+  const firebaseIdToken = String(req.body?.firebaseIdToken || '').trim();
 
   if (!rawCode) {
     return res.status(400).json({
@@ -1304,7 +1361,25 @@ app.post('/api/payments/verify-redeem', paymentRateLimiter, async (req, res) => 
     }
 
     try {
-      const promoCheck = verifyAndIncrementServerPromoCode(rawCode);
+      let promoCheck = verifyAndIncrementServerPromoCode(rawCode);
+      // If not yet mirrored in Server SQLite, verify live against Cloud Firestore /promoCodes/{CODE}
+      // and automatically mirror it into SQLite so subsequent guest users can redeem it too!
+      if (!promoCheck.ok && promoCheck.errorCode === 'NOT_FOUND' && firebaseIdToken) {
+        const fsPromo = await lookupFirestorePromoCode(rawCode, firebaseIdToken);
+        if (fsPromo) {
+          upsertServerPromoCode({
+            code: fsPromo.code,
+            centerId: fsPromo.centerId,
+            monthLabel: fsPromo.monthLabel,
+            usageLimit: fsPromo.usageLimit,
+            usageCount: fsPromo.usageCount,
+            expiresAt: fsPromo.expiresAt,
+            isActive: fsPromo.isActive,
+            preserveUsageCount: true,
+          });
+          promoCheck = verifyAndIncrementServerPromoCode(fsPromo.code);
+        }
+      }
       if (promoCheck.ok && promoCheck.promo) {
         grantUnlockCookie(req, res, 'admin_promo', promoCheck.promo.code);
         return res.json({
@@ -1428,6 +1503,27 @@ app.post('/api/payments/verify-redeem', paymentRateLimiter, async (req, res) => 
     });
   }
 
+  if (firebaseIdToken) {
+    const fsPromo = await lookupFirestorePromoCode(rawCode, firebaseIdToken);
+    if (fsPromo) {
+      upsertServerPromoCode({
+        code: fsPromo.code,
+        centerId: fsPromo.centerId,
+        monthLabel: fsPromo.monthLabel,
+        usageLimit: fsPromo.usageLimit,
+        usageCount: fsPromo.usageCount,
+        expiresAt: fsPromo.expiresAt,
+        isActive: fsPromo.isActive,
+        preserveUsageCount: true,
+      });
+      return res.status(400).json({
+        success: false,
+        errorCode: 'WRONG_BOX_PROMO',
+        error: localizeCodeError('WRONG_BOX_PROMO', lang),
+      });
+    }
+  }
+
   return res.status(404).json({
     success: false,
     errorCode: 'NOT_FOUND',
@@ -1438,8 +1534,7 @@ app.post('/api/payments/verify-redeem', paymentRateLimiter, async (req, res) => 
 // ============================================================================
 // SECURE ADMIN AUTHENTICATION (Server-Side scrypt + HMAC Bearer Session Token)
 // ============================================================================
-const SESSION_SIGNING_SECRET =
-  process.env.ADMIN_SESSION_SECRET || crypto.randomBytes(32).toString('hex');
+const SESSION_SIGNING_SECRET = getOrCreateSessionSigningSecret();
 const ADMIN_SESSION_TTL_MS = 8 * 60 * 60 * 1000; // 8 hours
 
 interface ClaimedAdminCredential {

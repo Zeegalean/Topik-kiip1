@@ -17,6 +17,7 @@ import {
 import { OfficialFormView } from './OfficialFormView';
 import { cleanVisaStatus } from '../utils/sanitizers';
 import {
+  auth,
   recordGeneratedDocument,
   recordPaymentTransaction,
   verifyAndRedeemFirestorePromo,
@@ -137,13 +138,21 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
     // ONLY allow Firestore /promoCodes/{CODE} lookup inside the Promo Code box
     let shouldTryFirestore = mode === 'promo';
 
-    // 1. Verify against backend API (strict mode separation enforced server-side)
+    // 1. Verify against backend API (strict mode separation enforced server-side; also verifies & mirrors Firestore promo codes)
     try {
+      const firebaseIdToken = auth.currentUser
+        ? await auth.currentUser.getIdToken().catch(() => '')
+        : '';
       const resp = await fetch('/api/payments/verify-redeem', {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: raw, mode, lang }),
+        body: JSON.stringify({
+          code: raw,
+          mode,
+          lang,
+          firebaseIdToken: firebaseIdToken || undefined,
+        }),
       });
       const data = await resp.json().catch(() => ({}));
       if (resp.ok && data?.success) {
