@@ -17,9 +17,11 @@ import { Step3PdfPreview } from './components/Step3PdfPreview';
 import { Step4EmailSender } from './components/Step4EmailSender';
 import {
   ExtractedDocumentData,
+  OcrFieldConfidenceMap,
   runFullDocumentOcrPipeline,
   mergeExtractedIntoFormData,
   formDataToExtractedDraft,
+  evaluateDraftConfidence,
 } from './utils/clientOcrEngine';
 import { BackgroundSettingsModal } from './components/BackgroundSettingsModal';
 import { PaymentModal } from './components/PaymentModal';
@@ -170,6 +172,8 @@ export default function App() {
   // Staged OCR Draft & Verification state (between Step 1 Upload and Step 3 Form)
   const [extractedOcrDraft, setExtractedOcrDraft] = useState<ExtractedDocumentData>({});
   const [ocrInitialSnapshot, setOcrInitialSnapshot] = useState<ExtractedDocumentData | null>(null);
+  const [ocrConfidenceMap, setOcrConfidenceMap] = useState<OcrFieldConfidenceMap>({});
+  const [ocrInitialConfidenceSnapshot, setOcrInitialConfidenceSnapshot] = useState<OcrFieldConfidenceMap | null>(null);
   const [ocrRawText, setOcrRawText] = useState<string>('');
   const [ocrModel, setOcrModel] = useState<string>('');
   const [isRescanningOcr, setIsRescanningOcr] = useState<boolean>(false);
@@ -241,8 +245,11 @@ export default function App() {
 
     setFormData(SAMPLE_FORM_DATA);
     const sampleDraft = formDataToExtractedDraft(SAMPLE_FORM_DATA);
+    const sampleConfidence = evaluateDraftConfidence(sampleDraft, undefined, undefined, 'svg-preset');
     setExtractedOcrDraft(sampleDraft);
     setOcrInitialSnapshot(sampleDraft);
+    setOcrConfidenceMap(sampleConfidence);
+    setOcrInitialConfidenceSnapshot(sampleConfidence);
     setOcrModel('sample-preset');
     setOcrRawText('');
     setHasConfirmedOcrReview(false);
@@ -259,9 +266,18 @@ export default function App() {
     setCurrentStep(4);
   };
 
-  const handleOcrCompleted = (data: ExtractedDocumentData, rawTextPreview: string, model: string) => {
+  const handleOcrCompleted = (
+    data: ExtractedDocumentData,
+    rawTextPreview: string,
+    model: string,
+    confidenceMap?: OcrFieldConfidenceMap
+  ) => {
     setExtractedOcrDraft((prev) => ({ ...prev, ...data }));
     setOcrInitialSnapshot((prev) => ({ ...(prev || {}), ...data }));
+    if (confidenceMap) {
+      setOcrConfidenceMap((prev) => ({ ...prev, ...confidenceMap }));
+      setOcrInitialConfidenceSnapshot((prev) => ({ ...(prev || {}), ...confidenceMap }));
+    }
     if (rawTextPreview) setOcrRawText(rawTextPreview);
     if (model) setOcrModel(model);
     setHasConfirmedOcrReview(false);
@@ -278,6 +294,8 @@ export default function App() {
       });
       setExtractedOcrDraft((prev) => ({ ...prev, ...res.data }));
       setOcrInitialSnapshot((prev) => ({ ...(prev || {}), ...res.data }));
+      setOcrConfidenceMap((prev) => ({ ...prev, ...res.confidence }));
+      setOcrInitialConfidenceSnapshot((prev) => ({ ...(prev || {}), ...res.confidence }));
       if (res.rawTextPreview) setOcrRawText(res.rawTextPreview);
       if (res.model) setOcrModel(res.model);
     } finally {
@@ -315,6 +333,8 @@ export default function App() {
       setFormData(INITIAL_FORM_DATA);
       setExtractedOcrDraft({});
       setOcrInitialSnapshot(null);
+      setOcrConfidenceMap({});
+      setOcrInitialConfidenceSnapshot(null);
       setOcrRawText('');
       setOcrModel('');
       setHasConfirmedOcrReview(false);
@@ -537,6 +557,8 @@ export default function App() {
                     draft={extractedOcrDraft}
                     setDraft={setExtractedOcrDraft}
                     initialSnapshot={ocrInitialSnapshot}
+                    confidenceMap={ocrConfidenceMap}
+                    initialConfidenceSnapshot={ocrInitialConfidenceSnapshot}
                     rawTextPreview={ocrRawText}
                     ocrModel={ocrModel}
                     isScanning={isRescanningOcr}

@@ -154,6 +154,12 @@ interface RedeemStats {
   revokedCount: number;
   databasePath: string;
   googleSheetConfigured: boolean;
+  googleSheetSource?: 'env' | 'saved' | 'none';
+  savedSheetId?: string;
+  savedSheetName?: string;
+  lastSyncAt?: string | null;
+  lastRowsRead?: number;
+  lastSyncError?: string | null;
 }
 
 interface RedeemDatabasePanelProps {
@@ -174,6 +180,12 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
     revokedCount: 0,
     databasePath: 'data/redeem_codes.sqlite',
     googleSheetConfigured: false,
+    googleSheetSource: 'none',
+    savedSheetId: '',
+    savedSheetName: '',
+    lastSyncAt: null,
+    lastRowsRead: 0,
+    lastSyncError: null,
   });
   const [statusFilter, setStatusFilter] = useState<'all' | 'Unused' | 'Used' | 'Revoked'>('all');
   const [searchInput, setSearchInput] = useState('');
@@ -204,6 +216,15 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
   const [sheetId, setSheetId] = useState('');
   const [sheetName, setSheetName] = useState('');
   const [syncingSheets, setSyncingSheets] = useState(false);
+
+  // Read-only Code Diagnostic Checker (does not burn codes)
+  const [testCodeInput, setTestCodeInput] = useState('');
+  const [testingCode, setTestingCode] = useState(false);
+  const [testCodeResult, setTestCodeResult] = useState<{
+    found: boolean;
+    normalizedInput: string;
+    record?: RedeemCodeRow;
+  } | null>(null);
 
   // Debounce search input
   useEffect(() => {
@@ -336,12 +357,18 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
       });
       const json = await resp.json();
       if (resp.ok && json?.success) {
+        const colInfo = json.detectedColumnLabel ? ` [${json.detectedColumnLabel}]` : '';
+        const sampleInfo =
+          Array.isArray(json.sampleCodes) && json.sampleCodes.length > 0
+            ? ` · ឧទាហរណ៍: ${json.sampleCodes.slice(0, 3).join(', ')}`
+            : '';
         setFeedback({
           type: 'success',
           text: isKm
-            ? `✓ អានពី Google Sheets (${json.sheetName}) បាន ${json.rowsRead} ជួរ · បញ្ចូលថ្មី ${json.imported} កូដ · រំលង ${json.skipped}`
-            : `✓ Read ${json.rowsRead} rows from Google Sheet "${json.sheetName}" · Imported ${json.imported} new codes (skipped ${json.skipped}).`,
+            ? `✓ អានពី Google Sheets (${json.sheetName}${colInfo}) បាន ${Number(json.rowsRead || 0).toLocaleString()} ជួរ · បញ្ចូលថ្មី ${Number(json.imported || 0).toLocaleString()} កូដ · រំលង ${Number(json.skipped || 0).toLocaleString()}${sampleInfo}`
+            : `✓ Read ${Number(json.rowsRead || 0).toLocaleString()} rows from Google Sheet "${json.sheetName}"${colInfo} · Imported ${Number(json.imported || 0).toLocaleString()} new codes (skipped ${Number(json.skipped || 0).toLocaleString()})${sampleInfo}`,
         });
+        setPage(1);
         await fetchRedeemDb();
       } else {
         setFeedback({ type: 'error', text: json?.error || 'Google Sheets sync failed' });
@@ -350,6 +377,31 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
       setFeedback({ type: 'error', text: 'Network error while reading Google Sheets' });
     } finally {
       setSyncingSheets(false);
+    }
+  };
+
+  const handleTestCheckCode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!adminToken || !testCodeInput.trim()) return;
+    setTestingCode(true);
+    setTestCodeResult(null);
+    try {
+      const resp = await fetch(
+        `/api/admin/redeem-codes/check?code=${encodeURIComponent(testCodeInput.trim())}`,
+        { headers: { Authorization: `Bearer ${adminToken}` } }
+      );
+      const json = await resp.json();
+      if (resp.ok && json?.success) {
+        setTestCodeResult({
+          found: Boolean(json.found),
+          normalizedInput: String(json.normalizedInput || ''),
+          record: json.record,
+        });
+      }
+    } catch {
+      // ignore
+    } finally {
+      setTestingCode(false);
     }
   };
 
@@ -579,14 +631,20 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
             <div className="sm:col-span-2">
               <label className="text-[11px] font-bold text-slate-600 block mb-1">
                 {isKm ? 'Link Google Sheet ឬ Sheet ID' : 'Google Sheet URL or ID'}{' '}
-                {stats.googleSheetConfigured ? '(env ready)' : ''}
+                {stats.googleSheetConfigured
+                  ? stats.googleSheetSource === 'saved'
+                    ? '(Saved · Auto-Sync Active)'
+                    : '(Env Secret Active)'
+                  : ''}
               </label>
               <input
                 type="text"
                 value={sheetId}
                 onChange={(e) => setSheetId(e.target.value)}
                 placeholder={
-                  stats.googleSheetConfigured
+                  stats.savedSheetId
+                    ? `Saved: ${stats.savedSheetId.slice(0, 46)}${stats.savedSheetId.length > 46 ? '...' : ''}`
+                    : stats.googleSheetConfigured
                     ? 'Using GOOGLE_SHEET_ID secret...'
                     : 'https://docs.google.com/spreadsheets/d/... ឬ Sheet ID'
                 }
@@ -601,16 +659,27 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
                 type="text"
                 value={sheetName}
                 onChange={(e) => setSheetName(e.target.value)}
-                placeholder={isKm ? 'ស្វ័យប្រវត្តិ (Tab 1)' : 'Auto (First Tab)'}
+                placeholder={stats.savedSheetName || (isKm ? 'ស្វ័យប្រវត្តិ (Tab 1)' : 'Auto (First Tab)')}
                 className="w-full px-2.5 py-2 border border-slate-300 rounded-xl text-xs"
               />
             </div>
           </div>
-          <p className="text-[10.5px] text-slate-500">
-            {isKm
-              ? 'អាច Paste Link Google Sheet ទាំងមូល ឬ Sheet ID។ សូមបើក Share → "Anyone with the link (Viewer)"។ ទុក Tab ទទេដើម្បីអាន Tab ទី ១ ដោយស្វ័យប្រវត្តិ។'
-              : 'Paste a full Google Sheet URL, Published URL, or Sheet ID. Set Share → "Anyone with the link (Viewer)". Leave Tab blank to auto-read the first tab.'}
-          </p>
+          {stats.googleSheetConfigured ? (
+            <p className="text-[10.5px] text-emerald-700 font-semibold">
+              {isKm
+                ? `✓ Google Sheet ភ្ជាប់រួចរាល់ (${stats.lastRowsRead ? `${stats.lastRowsRead.toLocaleString()} ជួរ` : 'Auto-Sync Active'}${stats.lastSyncAt ? ` · ${new Date(stats.lastSyncAt).toLocaleString()}` : ''}) — ប្រព័ន្ធនឹង Sync ដោយស្វ័យប្រវត្តិពេលផ្ទៀងផ្ទាត់កូដ។`
+                : `✓ Connected Google Sheet (${stats.lastRowsRead ? `${stats.lastRowsRead.toLocaleString()} rows` : 'Auto-Sync Active'}${stats.lastSyncAt ? ` · ${new Date(stats.lastSyncAt).toLocaleString()}` : ''}) — auto-syncs on startup & code lookup.`}
+            </p>
+          ) : (
+            <p className="text-[10.5px] text-slate-500">
+              {isKm
+                ? 'អាច Paste Link Google Sheet ទាំងមូល (រួមទាំង /u/0/) ឬ Sheet ID។ សូមបើក Share → "Anyone with the link (Viewer)"។ ទុក Tab ទទេដើម្បីអាន Tab ទី ១ ដោយស្វ័យប្រវត្តិ។'
+                : 'Paste a full Google Sheet URL (including /u/0/), Published URL, or Sheet ID. Set Share → "Anyone with the link (Viewer)". Leave Tab blank to auto-read the first tab.'}
+            </p>
+          )}
+          {stats.lastSyncError && (
+            <p className="text-[10.5px] text-rose-700 font-semibold">{stats.lastSyncError}</p>
+          )}
           <div className="flex flex-col sm:flex-row gap-2">
             <button
               type="submit"
@@ -635,27 +704,71 @@ export const RedeemDatabasePanel: React.FC<RedeemDatabasePanelProps> = ({
         </form>
       </div>
 
-      {/* Quick Bulk Manual Paste */}
-      <form onSubmit={handleManualAdd} className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs flex flex-col sm:flex-row gap-2">
-        <input
-          type="text"
-          value={manualText}
-          onChange={(e) => setManualText(e.target.value)}
-          placeholder={
-            isKm
-              ? 'បញ្ចូលកូដផ្ទាល់ខ្លួនបំបែកដោយសញ្ញាក្បៀស (ឧ. KIIP-VIP-001, KIIP-VIP-002)...'
-              : 'Paste custom codes separated by commas (e.g. KIIP-VIP-001, KIIP-VIP-002)...'
-          }
-          className="flex-1 px-3 py-2 border border-slate-300 rounded-xl text-xs font-mono uppercase"
-        />
-        <button
-          type="submit"
-          disabled={addingManual || !manualText.trim()}
-          className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs cursor-pointer disabled:opacity-50 shrink-0"
-        >
-          {isKm ? "+ បន្ថែមជា 'Unused'" : "+ Add as 'Unused'"}
-        </button>
-      </form>
+      {/* Quick Bulk Manual Paste + Read-Only Code Diagnostic Test */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <form onSubmit={handleManualAdd} className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs flex flex-col sm:flex-row gap-2">
+          <input
+            type="text"
+            value={manualText}
+            onChange={(e) => setManualText(e.target.value)}
+            placeholder={
+              isKm
+                ? 'បញ្ចូលកូដផ្ទាល់ខ្លួនបំបែកដោយសញ្ញាក្បៀស (ឧ. KIIP-VIP-001)...'
+                : 'Paste custom codes separated by commas (e.g. KIIP-VIP-001)...'
+            }
+            className="flex-1 px-3 py-2 border border-slate-300 rounded-xl text-xs font-mono uppercase"
+          />
+          <button
+            type="submit"
+            disabled={addingManual || !manualText.trim()}
+            className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white font-bold text-xs cursor-pointer disabled:opacity-50 shrink-0 whitespace-nowrap"
+          >
+            {isKm ? "+ បន្ថែមជា 'Unused'" : "+ Add as 'Unused'"}
+          </button>
+        </form>
+
+        <form onSubmit={handleTestCheckCode} className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs space-y-2">
+          <div className="flex flex-col sm:flex-row gap-2">
+            <input
+              type="text"
+              value={testCodeInput}
+              onChange={(e) => setTestCodeInput(e.target.value.toUpperCase())}
+              placeholder={
+                isKm
+                  ? 'សាកល្បងពិនិត្យកូដ (មិនកាត់ប្រើ) ឧ. កូដពី Google Sheet...'
+                  : 'Test-check any code from Sheet (does not burn)...'
+              }
+              className="flex-1 px-3 py-2 border border-slate-300 rounded-xl text-xs font-mono uppercase"
+            />
+            <button
+              type="submit"
+              disabled={testingCode || !testCodeInput.trim()}
+              className="px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs cursor-pointer disabled:opacity-50 shrink-0 whitespace-nowrap"
+            >
+              {isKm ? 'ពិនិត្យកូដ (Test)' : 'Test Code'}
+            </button>
+          </div>
+          {testCodeResult && (
+            <div
+              className={`text-[11px] font-semibold ${
+                testCodeResult.found && testCodeResult.record?.status === 'Unused'
+                  ? 'text-emerald-700'
+                  : testCodeResult.found
+                  ? 'text-amber-700'
+                  : 'text-rose-700'
+              }`}
+            >
+              {testCodeResult.found && testCodeResult.record
+                ? isKm
+                  ? `✓ រកឃើញកូដ ${testCodeResult.record.code} · ស្ថានភាព: ${testCodeResult.record.status} · ប្រភព: ${testCodeResult.record.source}`
+                  : `✓ Found ${testCodeResult.record.code} · Status: ${testCodeResult.record.status} · Source: ${testCodeResult.record.source}`
+                : isKm
+                ? `✕ រកមិនឃើញ "${testCodeResult.normalizedInput}" ក្នុង Database ទេ — សូមចុច "អាន & ទាញកូដពី Google Sheets" ឬ Upload .CSV ជាមុនសិន។`
+                : `✕ "${testCodeResult.normalizedInput}" not found in DB — click "Read & Import from Google Sheets" or Upload .CSV first.`}
+            </div>
+          )}
+        </form>
+      </div>
 
       {/* Redeem Codes Table */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">

@@ -19,6 +19,8 @@ import {
   updateRedeemCodeStatus,
   deleteRedeemCode,
   syncRedeemCodesFromGoogleSheet,
+  ensureGoogleSheetSynced,
+  checkRedeemCodeStatus,
   listAdminAccounts,
   createOrUpdateAdminAccount,
   verifyDbAdminLogin,
@@ -1181,7 +1183,7 @@ interface IssuedUnlockCode {
 }
 const issuedUnlockCodes = new Map<string, IssuedUnlockCode>();
 
-app.post('/api/payments/verify-redeem', paymentRateLimiter, (req, res) => {
+app.post('/api/payments/verify-redeem', paymentRateLimiter, async (req, res) => {
   const rawCode = String(req.body?.code || '').trim().toUpperCase();
   const userEmail = String(req.body?.userEmail || '').trim().slice(0, 160);
   if (!rawCode) {
@@ -1197,8 +1199,15 @@ app.post('/api/payments/verify-redeem', paymentRateLimiter, (req, res) => {
   }
 
   // 1. Atomic lookup & burn in persistent SQLite Redeem Codes Database ('Unused' -> 'Used')
+  //    If not found yet and a Google Sheet is configured, trigger a throttled auto-sync and retry once.
   try {
-    const dbCheck = verifyAndBurnRedeemCode(rawCode, userEmail || 'web_user');
+    let dbCheck = verifyAndBurnRedeemCode(rawCode, userEmail || 'web_user');
+    if (!dbCheck.ok && dbCheck.statusCode === 404) {
+      const syncResult = await ensureGoogleSheetSynced({ cooldownMs: 30_000 });
+      if (syncResult?.success && syncResult.rowsRead > 0) {
+        dbCheck = verifyAndBurnRedeemCode(rawCode, userEmail || 'web_user');
+      }
+    }
     if (dbCheck.ok && dbCheck.record) {
       const issued = issuedUnlockCodes.get(rawCode);
       if (issued) {
@@ -2644,6 +2653,20 @@ app.post('/api/admin/redeem-codes/sync-sheets', requireAdminAuth, async (req, re
   }
 });
 
+app.get('/api/admin/redeem-codes/check', requireAdminAuth, (req, res) => {
+  try {
+    const code = String(req.query?.code || '').trim();
+    if (!code) {
+      return res.status(400).json({ success: false, error: 'Code is required' });
+    }
+    const result = checkRedeemCodeStatus(code);
+    return res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('[Admin RedeemDB] Check code failed:', err);
+    return res.status(500).json({ success: false, error: 'Failed to check code' });
+  }
+});
+
 app.patch('/api/admin/redeem-codes/:code/status', requireAdminAuth, (req, res) => {
   try {
     const code = String(req.params.code || '');
@@ -3343,6 +3366,10 @@ async function startServer() {
 
   server.listen(port, host, () => {
     console.log(`Server running on http://${host}:${port}`);
+    // Non-blocking startup sync if GOOGLE_SHEET_ID or a saved Google Sheet is configured
+    ensureGoogleSheetSynced({ force: true }).catch((err) => {
+      console.warn('[RedeemDB] Startup Google Sheet sync skipped:', err?.message || err);
+    });
   });
 }
 

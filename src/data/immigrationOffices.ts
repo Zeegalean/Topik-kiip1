@@ -36,7 +36,7 @@ export const IMMIGRATION_OFFICES: ImmigrationOffice[] = [
     phone: '032-890-6411',
     email: 'kiipincheon@korea.kr',
     address: '(22306) 인천광역시 중구 서해대로 393',
-    regionKeywords: ['인천', '인천광역시', '부평', '계양', '남동구', '연수구', '미추홀', '서구(인천)', '부천'],
+    regionKeywords: ['인천', '인천광역시', '부평', '계양', '남동구', '연수구', '미추홀', '서구(인천)', '부천', '김포'],
   },
   {
     id: 'suwon',
@@ -158,7 +158,27 @@ export const IMMIGRATION_OFFICES: ImmigrationOffice[] = [
  */
 export function findOfficeByAddress(address: string): ImmigrationOffice | null {
   if (!address || typeof address !== 'string') return null;
-  const clean = address.trim().toLowerCase();
+  const clean = address.trim().toLowerCase().replace(/\s+/g, ' ');
+
+  // Disambiguate cities/districts that share names across provinces
+  if (clean.includes('경기') && clean.includes('광주')) {
+    return IMMIGRATION_OFFICES.find((o) => o.id === 'suwon') || null;
+  }
+  if (clean.includes('부산') && clean.includes('강서')) {
+    return IMMIGRATION_OFFICES.find((o) => o.id === 'busan') || null;
+  }
+  if (clean.includes('인천') && clean.includes('서구')) {
+    return IMMIGRATION_OFFICES.find((o) => o.id === 'incheon') || null;
+  }
+  if (clean.includes('대구') && (clean.includes('서구') || clean.includes('중구') || clean.includes('남구') || clean.includes('북구'))) {
+    return IMMIGRATION_OFFICES.find((o) => o.id === 'daegu') || null;
+  }
+  if (clean.includes('대전') && (clean.includes('서구') || clean.includes('중구') || clean.includes('유성구'))) {
+    return IMMIGRATION_OFFICES.find((o) => o.id === 'daejeon') || null;
+  }
+  if (clean.includes('울산') && (clean.includes('남구') || clean.includes('중구') || clean.includes('북구') || clean.includes('동구'))) {
+    return IMMIGRATION_OFFICES.find((o) => o.id === 'ulsan') || null;
+  }
 
   // Specific high-priority matches first (e.g., Yeosu cities vs Gwangju)
   if (clean.includes('여수') || clean.includes('순천') || clean.includes('광양')) {
@@ -166,12 +186,17 @@ export function findOfficeByAddress(address: string): ImmigrationOffice | null {
   }
 
   // Northern Gyeonggi vs Southern Gyeonggi
-  if (['양주', '고양', '파주', '의정부', '동두천', '포천', '연천', '남양주', '구리'].some(k => clean.includes(k))) {
+  if (['양주', '고양', '파주', '의정부', '동두천', '포천', '연천', '남양주', '구리', '가평'].some((k) => clean.includes(k))) {
     return IMMIGRATION_OFFICES.find((o) => o.id === 'yangju') || null;
   }
 
   // Seoul South vs Seoul Main
-  if (['강서', '마곡', '구로', '금천', '영등포', '동작', '관악', '서초', '강남', '송파', '강동'].some(k => clean.includes(k))) {
+  if (
+    !clean.includes('부산') &&
+    ['강서구', '마곡', '구로구', '금천구', '영등포구', '동작구', '관악구', '서초구', '강남구', '송파구', '강동구'].some((k) =>
+      clean.includes(k)
+    )
+  ) {
     return IMMIGRATION_OFFICES.find((o) => o.id === 'seoul-south') || null;
   }
 

@@ -403,6 +403,9 @@ CRITICAL INSTRUCTIONS FOR TOPIK SCORE CERTIFICATE (한국어능력시험 성적�
 5. validUntil: 성적유효기간 / Valid Until formatted STRICTLY as YYYY-MM-DD. If printed as a range like "2024.05.30 ~ 2026.05.30", ALWAYS return the END/EXPIRATION date ("2026-05-30").
 6. grade: 등급 (1급, 2급, 3급, 4급, 5급, or 6급).
 
+CRITICAL INSTRUCTIONS FOR CONFIDENCE SCORING (fieldConfidence):
+For each field you extract, provide an integer confidence score from 0 to 100 in fieldConfidence based on visual clarity in the document image (95-100 = crystal clear printed text; 75-94 = slightly blurry, small, glare, or angled; 40-74 = uncertain characters, faded ink, or partial occlusion; 0 = field not visible or not present in uploaded documents).
+
 Return ONLY structured JSON according to the schema.
 `;
 
@@ -438,6 +441,26 @@ Return ONLY structured JSON according to the schema.
         grade: { type: Type.STRING },
         passportNo: { type: Type.STRING },
         passportExpiry: { type: Type.STRING },
+        fieldConfidence: {
+          type: Type.OBJECT,
+          description: "0-100 integer visual legibility confidence per extracted field",
+          properties: {
+            name: { type: Type.INTEGER },
+            regNumber: { type: Type.INTEGER },
+            gender: { type: Type.INTEGER },
+            nationality: { type: Type.INTEGER },
+            visaStatus: { type: Type.INTEGER },
+            address: { type: Type.INTEGER },
+            docVerificationNo: { type: Type.INTEGER },
+            examNumber: { type: Type.INTEGER },
+            examDate: { type: Type.INTEGER },
+            round: { type: Type.INTEGER },
+            validUntil: { type: Type.INTEGER },
+            grade: { type: Type.INTEGER },
+            passportNo: { type: Type.INTEGER },
+            passportExpiry: { type: Type.INTEGER },
+          },
+        },
       },
     };
 
@@ -494,10 +517,21 @@ Return ONLY structured JSON according to the schema.
 
     if (extractedData) {
       const merged = { ...parsedFromPdfTexts, ...sanitizeExtractedData(extractedData) };
+      const rawConf = extractedData?.fieldConfidence;
+      const sanitizedConfidence: Record<string, number> = {};
+      if (rawConf && typeof rawConf === 'object') {
+        for (const [k, v] of Object.entries(rawConf)) {
+          const num = Number(v);
+          if (Number.isFinite(num)) {
+            sanitizedConfidence[k] = Math.max(0, Math.min(100, Math.round(num)));
+          }
+        }
+      }
       if (Object.keys(merged).length > 0) {
         return res.status(200).json({
           success: true,
           data: merged,
+          confidence: sanitizedConfidence,
           model: successfulModel,
           ...(pdfRawPreview ? { rawTextPreview: pdfRawPreview } : {}),
         });

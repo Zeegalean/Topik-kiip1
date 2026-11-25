@@ -1,6 +1,12 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { Language, UploadedDocuments } from '../types';
-import { ExtractedDocumentData } from '../utils/clientOcrEngine';
+import {
+  ExtractedDocumentData,
+  OcrConfidenceKey,
+  OcrFieldConfidence,
+  OcrFieldConfidenceMap,
+  evaluateDraftConfidence,
+} from '../utils/clientOcrEngine';
 import { findOfficeByAddress } from '../data/immigrationOffices';
 import { KOREAN_VISA_GROUPS, ALL_VISA_CODES } from '../data/visaOptions';
 import { extractPdfTextAndImageFromDataUrl, isPdfDataUrl } from '../utils/pdfOcrUtils';
@@ -21,6 +27,7 @@ import {
   Award,
   UserCheck,
   BookOpenCheck,
+  ShieldCheck,
 } from 'lucide-react';
 
 interface Step2OcrReviewProps {
@@ -29,6 +36,8 @@ interface Step2OcrReviewProps {
   draft: ExtractedDocumentData;
   setDraft: React.Dispatch<React.SetStateAction<ExtractedDocumentData>>;
   initialSnapshot: ExtractedDocumentData | null;
+  confidenceMap?: OcrFieldConfidenceMap;
+  initialConfidenceSnapshot?: OcrFieldConfidenceMap | null;
   rawTextPreview: string;
   ocrModel: string;
   isScanning: boolean;
@@ -38,6 +47,137 @@ interface Step2OcrReviewProps {
 }
 
 type DocTabId = 'arcBack' | 'topik' | 'arcFront' | 'passport';
+type FieldFilterMode = 'all' | 'review';
+
+const ALL_CONFIDENCE_KEYS: OcrConfidenceKey[] = [
+  'name',
+  'regNumber',
+  'gender',
+  'nationality',
+  'visaStatus',
+  'address',
+  'docVerificationNo',
+  'examNumber',
+  'round',
+  'examDate',
+  'validUntil',
+  'grade',
+  'passportNo',
+  'passportExpiry',
+];
+
+function getConfidenceTier(conf?: OcrFieldConfidence): 'manual' | 'high' | 'medium' | 'low' | 'missing' {
+  if (!conf || conf.source === 'missing' || conf.score <= 0) return 'missing';
+  if (conf.source === 'manual' && conf.score >= 85) return 'manual';
+  if (conf.score >= 85) return 'high';
+  if (conf.score >= 60) return 'medium';
+  return 'low';
+}
+
+const ConfidenceInlineMeter: React.FC<{
+  confidence?: OcrFieldConfidence;
+  lang: Language;
+}> = ({ confidence, lang }) => {
+  const isKm = lang === 'km';
+  const isKo = lang === 'ko';
+  const score = confidence?.score ?? 0;
+  const tier = getConfidenceTier(confidence);
+
+  const tierText =
+    tier === 'manual'
+      ? isKm
+        ? 'បានកែ·ផ្ទៀងផ្ទាត់'
+        : isKo
+        ? '직접 수정됨'
+        : 'Edited'
+      : tier === 'high'
+      ? isKm
+        ? 'ច្បាស់'
+        : isKo
+        ? '높음'
+        : 'High'
+      : tier === 'medium'
+      ? isKm
+        ? 'គួរពិនិត្យ'
+        : isKo
+        ? '확인 필요'
+        : 'Review'
+      : tier === 'low'
+      ? isKm
+        ? 'ទាប'
+        : isKo
+        ? '낮음'
+        : 'Low'
+      : isKm
+      ? 'ទទេ'
+      : isKo
+      ? '미추출'
+      : 'Missing';
+
+  const sourceLabel =
+    confidence?.source === 'ai-vision'
+      ? 'AI Vision OCR'
+      : confidence?.source === 'pdf-digital'
+      ? 'PDF Digital Text'
+      : confidence?.source === 'tesseract'
+      ? 'Browser OCR'
+      : confidence?.source === 'svg-preset'
+      ? 'Sample / Vector'
+      : confidence?.source === 'manual'
+      ? 'Manual Edit'
+      : 'Not Extracted';
+
+  const barColor =
+    tier === 'manual'
+      ? 'bg-indigo-600'
+      : tier === 'high'
+      ? 'bg-emerald-600'
+      : tier === 'medium'
+      ? 'bg-amber-500'
+      : tier === 'low'
+      ? 'bg-rose-600'
+      : 'bg-slate-300';
+
+  const textColor =
+    tier === 'manual'
+      ? 'text-indigo-700'
+      : tier === 'high'
+      ? 'text-emerald-700'
+      : tier === 'medium'
+      ? 'text-amber-700'
+      : tier === 'low'
+      ? 'text-rose-700'
+      : 'text-slate-500';
+
+  const tooltip = `${sourceLabel} (${score}%)${confidence?.reason ? ` — ${confidence.reason}` : ''}`;
+
+  return (
+    <span
+      title={tooltip}
+      className={`inline-flex items-center gap-1.5 text-[11px] font-semibold shrink-0 whitespace-nowrap ${textColor}`}
+    >
+      <span
+        aria-hidden="true"
+        className="w-11 h-1.5 bg-slate-200 rounded-xs overflow-hidden inline-block shrink-0"
+      >
+        <span
+          className={`block h-full transition-all duration-200 ${barColor}`}
+          style={{ width: `${Math.max(tier === 'missing' ? 0 : 8, Math.min(100, score))}%` }}
+        />
+      </span>
+      <span className="font-mono tabular-nums">{score}%</span>
+      <span aria-hidden="true" className="text-slate-300">
+        ·
+      </span>
+      {tier === 'manual' || tier === 'high' ? (
+        <CheckCircle2 className="w-3 h-3 shrink-0" aria-hidden="true" />
+      ) : (
+        <AlertTriangle className="w-3 h-3 shrink-0" aria-hidden="true" />
+      )}
+      <span>{tierText}</span>
+    </span>
+  );
+};
 
 export const Step2OcrReview: React.FC<Step2OcrReviewProps> = ({
   lang,
@@ -45,6 +185,8 @@ export const Step2OcrReview: React.FC<Step2OcrReviewProps> = ({
   draft,
   setDraft,
   initialSnapshot,
+  confidenceMap,
+  initialConfidenceSnapshot,
   rawTextPreview,
   ocrModel,
   isScanning,
@@ -55,7 +197,89 @@ export const Step2OcrReview: React.FC<Step2OcrReviewProps> = ({
   const isKm = lang === 'km';
   const isKo = lang === 'ko';
 
-  // Build available document tabs; default to ARC Back or TOPIK if ARC Front has fewer issues, or first available
+  // Track which fields the user has manually edited in Step 2
+  const [editedKeys, setEditedKeys] = useState<Set<OcrConfidenceKey>>(() => new Set());
+  const [fieldFilter, setFieldFilter] = useState<FieldFilterMode>('all');
+
+  // Clear manual edit flags when a fresh OCR rescan updates initialConfidenceSnapshot
+  useEffect(() => {
+    setEditedKeys(new Set());
+  }, [initialConfidenceSnapshot]);
+
+  const markEdited = (key: OcrConfidenceKey) => {
+    setEditedKeys((prev) => {
+      if (prev.has(key)) return prev;
+      const next = new Set(prev);
+      next.add(key);
+      return next;
+    });
+  };
+
+  // Live calibrated confidence map combining initial OCR confidence, structural validation, and user edits
+  const liveConfidence = useMemo<OcrFieldConfidenceMap>(() => {
+    const presetSource =
+      ocrModel === 'sample-preset' || ocrModel === 'svg-fallback' ? 'svg-preset' : 'tesseract';
+    return evaluateDraftConfidence(draft, confidenceMap, editedKeys, presetSource);
+  }, [draft, confidenceMap, editedKeys, ocrModel]);
+
+  const confidenceStats = useMemo(() => {
+    let sum = 0;
+    let high = 0;
+    let review = 0;
+    let lowOrMissing = 0;
+    for (const key of ALL_CONFIDENCE_KEYS) {
+      const c = liveConfidence[key];
+      const s = c?.score ?? 0;
+      sum += s;
+      const tier = getConfidenceTier(c);
+      if (tier === 'high' || tier === 'manual') high++;
+      else if (tier === 'medium') review++;
+      else lowOrMissing++;
+    }
+    const avg = Math.round(sum / ALL_CONFIDENCE_KEYS.length);
+    return {
+      avg,
+      high,
+      review,
+      lowOrMissing,
+      needsAttention: review + lowOrMissing,
+    };
+  }, [liveConfidence]);
+
+  const shouldShowField = (key: OcrConfidenceKey): boolean => {
+    if (fieldFilter === 'all') return true;
+    const tier = getConfidenceTier(liveConfidence[key]);
+    return tier === 'medium' || tier === 'low' || tier === 'missing';
+  };
+
+  const getFieldSurfaceClass = (key: OcrConfidenceKey, focusColor: string = 'focus:ring-indigo-500'): string => {
+    const tier = getConfidenceTier(liveConfidence[key]);
+    if (tier === 'low' || tier === 'missing') {
+      return 'border-rose-400 bg-rose-50/40 focus:ring-rose-500 focus:border-rose-500';
+    }
+    if (tier === 'medium') {
+      return 'border-amber-400 bg-amber-50/40 focus:ring-amber-500 focus:border-amber-500';
+    }
+    if (tier === 'manual') {
+      return `border-indigo-300 bg-indigo-50/20 ${focusColor}`;
+    }
+    return `border-slate-300 bg-white ${focusColor}`;
+  };
+
+  const renderFieldReasonHint = (key: OcrConfidenceKey) => {
+    const c = liveConfidence[key];
+    const tier = getConfidenceTier(c);
+    if (tier === 'high' || tier === 'manual' || !c?.reason) return null;
+    const colorClass = tier === 'medium' ? 'text-amber-700' : 'text-rose-700';
+    return (
+      <p className={`text-[11px] font-medium flex items-center gap-1 pt-0.5 ${colorClass}`}>
+        <AlertTriangle className="w-3 h-3 shrink-0" aria-hidden="true" />
+        <span>{c.reason}</span>
+      </p>
+    );
+  };
+
+  // Build available document tabs
   const availableDocs = useMemo(() => {
     const items: Array<{ id: DocTabId; label: string; url: string; fileName?: string }> = [];
     if (docs.arcFront) {
@@ -99,7 +323,6 @@ export const Step2OcrReview: React.FC<Step2OcrReviewProps> = ({
   const [pdfPreviewCache, setPdfPreviewCache] = useState<Record<string, string>>({});
   const [isRenderingPdf, setIsRenderingPdf] = useState<boolean>(false);
 
-  // Keep selectedDocTab valid when availableDocs changes
   useEffect(() => {
     if (availableDocs.length === 0) return;
     if (!availableDocs.some((d) => d.id === selectedDocTab)) {
@@ -112,7 +335,6 @@ export const Step2OcrReview: React.FC<Step2OcrReviewProps> = ({
   const activeIsPdf = isPdfDataUrl(activeUrl);
   const resolvedPreviewSrc = activeIsPdf ? pdfPreviewCache[activeUrl] || '' : activeUrl;
 
-  // Rasterize PDF preview when user switches to a PDF source
   useEffect(() => {
     if (!activeUrl || !activeIsPdf || pdfPreviewCache[activeUrl]) return;
     let cancelled = false;
@@ -144,6 +366,7 @@ export const Step2OcrReview: React.FC<Step2OcrReviewProps> = ({
   }, [draft.docVerificationNo]);
 
   const handleDocPartInput = (index: number, rawVal: string) => {
+    markEdited('docVerificationNo');
     const digits = rawVal.replace(/[^0-9]/g, '');
     if (digits.length === 16 && index === 0) {
       setDraft((prev) => ({
@@ -164,42 +387,54 @@ export const Step2OcrReview: React.FC<Step2OcrReviewProps> = ({
 
   const matchedOffice = useMemo(() => findOfficeByAddress(draft.address || ''), [draft.address]);
 
-  const criticalChecks = [
+  const criticalChecks: Array<{
+    key: string;
+    confKey: OcrConfidenceKey;
+    label: string;
+    ok: boolean;
+    tab: DocTabId;
+  }> = [
     {
       key: 'name',
+      confKey: 'name',
       label: isKm ? 'ឈ្មោះ (성명)' : isKo ? '성명' : 'Name',
       ok: Boolean(draft.name && draft.name.trim().length >= 2),
-      tab: 'arcFront' as DocTabId,
+      tab: 'arcFront',
     },
     {
       key: 'arc',
+      confKey: 'regNumber',
       label: isKm ? 'លេខ ARC' : isKo ? '등록번호' : 'ARC No.',
       ok: Boolean((draft.regNumber1 || '').length === 6 && (draft.regNumber2 || '').length === 7),
-      tab: 'arcFront' as DocTabId,
+      tab: 'arcFront',
     },
     {
       key: 'address',
+      confKey: 'address',
       label: isKm ? '체류지 (អាសយដ្ឋាន)' : isKo ? '체류지' : 'Address (체류지)',
       ok: Boolean(draft.address && draft.address.trim().length >= 5),
-      tab: 'arcBack' as DocTabId,
+      tab: 'arcBack',
     },
     {
       key: 'examDate',
+      confKey: 'examDate',
       label: isKm ? '시험일 (ថ្ងៃប្រឡង)' : isKo ? '시험일' : 'Exam Date',
       ok: Boolean(draft.examDate && /^\d{4}-\d{2}-\d{2}$/.test(draft.examDate)),
-      tab: 'topik' as DocTabId,
+      tab: 'topik',
     },
     {
       key: 'validUntil',
+      confKey: 'validUntil',
       label: isKm ? '성적유효기간 (សុពលភាព)' : isKo ? '성적유효기간' : 'Valid Until',
       ok: Boolean(draft.validUntil && /^\d{4}-\d{2}-\d{2}$/.test(draft.validUntil)),
-      tab: 'topik' as DocTabId,
+      tab: 'topik',
     },
     {
       key: 'round',
+      confKey: 'round',
       label: isKm ? '회 (លើកទី)' : isKo ? '회차' : 'Round (회)',
       ok: Boolean(draft.round && /^\d{1,3}$/.test(String(draft.round).trim())),
-      tab: 'topik' as DocTabId,
+      tab: 'topik',
     },
   ];
 
@@ -217,10 +452,10 @@ export const Step2OcrReview: React.FC<Step2OcrReviewProps> = ({
       ? 'OCR 추출 데이터 확인 및 수동 편집'
       : 'Verify & Edit Extracted OCR Data Before Form Injection',
     subtitle: isKm
-      ? 'ពិនិត្យផ្ទៀងផ្ទាត់ទិន្នន័យដែលប្រព័ន្ធទាញយកបាន (រួមមាន 체류지, 시험일, 성적유효기간, 회) ធៀបនឹងរូបភាពឯកសារដើម រួចចុចបញ្ជាក់ដើម្បីបញ្ចូលទៅក្នុងពាក្យសុំផ្លូវការ។'
+      ? 'ពិនិត្យកម្រិតទំនុកចិត្ត OCR (Confidence Score) នៅជាប់ប្រអប់ទិន្នន័យនីមួយៗ រួចកែសម្រួលចំណុចដែលមានពណ៌លឿង ឬក្រហម ធៀបនឹងរូបភាពឯកសារដើម។'
       : isKo
-      ? '업로드한 원본 서류와 추출된 텍스트(체류지, 시험일, 성적유효기간, 회차 등)를 나란히 비교·수정한 뒤 공식 신청서에 반영하세요.'
-      : 'Compare extracted OCR fields (체류지, 시험일, 성적유효기간, 회, etc.) side-by-side with your uploaded documents, make any corrections, and confirm injection into the official application form.',
+      ? '각 항목 옆의 OCR 신뢰도 점수(Confidence Score)를 확인하고, 주황색·붉은색으로 표시된 부분을 원본 서류와 비교해 수정하세요.'
+      : 'Inspect the OCR Confidence Score next to each extracted field, correct any amber or rose highlighted entries against your document preview, and confirm injection.',
     rescanBtn: isScanning
       ? isKm
         ? 'កំពុងស្កេន OCR...'
@@ -255,6 +490,22 @@ export const Step2OcrReview: React.FC<Step2OcrReviewProps> = ({
       : 'Inspect Raw OCR Text',
   };
 
+  const showGroup1 =
+    shouldShowField('name') ||
+    shouldShowField('regNumber') ||
+    shouldShowField('gender') ||
+    shouldShowField('nationality') ||
+    shouldShowField('visaStatus');
+  const showGroup2 = shouldShowField('address');
+  const showGroup3 =
+    shouldShowField('docVerificationNo') ||
+    shouldShowField('examNumber') ||
+    shouldShowField('round') ||
+    shouldShowField('examDate') ||
+    shouldShowField('validUntil') ||
+    shouldShowField('grade');
+  const showGroup4 = shouldShowField('passportNo') || shouldShowField('passportExpiry');
+
   return (
     <div className="space-y-6 pb-14">
       {/* Header Bar */}
@@ -263,14 +514,18 @@ export const Step2OcrReview: React.FC<Step2OcrReviewProps> = ({
           <div className="space-y-1">
             <div className="flex flex-wrap items-center gap-2 text-xs font-semibold text-indigo-700">
               <span>{copy.stepTag}</span>
-              <span className="text-slate-300">·</span>
-              <span className="font-mono text-[11px] text-slate-500 tabular-nums">
+              <span aria-hidden="true" className="text-slate-300">·</span>
+              <span className="font-mono text-[11px] text-slate-600 tabular-nums">
                 {readyCount}/{criticalChecks.length} {isKm ? 'ចំណុចសំខាន់រួចរាល់' : isKo ? '핵심 항목 확인' : 'key fields ready'}
+              </span>
+              <span aria-hidden="true" className="text-slate-300">·</span>
+              <span className="font-mono text-[11px] text-slate-700 tabular-nums">
+                {isKm ? 'ទំនុកចិត្ត OCR មធ្យម' : isKo ? '평균 OCR 신뢰도' : 'Avg OCR Confidence'}: {confidenceStats.avg}%
               </span>
               {ocrModel && (
                 <>
-                  <span className="text-slate-300">·</span>
-                  <span className="text-[11px] font-mono text-slate-500">Engine: {ocrModel}</span>
+                  <span aria-hidden="true" className="text-slate-300">·</span>
+                  <span className="text-[11px] font-mono text-slate-500">{ocrModel}</span>
                 </>
               )}
             </div>
@@ -296,7 +551,10 @@ export const Step2OcrReview: React.FC<Step2OcrReviewProps> = ({
             {initialSnapshot && (
               <button
                 type="button"
-                onClick={() => setDraft(initialSnapshot)}
+                onClick={() => {
+                  setDraft(initialSnapshot);
+                  setEditedKeys(new Set());
+                }}
                 className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-50 text-slate-700 border border-slate-300 text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
               >
                 <RotateCcw className="w-3.5 h-3.5 text-slate-500" />
@@ -306,27 +564,92 @@ export const Step2OcrReview: React.FC<Step2OcrReviewProps> = ({
           </div>
         </div>
 
-        {/* Interactive Readiness Strip */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 pt-2 border-t border-slate-100">
-          {criticalChecks.map((item) => (
+        {/* Confidence Summary & Filter Bar */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-3 border-t border-slate-100">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-600">
+            <span className="inline-flex items-center gap-1.5 font-medium text-emerald-700 tabular-nums">
+              <CheckCircle2 className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+              {confidenceStats.high} {isKm ? 'ច្បាស់ (≥85%)' : isKo ? '높음 (≥85%)' : 'High (≥85%)'}
+            </span>
+            <span aria-hidden="true" className="text-slate-300">·</span>
+            <span className="inline-flex items-center gap-1.5 font-medium text-amber-700 tabular-nums">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+              {confidenceStats.review} {isKm ? 'គួរពិនិត្យ (60–84%)' : isKo ? '확인 권장 (60–84%)' : 'Review (60–84%)'}
+            </span>
+            <span aria-hidden="true" className="text-slate-300">·</span>
+            <span className="inline-flex items-center gap-1.5 font-medium text-rose-700 tabular-nums">
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+              {confidenceStats.lowOrMissing} {isKm ? 'ទាប / ទទេ (<60%)' : isKo ? '낮음·누락 (<60%)' : 'Low / Missing (<60%)'}
+            </span>
+          </div>
+
+          <div className="inline-flex items-center gap-1 p-1 bg-slate-100 rounded-lg self-start sm:self-auto">
             <button
-              key={item.key}
               type="button"
-              onClick={() => setSelectedDocTab(item.tab)}
-              className={`px-3 py-2 rounded-lg border text-left text-xs transition-colors flex items-center justify-between gap-2 cursor-pointer ${
-                item.ok
-                  ? 'bg-emerald-50/70 border-emerald-200 text-emerald-950 hover:bg-emerald-50'
-                  : 'bg-amber-50 border-amber-300 text-amber-950 hover:bg-amber-100/70'
+              onClick={() => setFieldFilter('all')}
+              className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors cursor-pointer whitespace-nowrap shrink-0 tabular-nums ${
+                fieldFilter === 'all'
+                  ? 'bg-white text-slate-900 shadow-2xs'
+                  : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              <span className="font-semibold truncate">{item.label}</span>
-              {item.ok ? (
-                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-              ) : (
-                <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-              )}
+              {isKm
+                ? `គ្រប់ប្រអប់ (${ALL_CONFIDENCE_KEYS.length})`
+                : isKo
+                ? `전체 항목 (${ALL_CONFIDENCE_KEYS.length})`
+                : `All Fields (${ALL_CONFIDENCE_KEYS.length})`}
             </button>
-          ))}
+            <button
+              type="button"
+              onClick={() => setFieldFilter('review')}
+              className={`px-3 py-1.5 text-xs font-semibold rounded-md transition-colors cursor-pointer whitespace-nowrap shrink-0 tabular-nums ${
+                fieldFilter === 'review'
+                  ? 'bg-white text-slate-900 shadow-2xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              {isKm
+                ? `ត្រូវការពិនិត្យ (${confidenceStats.needsAttention})`
+                : isKo
+                ? `수정·확인 필요 (${confidenceStats.needsAttention})`
+                : `Needs Review (${confidenceStats.needsAttention})`}
+            </button>
+          </div>
+        </div>
+
+        {/* Interactive Readiness Strip */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2 pt-2 border-t border-slate-100">
+          {criticalChecks.map((item) => {
+            const confScore = liveConfidence[item.confKey]?.score ?? 0;
+            const tier = getConfidenceTier(liveConfidence[item.confKey]);
+            const isHealthy = item.ok && (tier === 'high' || tier === 'manual');
+            return (
+              <button
+                key={item.key}
+                type="button"
+                onClick={() => setSelectedDocTab(item.tab)}
+                className={`px-3 py-2 rounded-lg border text-left text-xs transition-colors flex items-center justify-between gap-2 cursor-pointer ${
+                  isHealthy
+                    ? 'bg-emerald-50/70 border-emerald-200 text-emerald-950 hover:bg-emerald-50'
+                    : tier === 'medium' && item.ok
+                    ? 'bg-amber-50 border-amber-300 text-amber-950 hover:bg-amber-100/70'
+                    : 'bg-rose-50/70 border-rose-300 text-rose-950 hover:bg-rose-100/60'
+                }`}
+              >
+                <div className="min-w-0">
+                  <div className="font-semibold truncate">{item.label}</div>
+                  <div className="text-[10px] font-mono tabular-nums opacity-80">{confScore}%</div>
+                </div>
+                {isHealthy ? (
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                ) : (
+                  <AlertTriangle
+                    className={`w-3.5 h-3.5 shrink-0 ${tier === 'medium' && item.ok ? 'text-amber-600' : 'text-rose-600'}`}
+                  />
+                )}
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -449,389 +772,532 @@ export const Step2OcrReview: React.FC<Step2OcrReviewProps> = ({
           </div>
         </div>
 
-        {/* Right Column: Editable Verified Fields */}
+        {/* Right Column: Editable Verified Fields with Confidence Scores */}
         <div className="lg:col-span-7 bg-white rounded-2xl border border-slate-200 shadow-xs divide-y divide-slate-200">
-          {/* Group 1: ARC Front / Applicant Identity */}
-          <section className="p-5 sm:p-6 space-y-4">
-            <div className="flex items-center justify-between gap-2">
-              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                <UserCheck className="w-4 h-4 text-indigo-600 shrink-0" />
-                <span>
+          {fieldFilter === 'review' && confidenceStats.needsAttention === 0 && (
+            <div className="p-8 text-center space-y-3">
+              <div className="w-10 h-10 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-600 flex items-center justify-center mx-auto">
+                <ShieldCheck className="w-5 h-5" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-sm font-bold text-slate-900">
                   {isKm
-                    ? '១. ព័ត៌មានផ្ទាល់ខ្លួន & កាត ARC ខាងមុខ (성명 / 외국인등록번호)'
+                    ? 'គ្រប់ប្រអប់ទិន្នន័យសុទ្ធតែមានកម្រិតទំនុកចិត្តខ្ពស់!'
                     : isKo
-                    ? '1. 인적사항 및 외국인등록증 앞면'
-                    : '1. Identity & ARC Front Information'}
-                </span>
-              </h3>
-              <button
-                type="button"
-                onClick={() => setSelectedDocTab('arcFront')}
-                className="text-[11px] font-semibold text-indigo-600 hover:underline cursor-pointer whitespace-nowrap"
-              >
-                {isKm ? 'មើលរូប ARC មុខ' : isKo ? '앞면 보기' : 'View ARC Front'}
-              </button>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {/* Full Name */}
-              <div className="sm:col-span-2 space-y-1">
-                <label className="block text-xs font-semibold text-slate-700">
-                  {isKm ? 'ឈ្មោះពេញជាអក្សរឡាតាំង (성명)' : isKo ? '성명 (영문 대문자)' : 'Full Name (성명)'}
-                </label>
-                <input
-                  type="text"
-                  value={draft.name || ''}
-                  placeholder="EANG VEASNA"
-                  onChange={(e) => setDraft((p) => ({ ...p, name: e.target.value.toUpperCase() }))}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm font-semibold text-slate-900 uppercase focus:outline-hidden focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-                />
-              </div>
-
-              {/* ARC Number */}
-              <div className="space-y-1">
-                <label className="block text-xs font-semibold text-slate-700">
-                  {isKm ? 'លេខកាតស្នាក់នៅ ARC (외국인등록번호)' : isKo ? '외국인등록번호 (13자리)' : 'ARC Registration No.'}
-                </label>
-                <div className="flex items-center gap-1.5">
-                  <input
-                    type="text"
-                    maxLength={6}
-                    value={draft.regNumber1 || ''}
-                    placeholder="YYMMDD"
-                    onChange={(e) =>
-                      setDraft((p) => ({ ...p, regNumber1: e.target.value.replace(/[^0-9]/g, '').slice(0, 6) }))
-                    }
-                    className="w-full px-2.5 py-2 rounded-lg border border-slate-300 text-sm font-mono font-semibold text-center tabular-nums text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-indigo-500"
-                  />
-                  <span className="text-slate-400 font-bold">-</span>
-                  <input
-                    type="text"
-                    maxLength={7}
-                    value={draft.regNumber2 || ''}
-                    placeholder="5XXXXXX"
-                    onChange={(e) => {
-                      const val = e.target.value.replace(/[^0-9]/g, '').slice(0, 7);
-                      const d = val.charAt(0);
-                      const inferredGender = ['2', '4', '6', '8'].includes(d)
-                        ? '여'
-                        : ['1', '3', '5', '7'].includes(d)
-                        ? '남'
-                        : draft.gender;
-                      setDraft((p) => ({ ...p, regNumber2: val, gender: inferredGender }));
-                    }}
-                    className="w-full px-2.5 py-2 rounded-lg border border-slate-300 text-sm font-mono font-semibold text-center tabular-nums text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-indigo-500"
-                  />
-                </div>
-              </div>
-
-              {/* Gender */}
-              <div className="space-y-1">
-                <label className="block text-xs font-semibold text-slate-700">
-                  {isKm ? 'ភេទ (성별)' : isKo ? '성별' : 'Gender (성별)'}
-                </label>
-                <select
-                  value={draft.gender || ''}
-                  onChange={(e) => setDraft((p) => ({ ...p, gender: e.target.value as '남' | '여' | '' }))}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm font-semibold text-slate-900 bg-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500 cursor-pointer"
-                >
-                  <option value="">-- {isKm ? 'ជ្រើសរើស' : isKo ? '선택' : 'Select'} --</option>
-                  <option value="남">남 (Male / ប្រុស)</option>
-                  <option value="여">여 (Female / ស្រី)</option>
-                </select>
-              </div>
-
-              {/* Nationality */}
-              <div className="space-y-1">
-                <label className="block text-xs font-semibold text-slate-700">
-                  {isKm ? 'សញ្ជាតិ (국적)' : isKo ? '국적' : 'Nationality (국적)'}
-                </label>
-                <input
-                  type="text"
-                  value={draft.nationality || ''}
-                  placeholder="Cambodia"
-                  onChange={(e) => setDraft((p) => ({ ...p, nationality: e.target.value }))}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm font-semibold text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-indigo-500"
-                />
-              </div>
-
-              {/* Visa Status */}
-              <div className="space-y-1">
-                <label className="block text-xs font-semibold text-slate-700">
-                  {isKm ? 'ប្រភេទទិដ្ឋាការ (체류자격)' : isKo ? '체류자격' : 'Visa Status (체류자격)'}
-                </label>
-                <select
-                  value={draft.visaStatus || ''}
-                  onChange={(e) => setDraft((p) => ({ ...p, visaStatus: e.target.value }))}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm font-semibold text-slate-900 bg-white focus:outline-hidden focus:ring-2 focus:ring-indigo-500 cursor-pointer"
-                >
-                  <option value="">-- {isKm ? 'ជ្រើសរើសវីសា' : isKo ? '체류자격 선택' : 'Select Visa'} --</option>
-                  {draft.visaStatus && !ALL_VISA_CODES.includes(draft.visaStatus) && (
-                    <option value={draft.visaStatus}>{draft.visaStatus}</option>
-                  )}
-                  {KOREAN_VISA_GROUPS.map((group) => (
-                    <optgroup key={group.groupName} label={group.groupNameKo}>
-                      {group.items.map((item) => (
-                        <option key={item.code} value={item.code}>
-                          {item.labelKo}
-                        </option>
-                      ))}
-                    </optgroup>
-                  ))}
-                </select>
-              </div>
-            </div>
-          </section>
-
-          {/* Group 2: ARC Back / 체류지 */}
-          <section className="p-5 sm:p-6 space-y-3">
-            <div className="flex items-center justify-between gap-2">
-              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                <MapPin className="w-4 h-4 text-blue-600 shrink-0" />
-                <span>
+                    ? '모든 추출 항목의 신뢰도가 높습니다!'
+                    : 'All extracted fields have high confidence!'}
+                </h3>
+                <p className="text-xs text-slate-600">
                   {isKm
-                    ? '២. អាសយដ្ឋានស្នាក់នៅលើកាត ARC ខាងក្រោយ (체류지)'
+                    ? 'មិនមានទិន្នន័យកម្រិតទាប ឬខ្វះចន្លោះត្រូវការកែសម្រួលបន្ថែមទេ។'
                     : isKo
-                    ? '2. 외국인등록증 뒷면 체류지 (최신 신고일 기준)'
-                    : '2. Residence Address from ARC Back (체류지)'}
-                </span>
-              </h3>
-              <button
-                type="button"
-                onClick={() => setSelectedDocTab('arcBack')}
-                className="text-[11px] font-semibold text-blue-600 hover:underline cursor-pointer whitespace-nowrap"
-              >
-                {isKm ? 'មើលរូប ARC ក្រោយ' : isKo ? '뒷면 보기' : 'View ARC Back'}
-              </button>
-            </div>
-
-            <div className="space-y-2">
-              <label className="block text-xs font-semibold text-slate-700">
-                체류지 ({isKm ? 'អាសយដ្ឋានពេញលេញជាភាសាកូរ៉េ — ជួរចុងក្រោយថ្មីបំផុត' : isKo ? '최신 체류지 도로명 주소' : 'Full Korean Residence Address'})
-              </label>
-              <textarea
-                rows={2}
-                value={draft.address || ''}
-                placeholder="예: 경기도 안산시 단원구 원곡로 12, 101호"
-                onChange={(e) => setDraft((p) => ({ ...p, address: e.target.value }))}
-                className={`w-full px-3 py-2 rounded-lg border text-sm font-semibold text-slate-900 focus:outline-hidden focus:ring-2 ${
-                  draft.address && draft.address.trim().length >= 5
-                    ? 'border-slate-300 focus:ring-blue-500'
-                    : 'border-amber-400 bg-amber-50/40 focus:ring-amber-500'
-                }`}
-              />
-
-              {matchedOffice ? (
-                <p className="text-xs text-emerald-700 font-medium flex items-center gap-1.5">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-                  <span>
-                    {isKm ? 'ការិយាល័យទទួលបន្ទុក៖' : isKo ? '관할 출입국관서:' : 'Jurisdiction:'}{' '}
-                    <strong className="font-semibold">{matchedOffice.name}</strong> ({matchedOffice.email})
-                  </span>
+                    ? '수동 확인이 필요한 저신뢰·누락 항목이 없습니다.'
+                    : 'No low-confidence or missing fields require attention.'}
                 </p>
-              ) : (
-                <p className="text-xs text-amber-700 font-medium flex items-center gap-1.5">
-                  <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+              </div>
+              <button
+                type="button"
+                onClick={() => setFieldFilter('all')}
+                className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold transition-colors cursor-pointer"
+              >
+                {isKm ? 'បង្ហាញគ្រប់ប្រអប់ទាំងអស់' : isKo ? '전체 항목 보기' : 'Show All Fields'}
+              </button>
+            </div>
+          )}
+
+          {/* Group 1: ARC Front / Applicant Identity */}
+          {showGroup1 && (
+            <section className="p-5 sm:p-6 space-y-4">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <UserCheck className="w-4 h-4 text-indigo-600 shrink-0" />
                   <span>
                     {isKm
-                      ? 'បើប្រអប់ 체류지 ទទេ ឬខុសអក្សរ សូមមើលរូបកាត ARC ខាងក្រោយនៅខាងឆ្វេង រួចវាយកែតម្រូវដោយផ្ទាល់។'
+                      ? '១. ព័ត៌មានផ្ទាល់ខ្លួន & កាត ARC ខាងមុខ (성명 / 외국인등록번호)'
                       : isKo
-                      ? '체류지가 비어 있거나 오인식된 경우 왼쪽 등록증 뒷면 이미지를 보고 직접 수정해 주세요.'
-                      : 'If 체류지 is missing or incomplete, check the ARC Back preview on the left and enter it directly.'}
+                      ? '1. 인적사항 및 외국인등록증 앞면'
+                      : '1. Identity & ARC Front Information'}
                   </span>
-                </p>
-              )}
-            </div>
-          </section>
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setSelectedDocTab('arcFront')}
+                  className="text-[11px] font-semibold text-indigo-600 hover:underline cursor-pointer whitespace-nowrap"
+                >
+                  {isKm ? 'មើលរូប ARC មុខ' : isKo ? '앞면 보기' : 'View ARC Front'}
+                </button>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {/* Full Name */}
+                {shouldShowField('name') && (
+                  <div className="sm:col-span-2 space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="block text-xs font-semibold text-slate-700">
+                        {isKm ? 'ឈ្មោះពេញជាអក្សរឡាតាំង (성명)' : isKo ? '성명 (영문 대문자)' : 'Full Name (성명)'}
+                      </label>
+                      <ConfidenceInlineMeter confidence={liveConfidence.name} lang={lang} />
+                    </div>
+                    <input
+                      type="text"
+                      value={draft.name || ''}
+                      placeholder="EANG VEASNA"
+                      onChange={(e) => {
+                        markEdited('name');
+                        setDraft((p) => ({ ...p, name: e.target.value.toUpperCase() }));
+                      }}
+                      className={`w-full px-3 py-2 rounded-lg border text-sm font-semibold text-slate-900 uppercase focus:outline-hidden focus:ring-2 ${getFieldSurfaceClass('name')}`}
+                    />
+                    {renderFieldReasonHint('name')}
+                  </div>
+                )}
+
+                {/* ARC Number */}
+                {shouldShowField('regNumber') && (
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="block text-xs font-semibold text-slate-700">
+                        {isKm ? 'លេខកាត ARC (외국인등록번호)' : isKo ? '외국인등록번호' : 'ARC Reg. No.'}
+                      </label>
+                      <ConfidenceInlineMeter confidence={liveConfidence.regNumber} lang={lang} />
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <input
+                        type="text"
+                        maxLength={6}
+                        value={draft.regNumber1 || ''}
+                        placeholder="YYMMDD"
+                        onChange={(e) => {
+                          markEdited('regNumber');
+                          setDraft((p) => ({ ...p, regNumber1: e.target.value.replace(/[^0-9]/g, '').slice(0, 6) }));
+                        }}
+                        className={`w-full px-2.5 py-2 rounded-lg border text-sm font-mono font-semibold text-center tabular-nums text-slate-900 focus:outline-hidden focus:ring-2 ${getFieldSurfaceClass('regNumber')}`}
+                      />
+                      <span className="text-slate-400 font-bold">-</span>
+                      <input
+                        type="text"
+                        maxLength={7}
+                        value={draft.regNumber2 || ''}
+                        placeholder="5XXXXXX"
+                        onChange={(e) => {
+                          markEdited('regNumber');
+                          const val = e.target.value.replace(/[^0-9]/g, '').slice(0, 7);
+                          const d = val.charAt(0);
+                          const inferredGender = ['2', '4', '6', '8'].includes(d)
+                            ? '여'
+                            : ['1', '3', '5', '7'].includes(d)
+                            ? '남'
+                            : draft.gender;
+                          setDraft((p) => ({ ...p, regNumber2: val, gender: inferredGender }));
+                        }}
+                        className={`w-full px-2.5 py-2 rounded-lg border text-sm font-mono font-semibold text-center tabular-nums text-slate-900 focus:outline-hidden focus:ring-2 ${getFieldSurfaceClass('regNumber')}`}
+                      />
+                    </div>
+                    {renderFieldReasonHint('regNumber')}
+                  </div>
+                )}
+
+                {/* Gender */}
+                {shouldShowField('gender') && (
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="block text-xs font-semibold text-slate-700">
+                        {isKm ? 'ភេទ (성별)' : isKo ? '성별' : 'Gender (성별)'}
+                      </label>
+                      <ConfidenceInlineMeter confidence={liveConfidence.gender} lang={lang} />
+                    </div>
+                    <select
+                      value={draft.gender || ''}
+                      onChange={(e) => {
+                        markEdited('gender');
+                        setDraft((p) => ({ ...p, gender: e.target.value as '남' | '여' | '' }));
+                      }}
+                      className={`w-full px-3 py-2 rounded-lg border text-sm font-semibold text-slate-900 focus:outline-hidden focus:ring-2 cursor-pointer ${getFieldSurfaceClass('gender')}`}
+                    >
+                      <option value="">-- {isKm ? 'ជ្រើសរើស' : isKo ? '선택' : 'Select'} --</option>
+                      <option value="남">남 (Male / ប្រុស)</option>
+                      <option value="여">여 (Female / ស្រី)</option>
+                    </select>
+                    {renderFieldReasonHint('gender')}
+                  </div>
+                )}
+
+                {/* Nationality */}
+                {shouldShowField('nationality') && (
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="block text-xs font-semibold text-slate-700">
+                        {isKm ? 'សញ្ជាតិ (국적)' : isKo ? '국적' : 'Nationality (국적)'}
+                      </label>
+                      <ConfidenceInlineMeter confidence={liveConfidence.nationality} lang={lang} />
+                    </div>
+                    <input
+                      type="text"
+                      value={draft.nationality || ''}
+                      placeholder="Cambodia"
+                      onChange={(e) => {
+                        markEdited('nationality');
+                        setDraft((p) => ({ ...p, nationality: e.target.value }));
+                      }}
+                      className={`w-full px-3 py-2 rounded-lg border text-sm font-semibold text-slate-900 focus:outline-hidden focus:ring-2 ${getFieldSurfaceClass('nationality')}`}
+                    />
+                    {renderFieldReasonHint('nationality')}
+                  </div>
+                )}
+
+                {/* Visa Status */}
+                {shouldShowField('visaStatus') && (
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="block text-xs font-semibold text-slate-700">
+                        {isKm ? 'វីសា (체류자격)' : isKo ? '체류자격' : 'Visa Status'}
+                      </label>
+                      <ConfidenceInlineMeter confidence={liveConfidence.visaStatus} lang={lang} />
+                    </div>
+                    <select
+                      value={draft.visaStatus || ''}
+                      onChange={(e) => {
+                        markEdited('visaStatus');
+                        setDraft((p) => ({ ...p, visaStatus: e.target.value }));
+                      }}
+                      className={`w-full px-3 py-2 rounded-lg border text-sm font-semibold text-slate-900 focus:outline-hidden focus:ring-2 cursor-pointer ${getFieldSurfaceClass('visaStatus')}`}
+                    >
+                      <option value="">-- {isKm ? 'ជ្រើសរើសវីសា' : isKo ? '체류자격 선택' : 'Select Visa'} --</option>
+                      {draft.visaStatus && !ALL_VISA_CODES.includes(draft.visaStatus) && (
+                        <option value={draft.visaStatus}>{draft.visaStatus}</option>
+                      )}
+                      {KOREAN_VISA_GROUPS.map((group) => (
+                        <optgroup key={group.groupName} label={group.groupNameKo}>
+                          {group.items.map((item) => (
+                            <option key={item.code} value={item.code}>
+                              {item.labelKo}
+                            </option>
+                          ))}
+                        </optgroup>
+                      ))}
+                    </select>
+                    {renderFieldReasonHint('visaStatus')}
+                  </div>
+                )}
+              </div>
+            </section>
+          )}
+
+          {/* Group 2: ARC Back / 체류지 */}
+          {showGroup2 && (
+            <section className="p-5 sm:p-6 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <MapPin className="w-4 h-4 text-blue-600 shrink-0" />
+                  <span>
+                    {isKm
+                      ? '២. អាសយដ្ឋានស្នាក់នៅលើកាត ARC ខាងក្រោយ (체류지)'
+                      : isKo
+                      ? '2. 외국인등록증 뒷면 체류지 (최신 신고일 기준)'
+                      : '2. Residence Address from ARC Back (체류지)'}
+                  </span>
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setSelectedDocTab('arcBack')}
+                  className="text-[11px] font-semibold text-blue-600 hover:underline cursor-pointer whitespace-nowrap"
+                >
+                  {isKm ? 'មើលរូប ARC ក្រោយ' : isKo ? '뒷면 보기' : 'View ARC Back'}
+                </button>
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <label className="block text-xs font-semibold text-slate-700">
+                    체류지 ({isKm ? 'អាសយដ្ឋានពេញលេញជាភាសាកូរ៉េ — ជួរចុងក្រោយថ្មីបំផុត' : isKo ? '최신 체류지 도로명 주소' : 'Full Korean Residence Address'})
+                  </label>
+                  <ConfidenceInlineMeter confidence={liveConfidence.address} lang={lang} />
+                </div>
+                <textarea
+                  rows={2}
+                  value={draft.address || ''}
+                  placeholder="예: 경기도 안산시 단원구 원곡로 12, 101호"
+                  onChange={(e) => {
+                    markEdited('address');
+                    setDraft((p) => ({ ...p, address: e.target.value }));
+                  }}
+                  className={`w-full px-3 py-2 rounded-lg border text-sm font-semibold text-slate-900 focus:outline-hidden focus:ring-2 ${getFieldSurfaceClass('address', 'focus:ring-blue-500')}`}
+                />
+                {renderFieldReasonHint('address')}
+
+                {matchedOffice ? (
+                  <p className="text-xs text-emerald-700 font-medium flex items-center gap-1.5">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                    <span>
+                      {isKm ? 'ការិយាល័យទទួលបន្ទុក៖' : isKo ? '관할 출입국관서:' : 'Jurisdiction:'}{' '}
+                      <strong className="font-semibold">{matchedOffice.name}</strong> ({matchedOffice.email})
+                    </span>
+                  </p>
+                ) : (
+                  <p className="text-xs text-amber-700 font-medium flex items-center gap-1.5">
+                    <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                    <span>
+                      {isKm
+                        ? 'បើប្រអប់ 체류지 ទទេ ឬខុសអក្សរ សូមមើលរូបកាត ARC ខាងក្រោយនៅខាងឆ្វេង រួចវាយកែតម្រូវដោយផ្ទាល់។'
+                        : isKo
+                        ? '체류지가 비어 있거나 오인식된 경우 왼쪽 등록증 뒷면 이미지를 보고 직접 수정해 주세요.'
+                        : 'If 체류지 is missing or incomplete, check the ARC Back preview on the left and enter it directly.'}
+                    </span>
+                  </p>
+                )}
+              </div>
+            </section>
+          )}
 
           {/* Group 3: TOPIK Score Certificate */}
-          <section className="p-5 sm:p-6 space-y-4">
-            <div className="flex items-center justify-between gap-2">
-              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                <Award className="w-4 h-4 text-emerald-600 shrink-0" />
-                <span>
-                  {isKm
-                    ? '៣. ព័ត៌មានសញ្ញាបត្រ TOPIK (시험일 · 성적유효기간 · 회)'
-                    : isKo
-                    ? '3. TOPIK 성적증명서 정보 (시험일 · 유효기간 · 회차)'
-                    : '3. TOPIK Certificate Details (시험일 · 성적유효기간 · 회)'}
-                </span>
-              </h3>
-              <button
-                type="button"
-                onClick={() => setSelectedDocTab('topik')}
-                className="text-[11px] font-semibold text-emerald-700 hover:underline cursor-pointer whitespace-nowrap"
-              >
-                {isKm ? 'មើលរូប TOPIK' : isKo ? '성적증명서 보기' : 'View TOPIK Cert'}
-              </button>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {/* Document Verification No (16 digits) */}
-              <div className="sm:col-span-2 space-y-1">
-                <label className="block text-xs font-semibold text-slate-700">
-                  문서확인번호 ({isKm ? 'លេខផ្ទៀងផ្ទាត់ឯកសារ ១៦ ខ្ទង់' : isKo ? '16자리 문서확인번호' : '16-Digit Verification No.'})
-                </label>
-                <div className="grid grid-cols-4 gap-2">
-                  {[0, 1, 2, 3].map((idx) => (
-                    <input
-                      key={idx}
-                      type="text"
-                      maxLength={idx === 0 ? 16 : 4}
-                      value={docParts[idx]}
-                      placeholder="0000"
-                      onChange={(e) => handleDocPartInput(idx, e.target.value)}
-                      className="w-full px-2 py-2 rounded-lg border border-slate-300 text-center font-mono text-sm font-semibold tabular-nums text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
-                    />
-                  ))}
-                </div>
-              </div>
-
-              {/* Exam Number */}
-              <div className="space-y-1">
-                <label className="block text-xs font-semibold text-slate-700">
-                  수험번호 ({isKm ? 'លេខកូដប្រឡង' : isKo ? '수험번호' : 'Registration No.'})
-                </label>
-                <input
-                  type="text"
-                  value={draft.examNumber || ''}
-                  placeholder="0010197000017"
-                  onChange={(e) =>
-                    setDraft((p) => ({ ...p, examNumber: e.target.value.replace(/[^0-9]/g, '') }))
-                  }
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300 font-mono text-sm font-semibold tabular-nums text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-emerald-500"
-                />
-              </div>
-
-              {/* Round (회) */}
-              <div className="space-y-1">
-                <label className="block text-xs font-semibold text-slate-700">
-                  회 / 회차 ({isKm ? 'ប្រឡងលើកទី' : isKo ? '시험 회차' : 'Test Round'})
-                </label>
-                <div className="relative flex items-center">
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    maxLength={3}
-                    value={draft.round || ''}
-                    placeholder="96"
-                    onChange={(e) =>
-                      setDraft((p) => ({ ...p, round: e.target.value.replace(/[^0-9]/g, '').slice(0, 3) }))
-                    }
-                    className={`w-full pl-3 pr-10 py-2 rounded-lg border font-mono text-sm font-semibold tabular-nums text-slate-900 focus:outline-hidden focus:ring-2 ${
-                      draft.round ? 'border-slate-300 focus:ring-emerald-500' : 'border-amber-400 bg-amber-50/40 focus:ring-amber-500'
-                    }`}
-                  />
-                  <span className="absolute right-3 text-xs font-bold text-slate-500 pointer-events-none">회</span>
-                </div>
-              </div>
-
-              {/* Exam Date (시험일) */}
-              <div className="space-y-1">
-                <label className="block text-xs font-semibold text-slate-700">
-                  시험일 ({isKm ? 'កាលបរិច្ឆេទប្រឡង' : isKo ? '시험일자' : 'Exam Date'})
-                </label>
-                <input
-                  type="date"
-                  value={draft.examDate || ''}
-                  onChange={(e) => setDraft((p) => ({ ...p, examDate: e.target.value }))}
-                  className={`w-full px-3 py-2 rounded-lg border font-mono text-sm font-semibold tabular-nums text-slate-900 focus:outline-hidden focus:ring-2 ${
-                    draft.examDate ? 'border-slate-300 focus:ring-emerald-500' : 'border-amber-400 bg-amber-50/40 focus:ring-amber-500'
-                  }`}
-                />
-              </div>
-
-              {/* Valid Until (성적유효기간) */}
-              <div className="space-y-1">
-                <label className="block text-xs font-semibold text-slate-700">
-                  성적유효기간 ({isKm ? 'ថ្ងៃផុតសុពលភាពពិន្ទុ' : isKo ? '유효기간 만료일' : 'Score Valid Until'})
-                </label>
-                <input
-                  type="date"
-                  value={draft.validUntil || ''}
-                  onChange={(e) => setDraft((p) => ({ ...p, validUntil: e.target.value }))}
-                  className={`w-full px-3 py-2 rounded-lg border font-mono text-sm font-semibold tabular-nums text-rose-700 focus:outline-hidden focus:ring-2 ${
-                    draft.validUntil ? 'border-slate-300 focus:ring-emerald-500' : 'border-amber-400 bg-amber-50/40 focus:ring-amber-500'
-                  }`}
-                />
-              </div>
-
-              {/* Grade (등급) */}
-              <div className="space-y-1">
-                <label className="block text-xs font-semibold text-slate-700">
-                  등급 ({isKm ? 'កម្រិត TOPIK' : isKo ? '취득 등급' : 'TOPIK Grade'})
-                </label>
-                <select
-                  value={draft.grade || ''}
-                  onChange={(e) => setDraft((p) => ({ ...p, grade: e.target.value }))}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300 text-sm font-semibold text-slate-900 bg-white focus:outline-hidden focus:ring-2 focus:ring-emerald-500 cursor-pointer"
+          {showGroup3 && (
+            <section className="p-5 sm:p-6 space-y-4">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <Award className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>
+                    {isKm
+                      ? '៣. ព័ត៌មានសញ្ញាបត្រ TOPIK (시험일 · 성적유효기간 · 회)'
+                      : isKo
+                      ? '3. TOPIK 성적증명서 정보 (시험일 · 유효기간 · 회차)'
+                      : '3. TOPIK Certificate Details (시험일 · 성적유효기간 · 회)'}
+                  </span>
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setSelectedDocTab('topik')}
+                  className="text-[11px] font-semibold text-emerald-700 hover:underline cursor-pointer whitespace-nowrap"
                 >
-                  <option value="">-- {isKm ? 'ជ្រើសរើសកម្រិត' : isKo ? '등급 선택' : 'Select Grade'} --</option>
-                  <option value="1급">1급 (Level 1)</option>
-                  <option value="2급">2급 (Level 2)</option>
-                  <option value="3급">3급 (Level 3)</option>
-                  <option value="4급">4급 (Level 4)</option>
-                  <option value="5급">5급 (Level 5)</option>
-                  <option value="6급">6급 (Level 6)</option>
-                </select>
+                  {isKm ? 'មើលរូប TOPIK' : isKo ? '성적증명서 보기' : 'View TOPIK Cert'}
+                </button>
               </div>
-            </div>
-          </section>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {/* Document Verification No (16 digits) */}
+                {shouldShowField('docVerificationNo') && (
+                  <div className="sm:col-span-2 space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="block text-xs font-semibold text-slate-700">
+                        문서확인번호 ({isKm ? 'លេខផ្ទៀងផ្ទាត់ ១៦ ខ្ទង់' : isKo ? '16자리 문서확인번호' : '16-Digit Verification No.'})
+                      </label>
+                      <ConfidenceInlineMeter confidence={liveConfidence.docVerificationNo} lang={lang} />
+                    </div>
+                    <div className="grid grid-cols-4 gap-2">
+                      {[0, 1, 2, 3].map((idx) => (
+                        <input
+                          key={idx}
+                          type="text"
+                          maxLength={idx === 0 ? 16 : 4}
+                          value={docParts[idx]}
+                          placeholder="0000"
+                          onChange={(e) => handleDocPartInput(idx, e.target.value)}
+                          className={`w-full px-2 py-2 rounded-lg border text-center font-mono text-sm font-semibold tabular-nums text-slate-900 focus:outline-hidden focus:ring-2 ${getFieldSurfaceClass('docVerificationNo', 'focus:ring-emerald-500')}`}
+                        />
+                      ))}
+                    </div>
+                    {renderFieldReasonHint('docVerificationNo')}
+                  </div>
+                )}
+
+                {/* Exam Number */}
+                {shouldShowField('examNumber') && (
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="block text-xs font-semibold text-slate-700">
+                        수험번호 ({isKm ? 'លេខប្រឡង' : isKo ? '수험번호' : 'Exam No.'})
+                      </label>
+                      <ConfidenceInlineMeter confidence={liveConfidence.examNumber} lang={lang} />
+                    </div>
+                    <input
+                      type="text"
+                      value={draft.examNumber || ''}
+                      placeholder="0010197000017"
+                      onChange={(e) => {
+                        markEdited('examNumber');
+                        setDraft((p) => ({ ...p, examNumber: e.target.value.replace(/[^0-9]/g, '') }));
+                      }}
+                      className={`w-full px-3 py-2 rounded-lg border font-mono text-sm font-semibold tabular-nums text-slate-900 focus:outline-hidden focus:ring-2 ${getFieldSurfaceClass('examNumber', 'focus:ring-emerald-500')}`}
+                    />
+                    {renderFieldReasonHint('examNumber')}
+                  </div>
+                )}
+
+                {/* Round (회) */}
+                {shouldShowField('round') && (
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="block text-xs font-semibold text-slate-700">
+                        회 / 회차 ({isKm ? 'លើកទី' : isKo ? '회차' : 'Round'})
+                      </label>
+                      <ConfidenceInlineMeter confidence={liveConfidence.round} lang={lang} />
+                    </div>
+                    <div className="relative flex items-center">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        maxLength={3}
+                        value={draft.round || ''}
+                        placeholder="96"
+                        onChange={(e) => {
+                          markEdited('round');
+                          setDraft((p) => ({ ...p, round: e.target.value.replace(/[^0-9]/g, '').slice(0, 3) }));
+                        }}
+                        className={`w-full pl-3 pr-10 py-2 rounded-lg border font-mono text-sm font-semibold tabular-nums text-slate-900 focus:outline-hidden focus:ring-2 ${getFieldSurfaceClass('round', 'focus:ring-emerald-500')}`}
+                      />
+                      <span className="absolute right-3 text-xs font-bold text-slate-500 pointer-events-none">회</span>
+                    </div>
+                    {renderFieldReasonHint('round')}
+                  </div>
+                )}
+
+                {/* Exam Date (시험일) */}
+                {shouldShowField('examDate') && (
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="block text-xs font-semibold text-slate-700">
+                        시험일 ({isKm ? 'ថ្ងៃប្រឡង' : isKo ? '시험일' : 'Exam Date'})
+                      </label>
+                      <ConfidenceInlineMeter confidence={liveConfidence.examDate} lang={lang} />
+                    </div>
+                    <input
+                      type="date"
+                      value={draft.examDate || ''}
+                      onChange={(e) => {
+                        markEdited('examDate');
+                        setDraft((p) => ({ ...p, examDate: e.target.value }));
+                      }}
+                      className={`w-full px-3 py-2 rounded-lg border font-mono text-sm font-semibold tabular-nums text-slate-900 focus:outline-hidden focus:ring-2 ${getFieldSurfaceClass('examDate', 'focus:ring-emerald-500')}`}
+                    />
+                    {renderFieldReasonHint('examDate')}
+                  </div>
+                )}
+
+                {/* Valid Until (성적유효기간) */}
+                {shouldShowField('validUntil') && (
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="block text-xs font-semibold text-slate-700">
+                        성적유효기간 ({isKm ? 'សុពលភាព' : isKo ? '유효기간' : 'Valid Until'})
+                      </label>
+                      <ConfidenceInlineMeter confidence={liveConfidence.validUntil} lang={lang} />
+                    </div>
+                    <input
+                      type="date"
+                      value={draft.validUntil || ''}
+                      onChange={(e) => {
+                        markEdited('validUntil');
+                        setDraft((p) => ({ ...p, validUntil: e.target.value }));
+                      }}
+                      className={`w-full px-3 py-2 rounded-lg border font-mono text-sm font-semibold tabular-nums text-rose-700 focus:outline-hidden focus:ring-2 ${getFieldSurfaceClass('validUntil', 'focus:ring-emerald-500')}`}
+                    />
+                    {renderFieldReasonHint('validUntil')}
+                  </div>
+                )}
+
+                {/* Grade (등급) */}
+                {shouldShowField('grade') && (
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="block text-xs font-semibold text-slate-700">
+                        등급 ({isKm ? 'កម្រិត' : isKo ? '등급' : 'Grade'})
+                      </label>
+                      <ConfidenceInlineMeter confidence={liveConfidence.grade} lang={lang} />
+                    </div>
+                    <select
+                      value={draft.grade || ''}
+                      onChange={(e) => {
+                        markEdited('grade');
+                        setDraft((p) => ({ ...p, grade: e.target.value }));
+                      }}
+                      className={`w-full px-3 py-2 rounded-lg border text-sm font-semibold text-slate-900 focus:outline-hidden focus:ring-2 cursor-pointer ${getFieldSurfaceClass('grade', 'focus:ring-emerald-500')}`}
+                    >
+                      <option value="">-- {isKm ? 'ជ្រើសរើសកម្រិត' : isKo ? '등급 선택' : 'Select Grade'} --</option>
+                      <option value="1급">1급 (Level 1)</option>
+                      <option value="2급">2급 (Level 2)</option>
+                      <option value="3급">3급 (Level 3)</option>
+                      <option value="4급">4급 (Level 4)</option>
+                      <option value="5급">5급 (Level 5)</option>
+                      <option value="6급">6급 (Level 6)</option>
+                    </select>
+                    {renderFieldReasonHint('grade')}
+                  </div>
+                )}
+              </div>
+            </section>
+          )}
 
           {/* Group 4: Passport */}
-          <section className="p-5 sm:p-6 space-y-4">
-            <div className="flex items-center justify-between gap-2">
-              <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                <BookOpenCheck className="w-4 h-4 text-slate-700 shrink-0" />
-                <span>
-                  {isKm
-                    ? '៤. លិខិតឆ្លងដែន (여권번호 / 유효기간)'
-                    : isKo
-                    ? '4. 여권 정보'
-                    : '4. Passport Details'}
-                </span>
-              </h3>
-              <button
-                type="button"
-                onClick={() => setSelectedDocTab('passport')}
-                className="text-[11px] font-semibold text-slate-600 hover:underline cursor-pointer whitespace-nowrap"
-              >
-                {isKm ? 'មើលរូបលិខិតឆ្លងដែន' : isKo ? '여권 보기' : 'View Passport'}
-              </button>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              <div className="space-y-1">
-                <label className="block text-xs font-semibold text-slate-700">
-                  여권번호 ({isKm ? 'លេខលិខិតឆ្លងដែន' : isKo ? '여권번호' : 'Passport No.'})
-                </label>
-                <input
-                  type="text"
-                  value={draft.passportNo || ''}
-                  placeholder="N01847291"
-                  onChange={(e) =>
-                    setDraft((p) => ({
-                      ...p,
-                      passportNo: e.target.value.replace(/[^A-Za-z0-9]/g, '').toUpperCase(),
-                    }))
-                  }
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300 font-mono text-sm font-semibold tabular-nums uppercase text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-indigo-500"
-                />
+          {showGroup4 && (
+            <section className="p-5 sm:p-6 space-y-4">
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
+                  <BookOpenCheck className="w-4 h-4 text-slate-700 shrink-0" />
+                  <span>
+                    {isKm
+                      ? '៤. លិខិតឆ្លងដែន (여권번호 / 유효기간)'
+                      : isKo
+                      ? '4. 여권 정보'
+                      : '4. Passport Details'}
+                  </span>
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setSelectedDocTab('passport')}
+                  className="text-[11px] font-semibold text-slate-600 hover:underline cursor-pointer whitespace-nowrap"
+                >
+                  {isKm ? 'មើលរូបលិខិតឆ្លងដែន' : isKo ? '여권 보기' : 'View Passport'}
+                </button>
               </div>
 
-              <div className="space-y-1">
-                <label className="block text-xs font-semibold text-slate-700">
-                  여권 유효기간 ({isKm ? 'ថ្ងៃផុតកំណត់' : isKo ? '유효기간' : 'Expiry Date'})
-                </label>
-                <input
-                  type="date"
-                  value={draft.passportExpiry || ''}
-                  onChange={(e) => setDraft((p) => ({ ...p, passportExpiry: e.target.value }))}
-                  className="w-full px-3 py-2 rounded-lg border border-slate-300 font-mono text-sm font-semibold tabular-nums text-slate-900 focus:outline-hidden focus:ring-2 focus:ring-indigo-500"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {shouldShowField('passportNo') && (
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="block text-xs font-semibold text-slate-700">
+                        여권번호 ({isKm ? 'លេខលិខិតឆ្លងដែន' : isKo ? '여권번호' : 'Passport No.'})
+                      </label>
+                      <ConfidenceInlineMeter confidence={liveConfidence.passportNo} lang={lang} />
+                    </div>
+                    <input
+                      type="text"
+                      value={draft.passportNo || ''}
+                      placeholder="N01847291"
+                      onChange={(e) => {
+                        markEdited('passportNo');
+                        setDraft((p) => ({
+                          ...p,
+                          passportNo: e.target.value.replace(/[^A-Za-z0-9]/g, '').toUpperCase(),
+                        }));
+                      }}
+                      className={`w-full px-3 py-2 rounded-lg border font-mono text-sm font-semibold tabular-nums uppercase text-slate-900 focus:outline-hidden focus:ring-2 ${getFieldSurfaceClass('passportNo')}`}
+                    />
+                    {renderFieldReasonHint('passportNo')}
+                  </div>
+                )}
+
+                {shouldShowField('passportExpiry') && (
+                  <div className="space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="block text-xs font-semibold text-slate-700">
+                        여권 유효기간 ({isKm ? 'ថ្ងៃផុតកំណត់' : isKo ? '유효기간' : 'Expiry Date'})
+                      </label>
+                      <ConfidenceInlineMeter confidence={liveConfidence.passportExpiry} lang={lang} />
+                    </div>
+                    <input
+                      type="date"
+                      value={draft.passportExpiry || ''}
+                      onChange={(e) => {
+                        markEdited('passportExpiry');
+                        setDraft((p) => ({ ...p, passportExpiry: e.target.value }));
+                      }}
+                      className={`w-full px-3 py-2 rounded-lg border font-mono text-sm font-semibold tabular-nums text-slate-900 focus:outline-hidden focus:ring-2 ${getFieldSurfaceClass('passportExpiry')}`}
+                    />
+                    {renderFieldReasonHint('passportExpiry')}
+                  </div>
+                )}
               </div>
-            </div>
-          </section>
+            </section>
+          )}
         </div>
       </div>
 

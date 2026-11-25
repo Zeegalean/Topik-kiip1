@@ -10,6 +10,39 @@ import {
   cleanName,
 } from './sanitizers';
 import { extractPdfTextAndImageFromDataUrl, isPdfDataUrl } from './pdfOcrUtils';
+import { findOfficeByAddress } from '../data/immigrationOffices';
+
+export type OcrConfidenceKey =
+  | 'name'
+  | 'regNumber'
+  | 'gender'
+  | 'nationality'
+  | 'visaStatus'
+  | 'address'
+  | 'docVerificationNo'
+  | 'examNumber'
+  | 'round'
+  | 'examDate'
+  | 'validUntil'
+  | 'grade'
+  | 'passportNo'
+  | 'passportExpiry';
+
+export type OcrConfidenceSource =
+  | 'ai-vision'
+  | 'pdf-digital'
+  | 'tesseract'
+  | 'svg-preset'
+  | 'manual'
+  | 'missing';
+
+export interface OcrFieldConfidence {
+  score: number;
+  source: OcrConfidenceSource;
+  reason?: string;
+}
+
+export type OcrFieldConfidenceMap = Partial<Record<OcrConfidenceKey, OcrFieldConfidence>>;
 
 export interface ExtractedDocumentData {
   name?: string | null;
@@ -30,7 +63,7 @@ export interface ExtractedDocumentData {
 }
 
 // In-memory cache so mobile browsers never re-run WASM OCR on the same uploaded image twice
-const ocrTextCache = new Map<string, string>();
+const ocrResultCache = new Map<string, { text: string; confidence: number }>();
 
 // Words commonly printed on ARC / Passport / TOPIK headers that are NOT applicant names
 const NON_NAME_WORDS = new Set([
@@ -248,17 +281,17 @@ async function cropPassportMrzForOcr(dataUrl: string): Promise<string> {
 }
 
 /**
- * Run Tesseract.js OCR on a DataURL in the browser with caching
+ * Run Tesseract.js OCR on a DataURL in the browser with caching and confidence tracking
  */
-async function runBrowserOcrOnImage(
+async function runBrowserOcrWithMeta(
   dataUrl: string | null | undefined,
   langSpec: string = 'kor+eng',
   enhanceContrast: boolean = false
-): Promise<string> {
-  if (!dataUrl) return '';
+): Promise<{ text: string; confidence: number }> {
+  if (!dataUrl) return { text: '', confidence: 0 };
 
   const cacheKey = `${langSpec}:${enhanceContrast ? 'hc' : 'std'}:${dataUrl.length}:${dataUrl.slice(-120)}`;
-  const cached = ocrTextCache.get(cacheKey);
+  const cached = ocrResultCache.get(cacheKey);
   if (cached !== undefined) {
     return cached;
   }
@@ -272,11 +305,12 @@ async function runBrowserOcrOnImage(
         const decoded = dataUrl.includes(';base64,')
           ? decodeURIComponent(escape(atob(payload)))
           : decodeURIComponent(payload);
-        ocrTextCache.set(cacheKey, decoded);
-        return decoded;
+        const entry = { text: decoded, confidence: 98 };
+        ocrResultCache.set(cacheKey, entry);
+        return entry;
       }
     } catch {
-      return '';
+      return { text: '', confidence: 0 };
     }
   }
 
@@ -285,23 +319,26 @@ async function runBrowserOcrOnImage(
     try {
       const pdfParsed = await extractPdfTextAndImageFromDataUrl(dataUrl);
       let visualText = '';
+      let visualConf = 94;
       // If scanned PDF (minimal digital text) and Page 1 rendered to image, also run Tesseract OCR
       if (pdfParsed.imageUrl && pdfParsed.text.trim().length < 80) {
         const processedPdfImg = await preprocessImageForOcr(pdfParsed.imageUrl, enhanceContrast);
         const ocrPromise = Tesseract.recognize(processedPdfImg, langSpec);
-        const timeoutPromise = new Promise<{ data?: { text?: string } }>((resolve) =>
-          setTimeout(() => resolve({ data: { text: '' } }), 35000)
+        const timeoutPromise = new Promise<{ data?: { text?: string; confidence?: number } }>((resolve) =>
+          setTimeout(() => resolve({ data: { text: '', confidence: 0 } }), 35000)
         );
         const result = await Promise.race([ocrPromise, timeoutPromise]);
         visualText = result?.data?.text || '';
+        visualConf = typeof result?.data?.confidence === 'number' ? Math.round(result.data.confidence) : 72;
       }
       const combinedPdfText = [pdfParsed.text, visualText].filter(Boolean).join('\n');
+      const finalConf = pdfParsed.text.trim().length >= 80 ? 95 : visualConf;
       if (combinedPdfText.trim()) {
-        ocrTextCache.set(cacheKey, combinedPdfText);
+        ocrResultCache.set(cacheKey, { text: combinedPdfText, confidence: finalConf });
       }
-      return combinedPdfText;
+      return { text: combinedPdfText, confidence: finalConf };
     } catch {
-      return '';
+      return { text: '', confidence: 0 };
     }
   }
 
@@ -309,19 +346,30 @@ async function runBrowserOcrOnImage(
     const processedUrl = await preprocessImageForOcr(dataUrl, enhanceContrast);
     // Allow 45 seconds so initial kor+eng traineddata CDN download never gets aborted mid-flight
     const ocrPromise = Tesseract.recognize(processedUrl, langSpec);
-    const timeoutPromise = new Promise<{ data?: { text?: string } }>((resolve) =>
-      setTimeout(() => resolve({ data: { text: '' } }), 45000)
+    const timeoutPromise = new Promise<{ data?: { text?: string; confidence?: number } }>((resolve) =>
+      setTimeout(() => resolve({ data: { text: '', confidence: 0 } }), 45000)
     );
     const result = await Promise.race([ocrPromise, timeoutPromise]);
     const text = result?.data?.text || '';
+    const rawConf = typeof result?.data?.confidence === 'number' ? Math.round(result.data.confidence) : 74;
+    const confidence = text.trim() ? Math.max(35, Math.min(96, rawConf)) : 0;
     if (text.trim()) {
-      ocrTextCache.set(cacheKey, text);
+      ocrResultCache.set(cacheKey, { text, confidence });
     }
-    return text;
+    return { text, confidence };
   } catch (err) {
     console.warn('[Client OCR] Tesseract error:', err);
-    return '';
+    return { text: '', confidence: 0 };
   }
+}
+
+async function runBrowserOcrOnImage(
+  dataUrl: string | null | undefined,
+  langSpec: string = 'kor+eng',
+  enhanceContrast: boolean = false
+): Promise<string> {
+  const res = await runBrowserOcrWithMeta(dataUrl, langSpec, enhanceContrast);
+  return res.text;
 }
 
 /**
@@ -1217,6 +1265,7 @@ export async function prepareDocumentForOcrApi(
 
 export interface OcrPipelineResult {
   data: ExtractedDocumentData;
+  confidence: OcrFieldConfidenceMap;
   rawTextPreview: string;
   model: string;
 }
@@ -1285,6 +1334,7 @@ export async function runFullDocumentOcrPipeline(params: {
   };
 
   let serverData: ExtractedDocumentData = {};
+  let serverConfidenceRaw: Record<string, number> = {};
   let serverRawPreview = '';
   let serverModel = '';
 
@@ -1313,6 +1363,9 @@ export async function runFullDocumentOcrPipeline(params: {
         }
         if (result?.model) {
           serverModel = String(result.model);
+        }
+        if (result?.confidence && typeof result.confidence === 'object') {
+          serverConfidenceRaw = result.confidence as Record<string, number>;
         }
         if (result?.success && result?.data && !result?.fallbackMode) {
           serverData = result.data as ExtractedDocumentData;
@@ -1348,6 +1401,11 @@ export async function runFullDocumentOcrPipeline(params: {
   let topikText = mergedPdfTexts.topikCert;
   let passportText = mergedPdfTexts.passport;
 
+  let frontTesseractConf = mergedPdfTexts.arcFront.trim().length > 40 ? 94 : 0;
+  let backTesseractConf = mergedPdfTexts.arcBack.trim().length > 40 ? 94 : 0;
+  let topikTesseractConf = mergedPdfTexts.topikCert.trim().length > 60 ? 95 : 0;
+  let passportTesseractConf = mergedPdfTexts.passport.trim().length > 40 ? 94 : 0;
+
   // Always parse any available PDF/SVG digital text immediately
   const digitalParsed = parseOcrCorpusToData(arcFrontText, arcBackText, topikText, passportText);
   let merged = mergeExtractedDrafts(serverData, digitalParsed);
@@ -1368,21 +1426,33 @@ export async function runFullDocumentOcrPipeline(params: {
   const stillNeedPassport = Boolean(passportSource && !isPdfDataUrl(passportSource) && (!merged.passportNo || !merged.passportExpiry || !merged.name));
 
   if (needFrontOcr && stillNeedFront && frontSource) {
-    const tFront = await runBrowserOcrOnImage(frontSource, 'eng', false);
-    if (tFront) arcFrontText = [arcFrontText, tFront].filter(Boolean).join('\n');
+    const tFront = await runBrowserOcrWithMeta(frontSource, 'eng', false);
+    if (tFront.text) {
+      arcFrontText = [arcFrontText, tFront.text].filter(Boolean).join('\n');
+      frontTesseractConf = Math.max(frontTesseractConf, tFront.confidence);
+    }
   }
   if (needPassportOcr && stillNeedPassport && passportSource) {
-    const tPass = await runBrowserOcrOnImage(passportSource, 'eng', false);
-    if (tPass) passportText = [passportText, tPass].filter(Boolean).join('\n');
+    const tPass = await runBrowserOcrWithMeta(passportSource, 'eng', false);
+    if (tPass.text) {
+      passportText = [passportText, tPass.text].filter(Boolean).join('\n');
+      passportTesseractConf = Math.max(passportTesseractConf, tPass.confidence);
+    }
   }
   if (needBackOcr && stillNeedBack && backSource) {
     // Use kor+eng on ARC Back so road numbers, dash digits, and Hangul district names stay crisp
-    const tBack = await runBrowserOcrOnImage(backSource, 'kor+eng', false);
-    if (tBack) arcBackText = [arcBackText, tBack].filter(Boolean).join('\n');
+    const tBack = await runBrowserOcrWithMeta(backSource, 'kor+eng', false);
+    if (tBack.text) {
+      arcBackText = [arcBackText, tBack.text].filter(Boolean).join('\n');
+      backTesseractConf = Math.max(backTesseractConf, tBack.confidence);
+    }
   }
   if (needTopikOcr && stillNeedTopik && topikSource) {
-    const tTopik = await runBrowserOcrOnImage(topikSource, 'kor+eng', false);
-    if (tTopik) topikText = [topikText, tTopik].filter(Boolean).join('\n');
+    const tTopik = await runBrowserOcrWithMeta(topikSource, 'kor+eng', false);
+    if (tTopik.text) {
+      topikText = [topikText, tTopik.text].filter(Boolean).join('\n');
+      topikTesseractConf = Math.max(topikTesseractConf, tTopik.confidence);
+    }
   }
 
   let localParsed = parseOcrCorpusToData(arcFrontText, arcBackText, topikText, passportText);
@@ -1390,33 +1460,46 @@ export async function runFullDocumentOcrPipeline(params: {
 
   // Targeted high-contrast / MRZ second-pass if key fields are still missing
   let ranSecondPass = false;
+  let usedSecondPassFront = false;
+  let usedSecondPassBack = false;
+  let usedSecondPassTopik = false;
+  let usedSecondPassPassport = false;
+
   if (stillNeedFront && frontSource && (!merged.regNumber1 || !merged.name || !merged.visaStatus)) {
-    const hcFront = await runBrowserOcrOnImage(frontSource, 'eng', true);
-    if (hcFront) {
-      arcFrontText = [arcFrontText, hcFront].filter(Boolean).join('\n');
+    const hcFront = await runBrowserOcrWithMeta(frontSource, 'eng', true);
+    if (hcFront.text) {
+      arcFrontText = [arcFrontText, hcFront.text].filter(Boolean).join('\n');
+      frontTesseractConf = Math.max(frontTesseractConf, Math.max(45, hcFront.confidence - 6));
       ranSecondPass = true;
+      usedSecondPassFront = true;
     }
   }
   if (stillNeedBack && backSource && !merged.address) {
-    const hcBack = await runBrowserOcrOnImage(backSource, 'kor+eng', true);
-    if (hcBack) {
-      arcBackText = [arcBackText, hcBack].filter(Boolean).join('\n');
+    const hcBack = await runBrowserOcrWithMeta(backSource, 'kor+eng', true);
+    if (hcBack.text) {
+      arcBackText = [arcBackText, hcBack.text].filter(Boolean).join('\n');
+      backTesseractConf = Math.max(backTesseractConf, Math.max(45, hcBack.confidence - 8));
       ranSecondPass = true;
+      usedSecondPassBack = true;
     }
   }
   if (stillNeedPassport && passportSource && (!merged.passportNo || !merged.name)) {
     const mrzCropUrl = await cropPassportMrzForOcr(passportSource);
-    const mrzText = await runBrowserOcrOnImage(mrzCropUrl, 'eng', false);
-    if (mrzText) {
-      passportText = [passportText, mrzText].filter(Boolean).join('\n');
+    const mrzRes = await runBrowserOcrWithMeta(mrzCropUrl, 'eng', false);
+    if (mrzRes.text) {
+      passportText = [passportText, mrzRes.text].filter(Boolean).join('\n');
+      passportTesseractConf = Math.max(passportTesseractConf, mrzRes.confidence);
       ranSecondPass = true;
+      usedSecondPassPassport = true;
     }
   }
   if (stillNeedTopik && topikSource && (!merged.examNumber || !merged.examDate || !merged.validUntil || !merged.round)) {
-    const hcTopik = await runBrowserOcrOnImage(topikSource, 'kor+eng', true);
-    if (hcTopik) {
-      topikText = [topikText, hcTopik].filter(Boolean).join('\n');
+    const hcTopik = await runBrowserOcrWithMeta(topikSource, 'kor+eng', true);
+    if (hcTopik.text) {
+      topikText = [topikText, hcTopik.text].filter(Boolean).join('\n');
+      topikTesseractConf = Math.max(topikTesseractConf, Math.max(45, hcTopik.confidence - 6));
       ranSecondPass = true;
+      usedSecondPassTopik = true;
     }
   }
 
@@ -1424,6 +1507,31 @@ export async function runFullDocumentOcrPipeline(params: {
     localParsed = parseOcrCorpusToData(arcFrontText, arcBackText, topikText, passportText);
     merged = mergeExtractedDrafts(merged, localParsed);
   }
+
+  const baseConfidence = buildPipelineConfidenceMap({
+    merged,
+    serverData,
+    digitalParsed,
+    localParsed,
+    serverConfidenceRaw,
+    serverModel,
+    docMetrics: {
+      frontConf: frontTesseractConf,
+      backConf: backTesseractConf,
+      topikConf: topikTesseractConf,
+      passportConf: passportTesseractConf,
+      hasDigitalFront: mergedPdfTexts.arcFront.trim().length > 40,
+      hasDigitalBack: mergedPdfTexts.arcBack.trim().length > 40,
+      hasDigitalTopik: mergedPdfTexts.topikCert.trim().length > 60,
+      hasDigitalPassport: mergedPdfTexts.passport.trim().length > 40,
+      usedSecondPassFront,
+      usedSecondPassBack,
+      usedSecondPassTopik,
+      usedSecondPassPassport,
+    },
+  });
+
+  const confidence = evaluateDraftConfidence(merged, baseConfidence);
 
   const localRawBlocks = [
     arcFrontText ? `[ARC Front]\n${arcFrontText}` : '',
@@ -1441,6 +1549,7 @@ export async function runFullDocumentOcrPipeline(params: {
 
   return {
     data: merged,
+    confidence,
     rawTextPreview,
     model: serverModel || 'browser-ocr',
   };
@@ -1645,3 +1754,498 @@ export function mergeExtractedIntoFormData(
     grade: finalGrade,
   };
 }
+
+function clampConfidenceScore(val: number): number {
+  return Math.max(0, Math.min(100, Math.round(val)));
+}
+
+function hasUsableDocVer(val?: string[] | string | null): boolean {
+  if (Array.isArray(val)) {
+    return val.length === 4 && val.every((p) => /^\d{4}$/.test(p || '')) && val.join('') !== '0000000000000000';
+  }
+  if (typeof val === 'string') {
+    const digits = val.replace(/[^0-9]/g, '');
+    return digits.length === 16 && digits !== '0000000000000000';
+  }
+  return false;
+}
+
+function hasPartialDocVer(val?: string[] | string | null): boolean {
+  if (Array.isArray(val)) {
+    return val.some((p) => (p || '').replace(/[^0-9]/g, '').length > 0 && (p || '') !== '0000');
+  }
+  if (typeof val === 'string') {
+    return val.replace(/[^0-9]/g, '').length > 0;
+  }
+  return false;
+}
+
+export function buildPipelineConfidenceMap(params: {
+  merged: ExtractedDocumentData;
+  serverData: ExtractedDocumentData;
+  digitalParsed: ExtractedDocumentData;
+  localParsed: ExtractedDocumentData;
+  serverConfidenceRaw?: Record<string, number>;
+  serverModel?: string;
+  docMetrics: {
+    frontConf: number;
+    backConf: number;
+    topikConf: number;
+    passportConf: number;
+    hasDigitalFront: boolean;
+    hasDigitalBack: boolean;
+    hasDigitalTopik: boolean;
+    hasDigitalPassport: boolean;
+    usedSecondPassFront: boolean;
+    usedSecondPassBack: boolean;
+    usedSecondPassTopik: boolean;
+    usedSecondPassPassport: boolean;
+  };
+}): OcrFieldConfidenceMap {
+  const {
+    merged,
+    serverData,
+    digitalParsed,
+    localParsed,
+    serverConfidenceRaw = {},
+    serverModel = '',
+    docMetrics,
+  } = params;
+
+  const map: OcrFieldConfidenceMap = {};
+  const isAiModel = Boolean(serverModel && !serverModel.includes('pdf-text') && !serverModel.includes('browser'));
+
+  const pickConfidence = (
+    key: OcrConfidenceKey,
+    hasValue: boolean,
+    fromServer: boolean,
+    fromDigital: boolean,
+    fromLocal: boolean,
+    docTesseractConf: number,
+    usedSecondPass: boolean
+  ): OcrFieldConfidence => {
+    if (!hasValue) {
+      return { score: 0, source: 'missing', reason: 'Not detected in uploaded documents' };
+    }
+
+    const aiRaw = typeof serverConfidenceRaw[key] === 'number' ? serverConfidenceRaw[key] : undefined;
+
+    if (fromServer && isAiModel) {
+      const base = aiRaw !== undefined ? aiRaw : 89;
+      if (fromDigital) {
+        return {
+          score: clampConfidenceScore(Math.max(base, 95)),
+          source: 'ai-vision',
+          reason: 'Confirmed by AI Vision & digital PDF text',
+        };
+      }
+      if (fromLocal) {
+        return {
+          score: clampConfidenceScore(Math.max(base, 92)),
+          source: 'ai-vision',
+          reason: 'Confirmed by AI Vision & local OCR pattern',
+        };
+      }
+      return {
+        score: clampConfidenceScore(base),
+        source: 'ai-vision',
+        reason: base < 80 ? 'AI Vision flagged visual blur or low legibility' : 'Extracted by AI Vision',
+      };
+    }
+
+    if (fromDigital) {
+      return {
+        score: 94,
+        source: 'pdf-digital',
+        reason: 'Extracted from digital PDF text layer',
+      };
+    }
+
+    if (fromLocal) {
+      const rawT = docTesseractConf > 0 ? docTesseractConf : 72;
+      const adjusted = usedSecondPass ? Math.min(rawT, 76) : rawT;
+      return {
+        score: clampConfidenceScore(adjusted),
+        source: 'tesseract',
+        reason: usedSecondPass
+          ? 'Detected only after high-contrast OCR pass — verify carefully'
+          : adjusted < 80
+          ? 'Browser OCR confidence is moderate — verify against document'
+          : 'Extracted via browser OCR',
+      };
+    }
+
+    return {
+      score: 78,
+      source: 'tesseract',
+      reason: 'Extracted from document',
+    };
+  };
+
+  map.name = pickConfidence(
+    'name',
+    Boolean(merged.name && merged.name.trim().length >= 2),
+    Boolean(serverData.name),
+    Boolean(digitalParsed.name),
+    Boolean(localParsed.name),
+    Math.max(docMetrics.frontConf, docMetrics.topikConf, docMetrics.passportConf),
+    docMetrics.usedSecondPassFront && !docMetrics.usedSecondPassPassport
+  );
+
+  map.regNumber = pickConfidence(
+    'regNumber',
+    Boolean((merged.regNumber1 || '').trim() || (merged.regNumber2 || '').trim()),
+    Boolean(serverData.regNumber1 || serverData.regNumber2),
+    Boolean(digitalParsed.regNumber1 || digitalParsed.regNumber2),
+    Boolean(localParsed.regNumber1 || localParsed.regNumber2),
+    docMetrics.frontConf,
+    docMetrics.usedSecondPassFront
+  );
+
+  map.gender = pickConfidence(
+    'gender',
+    Boolean(merged.gender === '남' || merged.gender === '여'),
+    Boolean(serverData.gender),
+    Boolean(digitalParsed.gender),
+    Boolean(localParsed.gender),
+    docMetrics.frontConf,
+    docMetrics.usedSecondPassFront
+  );
+
+  map.nationality = pickConfidence(
+    'nationality',
+    Boolean(merged.nationality && merged.nationality.trim().length >= 2),
+    Boolean(serverData.nationality),
+    Boolean(digitalParsed.nationality),
+    Boolean(localParsed.nationality),
+    Math.max(docMetrics.frontConf, docMetrics.passportConf),
+    docMetrics.usedSecondPassFront
+  );
+
+  map.visaStatus = pickConfidence(
+    'visaStatus',
+    Boolean(merged.visaStatus && merged.visaStatus.trim().length >= 2),
+    Boolean(serverData.visaStatus),
+    Boolean(digitalParsed.visaStatus),
+    Boolean(localParsed.visaStatus),
+    docMetrics.frontConf,
+    docMetrics.usedSecondPassFront
+  );
+
+  map.address = pickConfidence(
+    'address',
+    Boolean(merged.address && merged.address.trim().length >= 5),
+    Boolean(serverData.address),
+    Boolean(digitalParsed.address),
+    Boolean(localParsed.address),
+    docMetrics.backConf,
+    docMetrics.usedSecondPassBack
+  );
+
+  map.docVerificationNo = pickConfidence(
+    'docVerificationNo',
+    hasPartialDocVer(merged.docVerificationNo),
+    hasPartialDocVer(serverData.docVerificationNo),
+    hasPartialDocVer(digitalParsed.docVerificationNo),
+    hasPartialDocVer(localParsed.docVerificationNo),
+    docMetrics.topikConf,
+    docMetrics.usedSecondPassTopik
+  );
+
+  map.examNumber = pickConfidence(
+    'examNumber',
+    Boolean(merged.examNumber && merged.examNumber.trim().length >= 4),
+    Boolean(serverData.examNumber),
+    Boolean(digitalParsed.examNumber),
+    Boolean(localParsed.examNumber),
+    docMetrics.topikConf,
+    docMetrics.usedSecondPassTopik
+  );
+
+  map.round = pickConfidence(
+    'round',
+    Boolean(merged.round && merged.round.trim().length >= 1),
+    Boolean(serverData.round),
+    Boolean(digitalParsed.round),
+    Boolean(localParsed.round),
+    docMetrics.topikConf,
+    docMetrics.usedSecondPassTopik
+  );
+
+  map.examDate = pickConfidence(
+    'examDate',
+    Boolean(merged.examDate && merged.examDate.trim().length >= 8),
+    Boolean(serverData.examDate),
+    Boolean(digitalParsed.examDate),
+    Boolean(localParsed.examDate),
+    docMetrics.topikConf,
+    docMetrics.usedSecondPassTopik
+  );
+
+  map.validUntil = pickConfidence(
+    'validUntil',
+    Boolean(merged.validUntil && merged.validUntil.trim().length >= 8),
+    Boolean(serverData.validUntil),
+    Boolean(digitalParsed.validUntil),
+    Boolean(localParsed.validUntil),
+    docMetrics.topikConf,
+    docMetrics.usedSecondPassTopik
+  );
+
+  map.grade = pickConfidence(
+    'grade',
+    Boolean(merged.grade && merged.grade.trim().length >= 1),
+    Boolean(serverData.grade),
+    Boolean(digitalParsed.grade),
+    Boolean(localParsed.grade),
+    docMetrics.topikConf,
+    docMetrics.usedSecondPassTopik
+  );
+
+  map.passportNo = pickConfidence(
+    'passportNo',
+    Boolean(merged.passportNo && merged.passportNo.trim().length >= 5),
+    Boolean(serverData.passportNo),
+    Boolean(digitalParsed.passportNo),
+    Boolean(localParsed.passportNo),
+    docMetrics.passportConf,
+    docMetrics.usedSecondPassPassport
+  );
+
+  map.passportExpiry = pickConfidence(
+    'passportExpiry',
+    Boolean(merged.passportExpiry && merged.passportExpiry.trim().length >= 8),
+    Boolean(serverData.passportExpiry),
+    Boolean(digitalParsed.passportExpiry),
+    Boolean(localParsed.passportExpiry),
+    docMetrics.passportConf,
+    docMetrics.usedSecondPassPassport
+  );
+
+  return map;
+}
+
+/**
+ * Evaluates and calibrates per-field OCR confidence against structural & cross-field rules.
+ * Used both right after OCR extraction and live inside Step 2 when users inspect or edit fields.
+ */
+export function evaluateDraftConfidence(
+  draft: ExtractedDocumentData,
+  baseConfidence?: OcrFieldConfidenceMap | null,
+  editedKeys?: Set<OcrConfidenceKey> | null,
+  presetSource: OcrConfidenceSource = 'tesseract'
+): OcrFieldConfidenceMap {
+  const out: OcrFieldConfidenceMap = {};
+
+  const resolve = (
+    key: OcrConfidenceKey,
+    hasValue: boolean,
+    validate: (baseScore: number) => { score: number; reason?: string }
+  ): OcrFieldConfidence => {
+    if (!hasValue) {
+      return { score: 0, source: 'missing', reason: 'Field is empty — enter manually from document' };
+    }
+    const isManual = Boolean(editedKeys?.has(key));
+    const existing = baseConfidence?.[key];
+    const source: OcrConfidenceSource = isManual
+      ? 'manual'
+      : existing && existing.source !== 'missing'
+      ? existing.source
+      : presetSource;
+
+    const baseScore = isManual
+      ? 100
+      : existing && existing.score > 0
+      ? existing.score
+      : presetSource === 'svg-preset'
+      ? 96
+      : 82;
+
+    const validated = validate(baseScore);
+    return {
+      score: clampConfidenceScore(validated.score),
+      source,
+      reason: validated.reason || (isManual ? 'Verified by manual edit' : existing?.reason),
+    };
+  };
+
+  // 1. Name
+  const nameVal = (draft.name || '').trim();
+  out.name = resolve('name', nameVal.length > 0 && nameVal !== '0000 0000', (base) => {
+    const words = nameVal.split(/\s+/).filter(Boolean);
+    if (!/^[A-Za-z\s\-'.]+$/.test(nameVal)) {
+      return { score: Math.min(base, 54), reason: 'Contains unexpected characters — verify English spelling' };
+    }
+    if (words.length < 2 || nameVal.length < 4) {
+      return { score: Math.min(base, 64), reason: 'Single word or short name — check surname + given name' };
+    }
+    return { score: base };
+  });
+
+  // 2. ARC Registration Number
+  const r1 = (draft.regNumber1 || '').trim();
+  const r2 = (draft.regNumber2 || '').trim();
+  out.regNumber = resolve('regNumber', r1.length > 0 || r2.length > 0, (base) => {
+    if (!/^\d{6}$/.test(r1) || !/^\d{7}$/.test(r2) || r1 === '000000' || r2 === '0000000') {
+      return { score: Math.min(base, 45), reason: 'Incomplete ARC number (requires 6 + 7 digits)' };
+    }
+    const mm = parseInt(r1.slice(2, 4), 10);
+    const dd = parseInt(r1.slice(4, 6), 10);
+    const firstBack = r2.charAt(0);
+    if (mm < 1 || mm > 12 || dd < 1 || dd > 31 || !['1', '2', '3', '4', '5', '6', '7', '8'].includes(firstBack)) {
+      return { score: Math.min(base, 55), reason: 'Check birth date digits or gender code on ARC front' };
+    }
+    return { score: Math.max(base, editedKeys?.has('regNumber') ? 100 : Math.min(98, base + 2)) };
+  });
+
+  // 3. Gender
+  const genderVal = draft.gender || '';
+  out.gender = resolve('gender', genderVal === '남' || genderVal === '여', (base) => {
+    if (/^\d{7}$/.test(r2)) {
+      const d = r2.charAt(0);
+      const expected = ['2', '4', '6', '8'].includes(d) ? '여' : '남';
+      if (genderVal !== expected) {
+        return { score: 42, reason: 'Gender conflicts with 7th digit of ARC number' };
+      }
+      return { score: Math.max(base, 96) };
+    }
+    return { score: Math.min(base, 84) };
+  });
+
+  // 4. Nationality
+  const natVal = (draft.nationality || '').trim();
+  out.nationality = resolve('nationality', natVal.length >= 2, (base) => {
+    if (natVal.length < 3) {
+      return { score: Math.min(base, 65), reason: 'Verify full country name in English' };
+    }
+    return { score: base };
+  });
+
+  // 5. Visa Status
+  const visaVal = (draft.visaStatus || '').trim();
+  out.visaStatus = resolve('visaStatus', visaVal.length > 0, (base) => {
+    if (!/^[A-Z]-\d{1,2}(?:-[A-Z0-9]{1,3})?$/i.test(visaVal)) {
+      return { score: Math.min(base, 62), reason: 'Unusual visa format — confirm code (e.g. E-9, E-7-4)' };
+    }
+    return { score: base };
+  });
+
+  // 6. Korean Residence Address (체류지)
+  const addrVal = (draft.address || '').trim();
+  out.address = resolve('address', addrVal.length > 0 && !addrVal.startsWith('00000'), (base) => {
+    const matchedOffice = findOfficeByAddress(addrVal);
+    const hasKorean = /[가-힣]/.test(addrVal);
+    const hasRoadOrRegion = /(시|도|군|구|로|길|읍|면|동)/.test(addrVal);
+    const hasDigit = /\d/.test(addrVal);
+    if (!hasKorean || addrVal.length < 8) {
+      return { score: Math.min(base, 46), reason: 'Address looks too short — check ARC Back (체류지)' };
+    }
+    if (!matchedOffice) {
+      return { score: Math.min(base, 64), reason: 'Jurisdiction office not matched — verify 시/도 & 구/군 spelling' };
+    }
+    if (!hasRoadOrRegion || !hasDigit) {
+      return { score: Math.min(base, 72), reason: 'Verify road number and building/unit (동·호)' };
+    }
+    return {
+      score: editedKeys?.has('address') ? 100 : Math.min(97, Math.max(base, 86)),
+      reason: `Matched jurisdiction: ${matchedOffice.name}`,
+    };
+  });
+
+  // 7. TOPIK Document Verification No (16 digits)
+  out.docVerificationNo = resolve('docVerificationNo', hasPartialDocVer(draft.docVerificationNo), (base) => {
+    if (!hasUsableDocVer(draft.docVerificationNo)) {
+      return { score: Math.min(base, 44), reason: 'Requires all 4 blocks × 4 digits (16 digits total)' };
+    }
+    return { score: Math.max(base, editedKeys?.has('docVerificationNo') ? 100 : Math.min(97, base)) };
+  });
+
+  // 8. TOPIK Exam Number
+  const examNoVal = (draft.examNumber || '').trim();
+  out.examNumber = resolve('examNumber', examNoVal.length > 0 && !/^0+$/.test(examNoVal), (base) => {
+    if (!/^\d{10,16}$/.test(examNoVal)) {
+      return { score: Math.min(base, 66), reason: 'TOPIK 수험번호 is typically 11–14 digits — double-check' };
+    }
+    return { score: base };
+  });
+
+  // 9. TOPIK Round (회)
+  const roundVal = (draft.round || '').trim();
+  out.round = resolve('round', roundVal.length > 0 && !/^0+$/.test(roundVal), (base) => {
+    const num = parseInt(roundVal, 10);
+    if (!/^\d{1,3}$/.test(roundVal) || Number.isNaN(num) || num < 1 || num > 300) {
+      return { score: Math.min(base, 48), reason: 'Invalid TOPIK round number (expected 1–300)' };
+    }
+    if (num < 30) {
+      return { score: Math.min(base, 68), reason: 'Older or low round number — verify 제XX회 on certificate' };
+    }
+    return { score: base };
+  });
+
+  // 10. Exam Date (시험일) & 11. Valid Until (성적유효기간)
+  const examDateVal = (draft.examDate || '').trim();
+  const validUntilVal = (draft.validUntil || '').trim();
+  const examTs = /^\d{4}-\d{2}-\d{2}$/.test(examDateVal) ? Date.parse(examDateVal) : NaN;
+  const validTs = /^\d{4}-\d{2}-\d{2}$/.test(validUntilVal) ? Date.parse(validUntilVal) : NaN;
+
+  out.examDate = resolve('examDate', examDateVal.length > 0 && !examDateVal.startsWith('0000'), (base) => {
+    if (Number.isNaN(examTs)) {
+      return { score: Math.min(base, 46), reason: 'Use YYYY-MM-DD format for 시험일' };
+    }
+    const year = parseInt(examDateVal.slice(0, 4), 10);
+    if (year < 2012 || year > 2032) {
+      return { score: Math.min(base, 52), reason: 'Year looks outside normal TOPIK exam range' };
+    }
+    if (!Number.isNaN(validTs) && examTs >= validTs) {
+      return { score: 42, reason: '시험일 must be earlier than 성적유효기간' };
+    }
+    return { score: base };
+  });
+
+  out.validUntil = resolve('validUntil', validUntilVal.length > 0 && !validUntilVal.startsWith('0000'), (base) => {
+    if (Number.isNaN(validTs)) {
+      return { score: Math.min(base, 46), reason: 'Use YYYY-MM-DD format for 성적유효기간' };
+    }
+    if (!Number.isNaN(examTs)) {
+      const diffDays = (validTs - examTs) / (1000 * 60 * 60 * 24);
+      if (diffDays <= 0) {
+        return { score: 38, reason: '성적유효기간 must be after 시험일' };
+      }
+      if (diffDays < 500 || diffDays > 900) {
+        return { score: Math.min(base, 65), reason: 'TOPIK validity is normally ~2 years after 시험일 — verify' };
+      }
+      return { score: editedKeys?.has('validUntil') ? 100 : Math.min(97, Math.max(base, 88)) };
+    }
+    return { score: Math.min(base, 76), reason: '시험일 missing — verify 2-year expiration date' };
+  });
+
+  // 12. Grade (등급)
+  const gradeVal = (draft.grade || '').trim();
+  out.grade = resolve('grade', gradeVal.length > 0 && gradeVal !== '0급', (base) => {
+    if (!/^[1-6]급$/.test(gradeVal)) {
+      return { score: Math.min(base, 55), reason: 'Select valid TOPIK grade (1급–6급)' };
+    }
+    return { score: base };
+  });
+
+  // 13. Passport No
+  const passVal = (draft.passportNo || '').trim();
+  out.passportNo = resolve('passportNo', passVal.length > 0, (base) => {
+    if (!/^[A-Z0-9]{6,12}$/i.test(passVal)) {
+      return { score: Math.min(base, 62), reason: 'Check passport number characters against MRZ line' };
+    }
+    return { score: base };
+  });
+
+  // 14. Passport Expiry
+  const passExpVal = (draft.passportExpiry || '').trim();
+  out.passportExpiry = resolve('passportExpiry', passExpVal.length > 0 && !passExpVal.startsWith('0000'), (base) => {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(passExpVal)) {
+      return { score: Math.min(base, 48), reason: 'Use YYYY-MM-DD format for passport expiry' };
+    }
+    return { score: base };
+  });
+
+  return out;
+}
+

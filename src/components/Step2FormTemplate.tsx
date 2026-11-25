@@ -55,6 +55,7 @@ import {
 import { WatermarkOverlay } from './WatermarkOverlay';
 import confetti from 'canvas-confetti';
 import { RightClickProtectionToast } from './RightClickProtectionToast';
+import { Step3AddressHelper } from './Step3AddressHelper';
 
 interface Step2FormTemplateProps {
   formData: ApplicationFormData;
@@ -1155,6 +1156,15 @@ export const Step2FormTemplate: React.FC<Step2FormTemplateProps> = ({
           </div>
         )}
       </div>
+
+      {/* Step 3 Address Autocomplete, District Validator & Jurisdiction Mini-Map (no-print) */}
+      <Step3AddressHelper
+        address={formData.address}
+        onChangeAddress={(nextAddress) =>
+          setFormData((p) => ({ ...p, address: nextAddress }))
+        }
+        lang={lang}
+      />
 
       {/* OFFICIAL FORM TEMPLATE (EXACT FIDELITY AS USER SUPPLIED) */}
       <div 

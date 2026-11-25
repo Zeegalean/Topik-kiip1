@@ -17,9 +17,11 @@ import {
 } from '../utils/sanitizers';
 import {
   ExtractedDocumentData,
+  OcrFieldConfidenceMap,
   runFullDocumentOcrPipeline,
   mergeExtractedDrafts,
   formDataToExtractedDraft,
+  evaluateDraftConfidence,
 } from '../utils/clientOcrEngine';
 import { 
   Upload, 
@@ -62,7 +64,12 @@ interface Step1UploadProps {
   setFormData: React.Dispatch<React.SetStateAction<ApplicationFormData>>;
   extractedDraft: ExtractedDocumentData;
   setExtractedDraft: React.Dispatch<React.SetStateAction<ExtractedDocumentData>>;
-  onOcrCompleted?: (data: ExtractedDocumentData, rawTextPreview: string, model: string) => void;
+  onOcrCompleted?: (
+    data: ExtractedDocumentData,
+    rawTextPreview: string,
+    model: string,
+    confidenceMap?: OcrFieldConfidenceMap
+  ) => void;
   lang: Language;
   onNext: () => void;
   onOpenSocinetNotice?: () => void;
@@ -505,8 +512,10 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
         pipelineRes.data
       );
 
+      const mergedConfidence = evaluateDraftConfidence(stagedData, pipelineRes.confidence);
+
       if (onOcrCompleted) {
-        onOcrCompleted(stagedData, pipelineRes.rawTextPreview, pipelineRes.model);
+        onOcrCompleted(stagedData, pipelineRes.rawTextPreview, pipelineRes.model, mergedConfidence);
       } else {
         setExtractedDraft((prev) => mergeExtractedDrafts(prev, stagedData));
       }
@@ -521,8 +530,9 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
         ...parsedArc,
         ...parsedTopik,
       };
+      const fallbackConfidence = evaluateDraftConfidence(fallbackData, undefined, undefined, 'svg-preset');
       if (onOcrCompleted) {
-        onOcrCompleted(fallbackData, '', 'svg-fallback');
+        onOcrCompleted(fallbackData, '', 'svg-fallback', fallbackConfidence);
       } else {
         setExtractedDraft((prev) => mergeExtractedDrafts(prev, fallbackData));
       }

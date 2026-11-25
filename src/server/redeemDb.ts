@@ -23,6 +23,12 @@ export interface RedeemCodeStats {
   revokedCount: number;
   databasePath: string;
   googleSheetConfigured: boolean;
+  googleSheetSource: 'env' | 'saved' | 'none';
+  savedSheetId: string;
+  savedSheetName: string;
+  lastSyncAt: string | null;
+  lastRowsRead: number;
+  lastSyncError: string | null;
 }
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
@@ -31,6 +37,8 @@ const INITIAL_UNUSED_SEED_COUNT = 25;
 export const MAX_BULK_IMPORT_CODES = 50000;
 
 let dbInstance: DatabaseSync | null = null;
+let inFlightSheetSync: Promise<GoogleSheetSyncResult> | null = null;
+let lastAutoSyncAttemptMs = 0;
 
 function ensureDataDir(): void {
   if (!fs.existsSync(DATA_DIR)) {
@@ -40,16 +48,44 @@ function ensureDataDir(): void {
 
 export function normalizeCode(raw: string): string {
   return String(raw || '')
+    .replace(/[\u200B-\u200D\uFEFF\u00A0]/g, '')
+    .replace(/[\u2010-\u2015\u2212\uFE63\uFF0D]/g, '-')
     .trim()
     .toUpperCase()
     .replace(/[^A-Z0-9_-]/g, '')
     .slice(0, 64);
 }
 
+export function compactCode(raw: string): string {
+  return normalizeCode(raw).replace(/[-_]/g, '');
+}
+
 function normalizeStatus(raw?: string): RedeemCodeStatus {
   const s = String(raw || '').trim().toLowerCase();
-  if (s === 'used' || s === 'claimed' || s === 'redeemed') return 'Used';
-  if (s === 'revoked' || s === 'disabled' || s === 'expired') return 'Revoked';
+  if (
+    s === 'used' ||
+    s === 'claimed' ||
+    s === 'redeemed' ||
+    s === 'ប្រើរួច' ||
+    s === 'បានប្រើ' ||
+    s === '사용완료' ||
+    s === '사용됨' ||
+    s === '사용'
+  ) {
+    return 'Used';
+  }
+  if (
+    s === 'revoked' ||
+    s === 'disabled' ||
+    s === 'expired' ||
+    s === 'invalid' ||
+    s === 'ផ្អាក' ||
+    s === 'ផុតកំណត់' ||
+    s === '취소' ||
+    s === '만료'
+  ) {
+    return 'Revoked';
+  }
   return 'Unused';
 }
 
@@ -59,6 +95,87 @@ function generateSecureCode(prefix = 'KIIP-26'): string {
   return `${cleanPrefix}-${suffix}`;
 }
 
+function ensureRedeemSchemaMigrations(db: DatabaseSync): void {
+  const cols = db.prepare('PRAGMA table_info(redeem_codes)').all() as Array<{ name: string }>;
+  const hasCompact = cols.some((c) => c.name === 'code_compact');
+  if (!hasCompact) {
+    db.exec(`ALTER TABLE redeem_codes ADD COLUMN code_compact TEXT NOT NULL DEFAULT '';`);
+  }
+  db.exec(`
+    UPDATE redeem_codes
+    SET code_compact = REPLACE(REPLACE(UPPER(code), '-', ''), '_', '')
+    WHERE code_compact = '' OR code_compact IS NULL;
+    CREATE INDEX IF NOT EXISTS idx_redeem_codes_compact ON redeem_codes(code_compact);
+  `);
+}
+
+function getAppSetting(db: DatabaseSync, key: string): string {
+  const row = db
+    .prepare('SELECT value FROM app_settings WHERE key = ?')
+    .get(key) as { value: string } | undefined;
+  return row ? String(row.value || '') : '';
+}
+
+function setAppSetting(db: DatabaseSync, key: string, value: string): void {
+  db.prepare(
+    `INSERT INTO app_settings (key, value, updated_at)
+     VALUES (?, ?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+  ).run(key, String(value ?? ''), new Date().toISOString());
+}
+
+export function getSavedGoogleSheetConfig(): {
+  sheetId: string;
+  sheetName: string;
+  source: 'env' | 'saved' | 'none';
+  lastSyncAt: string | null;
+  lastRowsRead: number;
+  lastImported: number;
+  lastSyncError: string | null;
+} {
+  const db = getRedeemDb();
+  const envId = String(process.env.GOOGLE_SHEET_ID || '').trim();
+  const envTab = String(process.env.GOOGLE_SHEET_TAB || '').trim();
+  const savedId = getAppSetting(db, 'google_sheet_id').trim();
+  const savedTab = getAppSetting(db, 'google_sheet_tab').trim();
+  const lastSyncAt = getAppSetting(db, 'google_sheet_last_sync_at').trim() || null;
+  const lastRowsRead = Number(getAppSetting(db, 'google_sheet_last_rows_read')) || 0;
+  const lastImported = Number(getAppSetting(db, 'google_sheet_last_imported')) || 0;
+  const lastSyncError = getAppSetting(db, 'google_sheet_last_error').trim() || null;
+
+  if (savedId) {
+    return {
+      sheetId: savedId,
+      sheetName: savedTab,
+      source: 'saved',
+      lastSyncAt,
+      lastRowsRead,
+      lastImported,
+      lastSyncError,
+    };
+  }
+  if (envId) {
+    return {
+      sheetId: envId,
+      sheetName: envTab,
+      source: 'env',
+      lastSyncAt,
+      lastRowsRead,
+      lastImported,
+      lastSyncError,
+    };
+  }
+  return {
+    sheetId: '',
+    sheetName: '',
+    source: 'none',
+    lastSyncAt,
+    lastRowsRead,
+    lastImported,
+    lastSyncError,
+  };
+}
+
 export function getRedeemDb(): DatabaseSync {
   if (dbInstance) return dbInstance;
 
@@ -66,9 +183,16 @@ export function getRedeemDb(): DatabaseSync {
   const db = new DatabaseSync(DB_FILE_PATH);
   db.exec(`
     PRAGMA journal_mode = WAL;
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS redeem_codes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       code TEXT NOT NULL UNIQUE,
+      code_compact TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'Unused' CHECK (status IN ('Unused', 'Used', 'Revoked')),
       source TEXT NOT NULL DEFAULT 'database',
       note TEXT NOT NULL DEFAULT '',
@@ -112,6 +236,7 @@ export function getRedeemDb(): DatabaseSync {
     CREATE INDEX IF NOT EXISTS idx_user_accounts_email ON user_accounts(email);
   `);
 
+  ensureRedeemSchemaMigrations(db);
   dbInstance = db;
   seedInitialUnusedCodes(db);
   return db;
@@ -125,8 +250,8 @@ function seedInitialUnusedCodes(db: DatabaseSync): void {
   const countRow = db.prepare('SELECT COUNT(*) as cnt FROM redeem_codes').get() as { cnt: number };
   const nowIso = new Date().toISOString();
   const insertStmt = db.prepare(
-    `INSERT OR IGNORE INTO redeem_codes (code, status, source, note, assigned_to, created_at)
-     VALUES (?, 'Unused', ?, ?, '', ?)`
+    `INSERT OR IGNORE INTO redeem_codes (code, code_compact, status, source, note, assigned_to, created_at)
+     VALUES (?, ?, 'Unused', ?, ?, '', ?)`
   );
 
   // Import any env-provided REDEEM_CODES as 'Unused'
@@ -136,7 +261,7 @@ function seedInitialUnusedCodes(db: DatabaseSync): void {
     .filter((c) => c.length >= 4);
 
   for (const code of envCodes) {
-    insertStmt.run(code, 'env_seed', 'Imported from REDEEM_CODES', nowIso);
+    insertStmt.run(code, compactCode(code), 'env_seed', 'Imported from REDEEM_CODES', nowIso);
   }
 
   // Pre-seed 25 ready-to-use Redeem Codes with status = 'Unused' if DB was empty
@@ -144,7 +269,7 @@ function seedInitialUnusedCodes(db: DatabaseSync): void {
     for (let i = 1; i <= INITIAL_UNUSED_SEED_COUNT; i++) {
       const batchLabel = `Pre-seeded Batch #${String(i).padStart(2, '0')}`;
       const code = generateSecureCode('KIIP-26');
-      insertStmt.run(code, 'database', batchLabel, nowIso);
+      insertStmt.run(code, compactCode(code), 'database', batchLabel, nowIso);
     }
     console.log(
       `[RedeemDB] Initialized SQLite database with ${INITIAL_UNUSED_SEED_COUNT} pre-seeded 'Unused' redeem codes.`
@@ -168,13 +293,21 @@ export function getRedeemCodeStats(): RedeemCodeStats {
     else if (r.status === 'Revoked') revokedCount = Number(r.cnt) || 0;
   }
 
+  const sheetCfg = getSavedGoogleSheetConfig();
+
   return {
     total: unusedCount + usedCount + revokedCount,
     unusedCount,
     usedCount,
     revokedCount,
     databasePath: 'data/redeem_codes.sqlite',
-    googleSheetConfigured: Boolean(process.env.GOOGLE_SHEET_ID?.trim()),
+    googleSheetConfigured: sheetCfg.source !== 'none',
+    googleSheetSource: sheetCfg.source,
+    savedSheetId: sheetCfg.sheetId,
+    savedSheetName: sheetCfg.sheetName,
+    lastSyncAt: sheetCfg.lastSyncAt,
+    lastRowsRead: sheetCfg.lastRowsRead,
+    lastSyncError: sheetCfg.lastSyncError,
   };
 }
 
@@ -265,8 +398,8 @@ export function generateUnusedRedeemCodes(
   const nowIso = new Date().toISOString();
 
   const insertStmt = db.prepare(
-    `INSERT OR IGNORE INTO redeem_codes (code, status, source, note, assigned_to, created_at)
-     VALUES (?, 'Unused', 'admin', ?, '', ?)`
+    `INSERT OR IGNORE INTO redeem_codes (code, code_compact, status, source, note, assigned_to, created_at)
+     VALUES (?, ?, 'Unused', 'admin', ?, '', ?)`
   );
   const selectStmt = db.prepare(
     `SELECT id, code, status, source, note, assigned_to, created_at, used_at
@@ -281,7 +414,7 @@ export function generateUnusedRedeemCodes(
     while (created.length < safeCount && attempts < safeCount * 5) {
       attempts++;
       const code = generateSecureCode(prefix);
-      const info = insertStmt.run(code, safeNote, nowIso);
+      const info = insertStmt.run(code, compactCode(code), safeNote, nowIso);
       if (Number(info.changes) > 0) {
         const row = selectStmt.get(code) as unknown as RedeemCodeRecord | undefined;
         if (row) created.push(row);
@@ -311,8 +444,8 @@ export function addCustomRedeemCodes(
   const nowIso = new Date().toISOString();
 
   const insertStmt = db.prepare(
-    `INSERT OR IGNORE INTO redeem_codes (code, status, source, note, assigned_to, created_at)
-     VALUES (?, 'Unused', ?, ?, '', ?)`
+    `INSERT OR IGNORE INTO redeem_codes (code, code_compact, status, source, note, assigned_to, created_at)
+     VALUES (?, ?, 'Unused', ?, ?, '', ?)`
   );
 
   const totalReceived = rawCodes.length;
@@ -331,7 +464,7 @@ export function addCustomRedeemCodes(
         skipped++;
         continue;
       }
-      const info = insertStmt.run(code, safeSource, safeNote, nowIso);
+      const info = insertStmt.run(code, compactCode(code), safeSource, safeNote, nowIso);
       if (Number(info.changes) > 0) {
         added++;
         if (insertedSample.length < 50) {
@@ -355,13 +488,52 @@ export function addCustomRedeemCodes(
 }
 
 /**
+ * Read-only diagnostic lookup for Admin testing without burning a code.
+ */
+export function checkRedeemCodeStatus(rawCode: string): {
+  found: boolean;
+  normalizedInput: string;
+  record?: RedeemCodeRecord;
+} {
+  const code = normalizeCode(rawCode);
+  const compact = compactCode(rawCode);
+  if (!code || code.length < 4) {
+    return { found: false, normalizedInput: code };
+  }
+  const db = getRedeemDb();
+  let existing = db
+    .prepare(
+      `SELECT id, code, status, source, note, assigned_to, created_at, used_at
+       FROM redeem_codes WHERE code = ?`
+    )
+    .get(code) as unknown as RedeemCodeRecord | undefined;
+
+  if (!existing && compact.length >= 4) {
+    existing = db
+      .prepare(
+        `SELECT id, code, status, source, note, assigned_to, created_at, used_at
+         FROM redeem_codes WHERE code_compact = ?
+         ORDER BY CASE status WHEN 'Unused' THEN 0 ELSE 1 END, id ASC
+         LIMIT 1`
+      )
+      .get(compact) as unknown as RedeemCodeRecord | undefined;
+  }
+
+  return existing
+    ? { found: true, normalizedInput: code, record: existing }
+    : { found: false, normalizedInput: code };
+}
+
+/**
  * Atomically verifies a Redeem Code and marks it 'Used' if its status is 'Unused'.
+ * Supports both exact match and hyphen/space-insensitive compact alphanumeric match.
  */
 export function verifyAndBurnRedeemCode(
   rawCode: string,
   usedBy = ''
 ): { ok: boolean; statusCode: number; error?: string; record?: RedeemCodeRecord } {
   const code = normalizeCode(rawCode);
+  const compact = compactCode(rawCode);
   if (!code || code.length < 4) {
     return {
       ok: false,
@@ -376,12 +548,23 @@ export function verifyAndBurnRedeemCode(
 
   db.exec('BEGIN IMMEDIATE');
   try {
-    const existing = db
+    let existing = db
       .prepare(
         `SELECT id, code, status, source, note, assigned_to, created_at, used_at
          FROM redeem_codes WHERE code = ?`
       )
       .get(code) as unknown as RedeemCodeRecord | undefined;
+
+    if (!existing && compact.length >= 4) {
+      existing = db
+        .prepare(
+          `SELECT id, code, status, source, note, assigned_to, created_at, used_at
+           FROM redeem_codes WHERE code_compact = ?
+           ORDER BY CASE status WHEN 'Unused' THEN 0 ELSE 1 END, id ASC
+           LIMIT 1`
+        )
+        .get(compact) as unknown as RedeemCodeRecord | undefined;
+    }
 
     if (!existing) {
       db.exec('COMMIT');
@@ -483,9 +666,9 @@ export function reserveUnusedRedeemCode(params: {
     // Pool empty -> mint a fresh code directly into the Database with status = 'Unused'
     const newCode = generateSecureCode(params.fallbackPrefix || (params.source === 'telegram_bot' ? 'KIIP-TG' : 'KIIP-KR'));
     db.prepare(
-      `INSERT INTO redeem_codes (code, status, source, note, assigned_to, created_at)
-       VALUES (?, 'Unused', ?, ?, ?, ?)`
-    ).run(newCode, params.source, safeNote, safeAssignee, nowIso);
+      `INSERT INTO redeem_codes (code, code_compact, status, source, note, assigned_to, created_at)
+       VALUES (?, ?, 'Unused', ?, ?, ?, ?)`
+    ).run(newCode, compactCode(newCode), params.source, safeNote, safeAssignee, nowIso);
 
     const created = db
       .prepare(
@@ -529,9 +712,18 @@ export function deleteRedeemCode(rawCode: string): boolean {
 }
 
 /**
- * Simple RFC-4180 CSV line parser (handles quoted cells and commas inside quotes).
+ * Simple RFC-4180 CSV/TSV/semicolon parser (handles quoted cells and commas inside quotes).
  */
 function parseCsvRows(csvText: string): string[][] {
+  const firstLine = csvText.split(/\r?\n/).find((l) => l.trim().length > 0) || '';
+  const delimiter = firstLine.includes(',')
+    ? ','
+    : firstLine.includes('\t')
+    ? '\t'
+    : firstLine.includes(';')
+    ? ';'
+    : ',';
+
   const rows: string[][] = [];
   let row: string[] = [];
   let cell = '';
@@ -553,7 +745,7 @@ function parseCsvRows(csvText: string): string[][] {
     } else {
       if (ch === '"') {
         inQuotes = true;
-      } else if (ch === ',') {
+      } else if (ch === delimiter) {
         row.push(cell.trim());
         cell = '';
       } else if (ch === '\r' && next === '\n') {
@@ -589,9 +781,21 @@ interface ParsedSheetRef {
   gid?: string;
 }
 
+export interface GoogleSheetSyncResult {
+  success: boolean;
+  sheetId: string;
+  sheetName: string;
+  rowsRead: number;
+  imported: number;
+  skipped: number;
+  detectedColumnLabel?: string;
+  sampleCodes?: string[];
+  error?: string;
+}
+
 /**
  * Strictly extracts only validated Google Sheets identifiers (sheetId, publishedId, gid)
- * from either a raw ID or a full docs.google.com/spreadsheets URL.
+ * from either a raw ID or a full docs.google.com/spreadsheets URL (including /u/0/ multi-account URLs).
  * Never returns or fetches user-supplied hostnames (SSRF-safe).
  */
 export function parseGoogleSheetReference(rawInput: string): ParsedSheetRef | null {
@@ -626,14 +830,14 @@ export function parseGoogleSheetReference(rawInput: string): ParsedSheetRef | nu
       gid = undefined;
     }
 
-    // Published-to-web URL: /spreadsheets/d/e/2PACX-.../pubhtml or /pub?output=csv
-    const pubMatch = parsedUrl.pathname.match(/\/spreadsheets\/d\/e\/(2PACX-[a-zA-Z0-9_-]{10,160})/i);
+    // Published-to-web URL: /spreadsheets/(u/0/)?d/e/2PACX-.../pubhtml or /pub?output=csv
+    const pubMatch = parsedUrl.pathname.match(/\/spreadsheets\/(?:u\/\d+\/)?d\/e\/(2PACX-[a-zA-Z0-9_-]{10,160})/i);
     if (pubMatch && PUBLISHED_ID_REGEX.test(pubMatch[1])) {
       return { publishedId: pubMatch[1], gid };
     }
 
-    // Standard URL: /spreadsheets/d/<SHEET_ID>/edit...
-    const stdMatch = parsedUrl.pathname.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]{10,120})/i);
+    // Standard URL: /spreadsheets/(u/0/)?d/<SHEET_ID>/edit...
+    const stdMatch = parsedUrl.pathname.match(/\/spreadsheets\/(?:u\/\d+\/)?d\/([a-zA-Z0-9_-]{10,120})/i);
     if (stdMatch && SHEET_ID_REGEX.test(stdMatch[1])) {
       return { sheetId: stdMatch[1], gid };
     }
@@ -650,10 +854,10 @@ async function fetchCsvFromGoogleUrl(
   const resp = await fetch(url, {
     redirect: 'follow',
     headers: {
-      'User-Agent': 'Mozilla/5.0 (compatible; KIIP-Portal-SheetSync/1.0)',
+      'User-Agent': 'Mozilla/5.0 (compatible; KIIP-Portal-SheetSync/1.1)',
       Accept: 'text/csv, text/plain, */*',
     },
-    signal: AbortSignal.timeout(12000),
+    signal: AbortSignal.timeout(25000),
   });
 
   if (!resp.ok) {
@@ -666,7 +870,7 @@ async function fetchCsvFromGoogleUrl(
     return { ok: true, status: resp.status, isHtmlLogin: false, rows: [] };
   }
 
-  const lowerHead = cleanText.slice(0, 300).toLowerCase();
+  const lowerHead = cleanText.slice(0, 400).toLowerCase();
   if (
     lowerHead.startsWith('<!doctype html') ||
     lowerHead.startsWith('<html') ||
@@ -679,25 +883,190 @@ async function fetchCsvFromGoogleUrl(
   return { ok: true, status: resp.status, isHtmlLogin: false, rows: parseCsvRows(cleanText) };
 }
 
+function columnIndexToLetter(idx: number): string {
+  let n = idx + 1;
+  let label = '';
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    label = String.fromCharCode(65 + rem) + label;
+    n = Math.floor((n - 1) / 26);
+  }
+  return label || 'A';
+}
+
+const STATUS_VALUE_WORDS = new Set([
+  'unused',
+  'used',
+  'revoked',
+  'available',
+  'active',
+  'claimed',
+  'redeemed',
+  'expired',
+  'disabled',
+  'ប្រើរួច',
+  'មិនទាន់ប្រើ',
+  'បានប្រើ',
+  'ផ្អាក',
+  '사용완료',
+  '미사용',
+  '사용됨',
+  '만료',
+]);
+
+/**
+ * Intelligently detects header row, redeem-code column, optional status column, and optional note column
+ * across 1-column or multi-column sheets (even when Col A is sequential row numbers 1..10000).
+ */
+export function detectSheetColumns(parsedRows: string[][]): {
+  hasHeader: boolean;
+  codeCol: number;
+  statusCol: number;
+  noteCol: number;
+} {
+  const firstRowLower = parsedRows[0].map((c) => c.replace(/^\uFEFF/, '').trim().toLowerCase());
+
+  const isCodeHeader = (c: string) =>
+    c.includes('code') ||
+    c.includes('redeem') ||
+    c.includes('voucher') ||
+    c.includes('coupon') ||
+    c.includes('serial') ||
+    c === 'key' ||
+    c.includes('pin') ||
+    c.includes('token') ||
+    c.includes('កូដ') ||
+    c.includes('លេខកូដ') ||
+    c.includes('코드') ||
+    c.includes('쿠폰');
+
+  const isStatusHeader = (c: string) =>
+    c.includes('status') || c.includes('state') || c.includes('ស្ថានភាព') || c.includes('상태');
+
+  const isNoteHeader = (c: string) =>
+    c.includes('note') ||
+    c.includes('desc') ||
+    c.includes('memo') ||
+    c.includes('center') ||
+    c.includes('remark') ||
+    c.includes('សម្គាល់') ||
+    c.includes('비고');
+
+  const isIndexHeader = (c: string) =>
+    c === 'no' ||
+    c === 'no.' ||
+    c === '#' ||
+    c === 'id' ||
+    c === 'idx' ||
+    c === 'index' ||
+    c === 'seq' ||
+    c === 'ល.រ' ||
+    c === '번호';
+
+  const hasHeader = firstRowLower.some(
+    (c) => isCodeHeader(c) || isStatusHeader(c) || isNoteHeader(c) || isIndexHeader(c)
+  );
+
+  const sampleRows = (hasHeader ? parsedRows.slice(1) : parsedRows).slice(0, 30);
+  const maxCols = Math.max(
+    parsedRows[0].length,
+    ...sampleRows.map((r) => r.length)
+  );
+
+  let codeCol = hasHeader ? firstRowLower.findIndex(isCodeHeader) : -1;
+  let statusCol = hasHeader ? firstRowLower.findIndex(isStatusHeader) : -1;
+  let noteCol = hasHeader ? firstRowLower.findIndex(isNoteHeader) : -1;
+
+  // If no explicit code header was found, score every column across sample rows
+  if (codeCol < 0 && sampleRows.length > 0) {
+    let bestCol = 0;
+    let bestScore = -1e9;
+
+    for (let col = 0; col < maxCols; col++) {
+      if (col === statusCol || col === noteCol) continue;
+      if (hasHeader && isIndexHeader(firstRowLower[col] || '')) continue;
+
+      const values = sampleRows.map((r) => String(r[col] || '').trim()).filter(Boolean);
+      if (values.length === 0) continue;
+
+      const normalized = values.map((v) => normalizeCode(v));
+      const validTokens = normalized.filter((v) => v.length >= 4);
+      const uniqueCount = new Set(validTokens).size;
+
+      // Detect sequential integer column (1, 2, 3... or 0001, 0002, 0003...)
+      const intNums = values.map((v) => (/^\d+$/.test(v) ? Number(v) : NaN));
+      let sequentialSteps = 0;
+      for (let i = 1; i < intNums.length; i++) {
+        if (!Number.isNaN(intNums[i]) && !Number.isNaN(intNums[i - 1]) && intNums[i] - intNums[i - 1] === 1) {
+          sequentialSteps++;
+        }
+      }
+      const isSequentialIndex =
+        values.length >= 3 && sequentialSteps >= Math.floor(values.length * 0.7);
+
+      // Detect status-only column
+      const statusMatches = values.filter((v) => STATUS_VALUE_WORDS.has(v.toLowerCase())).length;
+      const isMostlyStatus = statusMatches >= Math.ceil(values.length * 0.6);
+
+      // Detect alphanumeric/hyphenated redeem code pattern
+      const alphaNumMatches = validTokens.filter((v) => /[A-Z]/.test(v) && /[0-9]/.test(v)).length;
+      const hyphenMatches = validTokens.filter((v) => v.includes('-') || v.includes('_')).length;
+      const longNumericMatches = validTokens.filter((v) => /^\d{6,}$/.test(v)).length;
+
+      let score = validTokens.length * 4 + uniqueCount * 3 + alphaNumMatches * 6 + hyphenMatches * 4 + longNumericMatches * 2;
+      if (isSequentialIndex) score -= 500;
+      if (isMostlyStatus) score -= 400;
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestCol = col;
+      }
+    }
+    codeCol = bestCol;
+  }
+
+  if (codeCol < 0) codeCol = 0;
+
+  // Auto-detect status column if not named in header (only if a column actually holds status keywords)
+  if (statusCol < 0 && sampleRows.length > 0) {
+    for (let col = 0; col < maxCols; col++) {
+      if (col === codeCol || col === noteCol) continue;
+      const values = sampleRows.map((r) => String(r[col] || '').trim().toLowerCase()).filter(Boolean);
+      if (values.length === 0) continue;
+      const hits = values.filter((v) => STATUS_VALUE_WORDS.has(v)).length;
+      if (hits >= Math.max(1, Math.ceil(values.length * 0.5))) {
+        statusCol = col;
+        break;
+      }
+    }
+  }
+
+  return { hasHeader, codeCol, statusCol, noteCol };
+}
+
 /**
  * Connects to Google Sheets (strictly allowlisted to Google domains to prevent SSRF),
- * accepts a full Google Sheets URL, Published-to-Web URL, or raw Sheet ID,
- * reads rows of Redeem Codes (Columns: Code, Status, Note), and syncs them into SQLite.
+ * accepts a full Google Sheets URL (including /u/0/), Published-to-Web URL, or raw Sheet ID,
+ * reads up to 50,000 rows of Redeem Codes, saves the Sheet reference in SQLite app_settings,
+ * and syncs them into SQLite.
  */
 export async function syncRedeemCodesFromGoogleSheet(params?: {
   sheetId?: string;
   sheetName?: string;
-}): Promise<{
-  success: boolean;
-  sheetId: string;
-  sheetName: string;
-  rowsRead: number;
-  imported: number;
-  skipped: number;
-  error?: string;
-}> {
-  const rawSheetInput = String(params?.sheetId || process.env.GOOGLE_SHEET_ID || '').trim();
-  const requestedSheetName = String(params?.sheetName ?? process.env.GOOGLE_SHEET_TAB ?? '')
+}): Promise<GoogleSheetSyncResult> {
+  const db = getRedeemDb();
+  const savedCfg = getSavedGoogleSheetConfig();
+  const rawSheetInput = String(
+    params?.sheetId || savedCfg.sheetId || process.env.GOOGLE_SHEET_ID || ''
+  ).trim();
+  const hasExplicitTab = params?.sheetName !== undefined && params.sheetName.trim().length > 0;
+  const requestedSheetName = String(
+    hasExplicitTab
+      ? params?.sheetName
+      : params?.sheetId
+      ? ''
+      : savedCfg.sheetName || ''
+  )
     .trim()
     .slice(0, 80);
 
@@ -706,7 +1075,7 @@ export async function syncRedeemCodesFromGoogleSheet(params?: {
     return {
       success: false,
       sheetId: rawSheetInput,
-      sheetName: requestedSheetName || 'Sheet1',
+      sheetName: requestedSheetName || 'Tab 1',
       rowsRead: 0,
       imported: 0,
       skipped: 0,
@@ -725,7 +1094,6 @@ export async function syncRedeemCodesFromGoogleSheet(params?: {
 
   try {
     if (parsedRef.publishedId) {
-      // Published to web (File → Share → Publish to web)
       const pubUrl = parsedRef.gid
         ? `https://docs.google.com/spreadsheets/d/e/${encodeURIComponent(parsedRef.publishedId)}/pub?gid=${encodeURIComponent(parsedRef.gid)}&single=true&output=csv`
         : `https://docs.google.com/spreadsheets/d/e/${encodeURIComponent(parsedRef.publishedId)}/pub?output=csv`;
@@ -745,7 +1113,7 @@ export async function syncRedeemCodesFromGoogleSheet(params?: {
         if (!targetTab) {
           const metaResp = await fetch(
             `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(parsedRef.sheetId)}?fields=sheets.properties.title&key=${encodeURIComponent(apiKey)}`,
-            { signal: AbortSignal.timeout(10000) }
+            { signal: AbortSignal.timeout(15000) }
           );
           if (metaResp.ok) {
             const metaJson = (await metaResp.json()) as { sheets?: Array<{ properties?: { title?: string } }> };
@@ -753,19 +1121,38 @@ export async function syncRedeemCodesFromGoogleSheet(params?: {
             effectiveSheetName = targetTab;
           }
         }
-        const range = encodeURIComponent(targetTab ? `${targetTab}!A1:E50000` : 'A1:E50000');
+        const range = encodeURIComponent(targetTab ? `${targetTab}!A1:F50000` : 'A1:F50000');
         const apiUrl = `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(parsedRef.sheetId)}/values/${range}?key=${encodeURIComponent(apiKey)}`;
-        const apiResp = await fetch(apiUrl, { signal: AbortSignal.timeout(10000) });
+        const apiResp = await fetch(apiUrl, { signal: AbortSignal.timeout(25000) });
         if (apiResp.ok) {
           const json = (await apiResp.json()) as { values?: string[][] };
           parsedRows = Array.isArray(json.values) ? json.values : [];
-          fetched = true;
+          fetched = parsedRows.length > 0;
         } else {
           lastHttpStatus = apiResp.status;
         }
       }
 
-      // Strategy 2: Named tab via gviz CSV (only when user explicitly entered a tab name)
+      // Strategy 2: Direct CSV Export FIRST when no explicit tab name was given (or when gid is in URL).
+      // Unlike gviz/tq, /export?format=csv NEVER drops mixed numeric+text cells in the same column!
+      if (!fetched && (!requestedSheetName || parsedRef.gid)) {
+        const exportUrl = parsedRef.gid
+          ? `https://docs.google.com/spreadsheets/d/${encodeURIComponent(parsedRef.sheetId)}/export?format=csv&gid=${encodeURIComponent(parsedRef.gid)}`
+          : `https://docs.google.com/spreadsheets/d/${encodeURIComponent(parsedRef.sheetId)}/export?format=csv`;
+        const r = await fetchCsvFromGoogleUrl(exportUrl);
+        if (r.ok && r.rows.length > 0) {
+          parsedRows = r.rows;
+          fetched = true;
+          if (!requestedSheetName) {
+            effectiveSheetName = parsedRef.gid ? `gid:${parsedRef.gid}` : 'Tab 1';
+          }
+        } else {
+          if (r.isHtmlLogin) sawHtmlLogin = true;
+          if (r.status) lastHttpStatus = r.status;
+        }
+      }
+
+      // Strategy 3: Named tab via gviz CSV (when user explicitly entered a tab name)
       if (!fetched && requestedSheetName) {
         const gvizNamed = `https://docs.google.com/spreadsheets/d/${encodeURIComponent(parsedRef.sheetId)}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(requestedSheetName)}`;
         const r = await fetchCsvFromGoogleUrl(gvizNamed);
@@ -778,25 +1165,21 @@ export async function syncRedeemCodesFromGoogleSheet(params?: {
         }
       }
 
-      // Strategy 3: Direct CSV Export (works regardless of tab name; honors ?gid=... from pasted URL!)
+      // Strategy 4: Fallback to Direct CSV Export for first tab if named tab failed
       if (!fetched) {
-        const exportUrl = parsedRef.gid
-          ? `https://docs.google.com/spreadsheets/d/${encodeURIComponent(parsedRef.sheetId)}/export?format=csv&gid=${encodeURIComponent(parsedRef.gid)}`
-          : `https://docs.google.com/spreadsheets/d/${encodeURIComponent(parsedRef.sheetId)}/export?format=csv`;
-        const r = await fetchCsvFromGoogleUrl(exportUrl);
+        const exportFirst = `https://docs.google.com/spreadsheets/d/${encodeURIComponent(parsedRef.sheetId)}/export?format=csv`;
+        const r = await fetchCsvFromGoogleUrl(exportFirst);
         if (r.ok) {
           parsedRows = r.rows;
           fetched = true;
-          if (!requestedSheetName) {
-            effectiveSheetName = parsedRef.gid ? `gid:${parsedRef.gid}` : 'Tab 1';
-          }
+          effectiveSheetName = 'Tab 1';
         } else {
           if (r.isHtmlLogin) sawHtmlLogin = true;
           if (r.status) lastHttpStatus = r.status;
         }
       }
 
-      // Strategy 4: Fallback gviz CSV for first tab (without &sheet= parameter)
+      // Strategy 5: Final fallback gviz CSV for first tab
       if (!fetched) {
         const gvizFirst = `https://docs.google.com/spreadsheets/d/${encodeURIComponent(parsedRef.sheetId)}/gviz/tq?tqx=out:csv`;
         const r = await fetchCsvFromGoogleUrl(gvizFirst);
@@ -811,18 +1194,11 @@ export async function syncRedeemCodesFromGoogleSheet(params?: {
       }
 
       if (!fetched) {
-        if (sawHtmlLogin || lastHttpStatus === 401 || lastHttpStatus === 403) {
-          return {
-            success: false,
-            sheetId: resolvedId,
-            sheetName: effectiveSheetName,
-            rowsRead: 0,
-            imported: 0,
-            skipped: 0,
-            error:
-              'Google Sheet នេះជាប់សិទ្ធិ Private! សូមបើក Google Sheet → ចុច "Share" → ប្តូរ General access ទៅជា "Anyone with the link (Viewer)" រួចសាកល្បងម្តងទៀត (ឬ Export ជា .CSV ហើយ Upload ផ្ទាល់)។',
-          };
-        }
+        const errMsg =
+          sawHtmlLogin || lastHttpStatus === 401 || lastHttpStatus === 403
+            ? 'Google Sheet នេះជាប់សិទ្ធិ Private! សូមបើក Google Sheet → ចុច "Share" → ប្តូរ General access ទៅជា "Anyone with the link (Viewer)" រួចសាកល្បងម្តងទៀត (ឬ Export ជា .CSV ហើយ Upload ផ្ទាល់)។'
+            : `មិនអាចអាន Google Sheet បានទេ (HTTP ${lastHttpStatus || 'Error'})។ សូមពិនិត្យថា Link/ID ត្រឹមត្រូវ ហើយ Sheet បើកសិទ្ធិ "Anyone with the link (Viewer)"។`;
+        setAppSetting(db, 'google_sheet_last_error', errMsg);
         return {
           success: false,
           sheetId: resolvedId,
@@ -830,11 +1206,13 @@ export async function syncRedeemCodesFromGoogleSheet(params?: {
           rowsRead: 0,
           imported: 0,
           skipped: 0,
-          error: `មិនអាចអាន Google Sheet បានទេ (HTTP ${lastHttpStatus || 'Error'})។ សូមពិនិត្យថា Link/ID ត្រឹមត្រូវ ហើយ Sheet បើកសិទ្ធិ "Anyone with the link (Viewer)"។`,
+          error: errMsg,
         };
       }
     }
   } catch (err: any) {
+    const errMsg = `បរាជ័យក្នុងការតភ្ជាប់ Google Sheets: ${err?.message || 'Network timeout'}`;
+    setAppSetting(db, 'google_sheet_last_error', errMsg);
     return {
       success: false,
       sheetId: resolvedId,
@@ -842,11 +1220,19 @@ export async function syncRedeemCodesFromGoogleSheet(params?: {
       rowsRead: 0,
       imported: 0,
       skipped: 0,
-      error: `បរាជ័យក្នុងការតភ្ជាប់ Google Sheets: ${err?.message || 'Network timeout'}`,
+      error: errMsg,
     };
   }
 
+  // Persist the working Google Sheet reference so restarts & on-demand verify-redeem remember it!
+  setAppSetting(db, 'google_sheet_id', rawSheetInput);
+  setAppSetting(db, 'google_sheet_tab', requestedSheetName);
+  setAppSetting(db, 'google_sheet_last_error', '');
+
   if (parsedRows.length === 0) {
+    setAppSetting(db, 'google_sheet_last_sync_at', new Date().toISOString());
+    setAppSetting(db, 'google_sheet_last_rows_read', '0');
+    setAppSetting(db, 'google_sheet_last_imported', '0');
     return {
       success: true,
       sheetId: resolvedId,
@@ -857,56 +1243,19 @@ export async function syncRedeemCodesFromGoogleSheet(params?: {
     };
   }
 
-  // Detect header columns flexibly across English / Khmer / Korean
-  const firstRowLower = parsedRows[0].map((c) => c.replace(/^\uFEFF/, '').trim().toLowerCase());
-  const isCodeHeader = (c: string) =>
-    c.includes('code') ||
-    c.includes('redeem') ||
-    c.includes('voucher') ||
-    c.includes('កូដ') ||
-    c.includes('코드');
-  const isStatusHeader = (c: string) =>
-    c.includes('status') || c.includes('ស្ថានភាព') || c.includes('상태');
-  const isNoteHeader = (c: string) =>
-    c.includes('note') ||
-    c.includes('desc') ||
-    c.includes('center') ||
-    c.includes('សម្គាល់') ||
-    c.includes('비고');
-
-  const hasHeader = firstRowLower.some((c) => isCodeHeader(c) || isStatusHeader(c) || isNoteHeader(c));
-  let codeCol = 0;
-  let statusCol = 1;
-  let noteCol = 2;
-
-  if (hasHeader) {
-    const foundCode = firstRowLower.findIndex(isCodeHeader);
-    const foundStatus = firstRowLower.findIndex(isStatusHeader);
-    const foundNote = firstRowLower.findIndex(isNoteHeader);
-    if (foundCode >= 0) codeCol = foundCode;
-    if (foundStatus >= 0) statusCol = foundStatus;
-    if (foundNote >= 0) noteCol = foundNote;
-  } else if (parsedRows[0].length >= 2) {
-    // Auto-detect if Col A is just row index (1, 2, 3...) and Col B holds the Redeem Codes
-    const col0 = normalizeCode(parsedRows[0][0] || '');
-    const col1 = normalizeCode(parsedRows[0][1] || '');
-    if (col0.length < 4 && col1.length >= 4) {
-      codeCol = 1;
-      statusCol = 2;
-      noteCol = 3;
-    }
-  }
+  const { hasHeader, codeCol, statusCol, noteCol } = detectSheetColumns(parsedRows);
+  const detectedColumnLabel = `Col ${columnIndexToLetter(codeCol)}${hasHeader && parsedRows[0][codeCol] ? ` (${parsedRows[0][codeCol].slice(0, 24)})` : ''}`;
 
   const dataRows = hasHeader ? parsedRows.slice(1) : parsedRows;
-  const db = getRedeemDb();
   const nowIso = new Date().toISOString();
   const insertStmt = db.prepare(
-    `INSERT OR IGNORE INTO redeem_codes (code, status, source, note, assigned_to, created_at)
-     VALUES (?, ?, 'google_sheets', ?, '', ?)`
+    `INSERT OR IGNORE INTO redeem_codes (code, code_compact, status, source, note, assigned_to, created_at)
+     VALUES (?, ?, ?, 'google_sheets', ?, '', ?)`
   );
 
   let imported = 0;
   let skipped = 0;
+  const sampleCodes: string[] = [];
 
   db.exec('BEGIN IMMEDIATE');
   try {
@@ -916,13 +1265,19 @@ export async function syncRedeemCodesFromGoogleSheet(params?: {
         skipped++;
         continue;
       }
-      const status = normalizeStatus(r[statusCol] || 'Unused');
-      const note = String(r[noteCol] || `Sheet: ${effectiveSheetName}`).trim().slice(0, 140);
-      const info = insertStmt.run(code, status, note, nowIso);
+      const status = statusCol >= 0 ? normalizeStatus(r[statusCol] || 'Unused') : 'Unused';
+      const note =
+        noteCol >= 0 && r[noteCol]
+          ? String(r[noteCol]).trim().slice(0, 140)
+          : `Sheet: ${effectiveSheetName}`;
+      const info = insertStmt.run(code, compactCode(code), status, note, nowIso);
       if (Number(info.changes) > 0) {
         imported++;
       } else {
         skipped++;
+      }
+      if (sampleCodes.length < 5) {
+        sampleCodes.push(code);
       }
     }
     db.exec('COMMIT');
@@ -935,6 +1290,10 @@ export async function syncRedeemCodesFromGoogleSheet(params?: {
     throw err;
   }
 
+  setAppSetting(db, 'google_sheet_last_sync_at', nowIso);
+  setAppSetting(db, 'google_sheet_last_rows_read', String(dataRows.length));
+  setAppSetting(db, 'google_sheet_last_imported', String(imported));
+
   return {
     success: true,
     sheetId: resolvedId,
@@ -942,7 +1301,54 @@ export async function syncRedeemCodesFromGoogleSheet(params?: {
     rowsRead: dataRows.length,
     imported,
     skipped,
+    detectedColumnLabel,
+    sampleCodes,
   };
+}
+
+/**
+ * Deduplicated, throttled Google Sheet auto-sync used on server startup and
+ * on-demand when /api/payments/verify-redeem receives a code not yet in SQLite.
+ */
+export async function ensureGoogleSheetSynced(options?: {
+  force?: boolean;
+  cooldownMs?: number;
+}): Promise<GoogleSheetSyncResult | null> {
+  const cfg = getSavedGoogleSheetConfig();
+  if (cfg.source === 'none' || !cfg.sheetId) {
+    return null;
+  }
+
+  const cooldownMs = Math.max(5000, options?.cooldownMs ?? 30000);
+  const now = Date.now();
+  if (!options?.force && now - lastAutoSyncAttemptMs < cooldownMs) {
+    return null;
+  }
+
+  if (inFlightSheetSync) {
+    return inFlightSheetSync;
+  }
+
+  lastAutoSyncAttemptMs = now;
+  inFlightSheetSync = syncRedeemCodesFromGoogleSheet({
+    sheetId: cfg.sheetId,
+    sheetName: cfg.sheetName || undefined,
+  })
+    .then((res) => {
+      if (res.success) {
+        console.log(
+          `[RedeemDB] Auto-synced Google Sheet (${res.sheetName}): read ${res.rowsRead} rows, imported ${res.imported} new codes.`
+        );
+      } else {
+        console.warn(`[RedeemDB] Auto-sync Google Sheet warning: ${res.error}`);
+      }
+      return res;
+    })
+    .finally(() => {
+      inFlightSheetSync = null;
+    });
+
+  return inFlightSheetSync;
 }
 
 // ============================================================================

@@ -423,13 +423,13 @@ export const COMMON_KOREAN_ADDRESSES: KoreanAddressItem[] = [
     sigungu: '영암군',
   },
   {
-    roadAddress: '전라북도 전주시 덕진구 기린대로 1025',
-    jibunAddress: '전라북도 전주시 덕진구 팔복동2가 254-2',
+    roadAddress: '전북특별자치도 전주시 덕진구 기린대로 1025',
+    jibunAddress: '전북특별자치도 전주시 덕진구 팔복동2가 254-2',
     bunjinumber: '1025',
     zonecode: '54848',
     buildingName: '전주출입국·외국인사무소',
     category: '공공/지원센터',
-    sido: '전라북도',
+    sido: '전북특별자치도',
     sigungu: '전주시 덕진구',
   },
 
