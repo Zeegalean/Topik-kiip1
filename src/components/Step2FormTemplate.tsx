@@ -1157,15 +1157,6 @@ export const Step2FormTemplate: React.FC<Step2FormTemplateProps> = ({
         )}
       </div>
 
-      {/* Step 3 Address Autocomplete, District Validator & Jurisdiction Mini-Map (no-print) */}
-      <Step3AddressHelper
-        address={formData.address}
-        onChangeAddress={(nextAddress) =>
-          setFormData((p) => ({ ...p, address: nextAddress }))
-        }
-        lang={lang}
-      />
-
       {/* OFFICIAL FORM TEMPLATE (EXACT FIDELITY AS USER SUPPLIED) */}
       <div 
         onContextMenu={(e) => {
@@ -1915,6 +1906,15 @@ export const Step2FormTemplate: React.FC<Step2FormTemplateProps> = ({
           </div>
         </div>
       </div>
+
+      {/* Step 3 Address Autocomplete, District Validator & Jurisdiction Mini-Map (Below Form, no-print) */}
+      <Step3AddressHelper
+        address={formData.address}
+        onChangeAddress={(nextAddress) =>
+          setFormData((p) => ({ ...p, address: nextAddress }))
+        }
+        lang={lang}
+      />
 
       {/* Nav footer */}
       <div className="no-print flex items-center justify-between gap-4 pt-4">

@@ -662,7 +662,7 @@ export const TRANSLATIONS: Record<string, any> = {
     "step2Title": "Step 3: Complete Official Application Form",
     "step2Subtitle": "Use AI auto-extraction or edit details directly on the official template.",
     "extractAiBtn": "⚡ Auto-Extract Document Data with AI OCR",
-    "extracting": "Analyzing documents with Gemini AI...",
+    "extracting": "Analyzing documents with OCR...",
     "extractSuccess": "Data extracted successfully! Check the form below.",
     "formOfficialTitle": "■ 2019 사회통합프로그램 운영지침 [서식 제1호]",
     "formMainHeader": "사회통합프로그램 연계 신청서",

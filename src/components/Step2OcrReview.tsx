@@ -522,12 +522,6 @@ export const Step2OcrReview: React.FC<Step2OcrReviewProps> = ({
               <span className="font-mono text-[11px] text-slate-700 tabular-nums">
                 {isKm ? 'ទំនុកចិត្ត OCR មធ្យម' : isKo ? '평균 OCR 신뢰도' : 'Avg OCR Confidence'}: {confidenceStats.avg}%
               </span>
-              {ocrModel && (
-                <>
-                  <span aria-hidden="true" className="text-slate-300">·</span>
-                  <span className="text-[11px] font-mono text-slate-500">{ocrModel}</span>
-                </>
-              )}
             </div>
             <h2 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
               {copy.title}
@@ -542,9 +536,9 @@ export const Step2OcrReview: React.FC<Step2OcrReviewProps> = ({
               type="button"
               onClick={onRescanOcr}
               disabled={isScanning}
-              className="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 disabled:opacity-60 text-slate-800 border border-slate-300 text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 active:bg-emerald-800 disabled:opacity-60 text-white border border-emerald-700 shadow-xs text-xs font-semibold inline-flex items-center gap-1.5 transition-colors cursor-pointer whitespace-nowrap shrink-0"
             >
-              <RefreshCw className={`w-3.5 h-3.5 text-indigo-600 ${isScanning ? 'animate-spin' : ''}`} />
+              <RefreshCw className={`w-3.5 h-3.5 text-white ${isScanning ? 'animate-spin' : ''}`} />
               <span>{copy.rescanBtn}</span>
             </button>
 

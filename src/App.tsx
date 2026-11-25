@@ -189,6 +189,7 @@ export default function App() {
   });
   const [isPaymentModalOpen, setIsPaymentModalOpen] = useState(false);
   const [pendingStepAfterPayment, setPendingStepAfterPayment] = useState<number | null>(null);
+  const [autoDownloadPdfTrigger, setAutoDownloadPdfTrigger] = useState<number>(0);
 
   // Form element ref for high-resolution canvas snapshot
   const formRef = useRef<HTMLDivElement | null>(null);
@@ -612,6 +613,7 @@ export default function App() {
                       setPendingStepAfterPayment(null);
                       setIsPaymentModalOpen(true);
                     }}
+                    autoDownloadTrigger={autoDownloadPdfTrigger}
                   />
                 )}
 
@@ -642,9 +644,17 @@ export default function App() {
             setIsPaymentModalOpen(false);
           }
         }}
-        onPaymentSuccess={() => {
+        onPaymentSuccess={(options) => {
           setIsPaid(true);
           setIsPaymentModalOpen(false);
+          if (options?.autoDownloadPdf) {
+            setActiveTab('flow');
+            setCurrentStep(4);
+            setPendingStepAfterPayment(null);
+            setAutoDownloadPdfTrigger((n) => n + 1);
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+            return;
+          }
           if (pendingStepAfterPayment === 5) {
             setCurrentStep(5);
             setPendingStepAfterPayment(null);

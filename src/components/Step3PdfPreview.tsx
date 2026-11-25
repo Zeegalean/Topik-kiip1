@@ -66,6 +66,7 @@ interface Step3PdfPreviewProps {
   setIsPaid?: (val: boolean) => void;
   onOpenPayment?: () => void;
   onSkipPayment?: () => void;
+  autoDownloadTrigger?: number;
 }
 
 export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
@@ -83,10 +84,15 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
   setIsPaid,
   onOpenPayment,
   onSkipPayment,
+  autoDownloadTrigger = 0,
 }) => {
   const [showRightClickNotice, setShowRightClickNotice] = useState(false);
   const t = getTranslation(lang);
   const [isGeneratingMerged, setIsGeneratingMerged] = useState(false);
+  const [forceCleanExport, setForceCleanExport] = useState(false);
+  const [pendingAutoDownload, setPendingAutoDownload] = useState(false);
+  const lastHandledTriggerRef = useRef<number>(0);
+  const effectivePaid = isPaid || forceCleanExport;
   const [mergedArcPreview, setMergedArcPreview] = useState<string | null>(null);
   const [previewTab, setPreviewTab] = useState<'form' | 'pages'>('form');
   const [selectedZoomImg, setSelectedZoomImg] = useState<{
@@ -104,7 +110,19 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
     filename: string;
     totalPages: number;
     sizeStr: string;
+    autoTriggered?: boolean;
   } | null>(null);
+
+  const closeDownloadedModal = () => {
+    setDownloadedFileModal((prev) => {
+      if (prev?.blobUrl) {
+        try {
+          URL.revokeObjectURL(prev.blobUrl);
+        } catch {}
+      }
+      return null;
+    });
+  };
 
   // Quick Paid Redeem Code & Separate Free Promo Code state
   const [redeemCodeInput, setRedeemCodeInput] = useState('');
@@ -192,6 +210,7 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
       try {
         localStorage.setItem('kiip_doc_paid_v3', 'true');
       } catch {}
+      setForceCleanExport(true);
       if (setIsPaid) setIsPaid(true);
       recordPaymentTransaction({
         userEmail: '',
@@ -206,11 +225,13 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
         type: 'success',
         text:
           lang === 'ko'
-            ? '✓ 코드 인증 완료! Clean PDF가 잠금 해제되었습니다!'
+            ? '✓ 코드 인증 완료! Clean PDF 자동 다운로드 및 저장 팝업을 여는 중...'
             : lang === 'en'
-            ? '✓ Code verified! Clean PDF unlocked successfully!'
-            : '✓ លេខកូដត្រឹមត្រូវ! បានដោះសោទាញយក Clean PDF ដោយជោគជ័យ!',
+            ? '✓ Code verified! Generating Clean PDF & opening download popup...'
+            : '✓ លេខកូដត្រឹមត្រូវ! កំពុងបង្កើត & ទាញយក Clean PDF ដោយស្វ័យប្រវត្តិ...',
       });
+      // Immediately trigger Clean PDF auto-download & Download Popup once clean state paints
+      setPendingAutoDownload(true);
     } else {
       setPromoCodeMsg({
         type: 'error',
@@ -252,8 +273,9 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
   }, [docs.arcFront, docs.arcBack, formData.name]);
 
   // Download Full Merged Packet (Form + TOPIK + ARC + Passport)
-  const handleDownloadMerged = async () => {
-    if (!isPaid) {
+  const handleDownloadMerged = async (options?: { forceClean?: boolean; alwaysShowPopup?: boolean }) => {
+    const unlockedNow = Boolean(effectivePaid || options?.forceClean);
+    if (!unlockedNow) {
       if (onOpenPayment) {
         onOpenPayment();
       }
@@ -270,9 +292,9 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
     setStatusNotice(null);
 
     try {
-      // Allow React to mount & paint #pdf-capture-container and decode signature image
+      // Allow React to mount & paint #pdf-capture-container (watermark-free) and decode signature image
       await new Promise<void>((resolve) =>
-        requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 180)))
+        requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(resolve, 220)))
       );
 
       const targetElement =
@@ -283,7 +305,7 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
         docs,
         formData,
         sigSettings,
-        showWatermark: !isPaid,
+        showWatermark: !unlockedNow,
       });
 
       const res = await downloadPdfFile(pdf, formData.name);
@@ -297,13 +319,14 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
       const sizeInMb = (res.blob.size / (1024 * 1024)).toFixed(2);
       const sizeStr = res.blob.size > 1024 * 1024 ? `${sizeInMb} MB` : `${Math.round(res.blob.size / 1024)} KB`;
 
-      if (!res.autoTriggered) {
+      if (options?.alwaysShowPopup || !res.autoTriggered) {
         setDownloadedFileModal({
           blob: res.blob,
           blobUrl: res.blobUrl,
           filename: res.filename,
           totalPages: actualPages,
           sizeStr,
+          autoTriggered: res.autoTriggered,
         });
       } else {
         setDownloadedFileModal(null);
@@ -318,7 +341,7 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
       recordGeneratedDocument({
         applicantName: formData.name || 'Applicant',
         pageCount: actualPages,
-        isPaid: Boolean(isPaid),
+        isPaid: Boolean(unlockedNow),
       }).catch(() => {});
 
       confetti({
@@ -330,7 +353,7 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
       setStatusNotice({
         type: 'success',
         text: res.autoTriggered
-          ? `✓ បានទាញយកកញ្ចប់ PDF ពេញលេញ (${actualPages} ទំព័រ, ${sizeStr}) រួចរាល់!`
+          ? `✓ បានទាញយកកញ្ចប់ PDF ពេញលេញ (${actualPages} ទំព័រ, ${sizeStr}) ដោយស្វ័យប្រវត្តិរួចរាល់!`
           : `✓ បង្កើតកញ្ចប់ PDF ពេញលេញ (${actualPages} ទំព័រ, ${sizeStr}) រួចរាល់! សូមចុច Save ខាងក្រោម។`,
       });
     } catch (err) {
@@ -343,6 +366,23 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
       setIsGeneratingMerged(false);
     }
   };
+
+  // Trigger automatic Clean PDF download + Download Popup when PaymentModal completes Promo/Redeem unlock
+  useEffect(() => {
+    if (autoDownloadTrigger > 0 && autoDownloadTrigger !== lastHandledTriggerRef.current) {
+      lastHandledTriggerRef.current = autoDownloadTrigger;
+      setForceCleanExport(true);
+      setPendingAutoDownload(true);
+    }
+  }, [autoDownloadTrigger]);
+
+  // Execute queued auto-download after clean (watermark-free) state has rendered
+  useEffect(() => {
+    if (!pendingAutoDownload || !effectivePaid || isGeneratingMerged) return;
+    setPendingAutoDownload(false);
+    void handleDownloadMerged({ forceClean: true, alwaysShowPopup: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingAutoDownload, effectivePaid]);
 
   const totalPages =
     1 + // Form
@@ -438,7 +478,7 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
 
                 <button
                   type="button"
-                  onClick={handleDownloadMerged}
+                  onClick={() => handleDownloadMerged()}
                   disabled={isGeneratingMerged}
                   className="px-4 py-3.5 rounded-2xl bg-slate-800 hover:bg-slate-900 active:scale-[0.98] text-white font-extrabold text-xs sm:text-sm shadow-md flex items-center justify-center gap-2 transition-all hover:scale-[1.02] cursor-pointer disabled:opacity-50"
                   title="ទាញយកកញ្ចប់ឯកសារសាកល្បងភ្លាមៗ"
@@ -534,7 +574,7 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
               </div>
             ) : (
               <button
-                onClick={handleDownloadMerged}
+                onClick={() => handleDownloadMerged()}
                 disabled={isGeneratingMerged}
                 className="px-6 py-3.5 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-700 hover:to-teal-700 text-white font-extrabold text-xs sm:text-sm shadow-lg shadow-emerald-900/20 flex items-center justify-center gap-2.5 transition-all hover:scale-[1.02] cursor-pointer disabled:opacity-50"
                 title="ទាញយកកញ្ចប់ PDF ពេញលេញគ្រប់ទំព័រទាំងអស់"
@@ -689,7 +729,7 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
             sigSettings={sigSettings}
             editable={false}
             lang={lang}
-            showWatermark={!isPaid}
+            showWatermark={!effectivePaid}
           />
         </div>
       )}
@@ -1074,11 +1114,11 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
         </button>
       </div>
 
-      {/* Mobile-Optimized PDF Download & Save Helper Modal */}
+      {/* Clean PDF Auto-Download & Save Popup Modal */}
       {downloadedFileModal && (
         <div
           className="no-print fixed inset-0 z-[100002] bg-slate-900/85 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in"
-          onClick={() => setDownloadedFileModal(null)}
+          onClick={closeDownloadedModal}
         >
           <div
             className="bg-white rounded-3xl max-w-lg w-full p-6 sm:p-7 shadow-2xl border border-slate-200 overflow-hidden space-y-5 animate-in zoom-in-95"
@@ -1091,29 +1131,53 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
                   <FileCheck2 className="w-6 h-6" />
                 </div>
                 <div>
-                  <h3 className="font-extrabold text-base text-slate-900 flex items-center gap-2">
-                    <span>កញ្ចប់ឯកសារ PDF រួចរាល់!</span>
+                  <h3 className="font-extrabold text-base text-slate-900 flex items-center gap-2 flex-wrap">
+                    <span>
+                      {lang === 'ko'
+                        ? 'Clean PDF 준비 완료!'
+                        : lang === 'en'
+                        ? 'Clean PDF Ready to Save!'
+                        : 'កញ្ចប់ឯកសារ Clean PDF រួចរាល់!'}
+                    </span>
                     <span className="text-[10px] font-black uppercase px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 border border-emerald-300">
-                      100% Ready
+                      100% Clean
                     </span>
                   </h3>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    ទំហំ: {downloadedFileModal.sizeStr} | ចំនួន: {downloadedFileModal.totalPages} ទំព័រ
+                    {lang === 'ko'
+                      ? `크기: ${downloadedFileModal.sizeStr} · 총 ${downloadedFileModal.totalPages}페이지`
+                      : lang === 'en'
+                      ? `Size: ${downloadedFileModal.sizeStr} · ${downloadedFileModal.totalPages} pages`
+                      : `ទំហំ: ${downloadedFileModal.sizeStr} | ចំនួន: ${downloadedFileModal.totalPages} ទំព័រ`}
                   </p>
                 </div>
               </div>
               <button
                 type="button"
-                onClick={() => setDownloadedFileModal(null)}
+                onClick={closeDownloadedModal}
                 className="w-8 h-8 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 flex items-center justify-center font-bold text-sm cursor-pointer transition-colors"
               >
                 ✕
               </button>
             </div>
 
+            {/* Auto-download status confirmation pill */}
+            {downloadedFileModal.autoTriggered && (
+              <div className="p-3 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs font-semibold flex items-start gap-2">
+                <CheckCircle className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                <span>
+                  {lang === 'ko'
+                    ? '✓ PDF 파일 자동 다운로드가 시작되었습니다! 다운로드가 안 보이면 아래 버튼을 눌러 다시 저장하세요.'
+                    : lang === 'en'
+                    ? '✓ Automatic Save as PDF download started! If your browser blocked it, click the button below to save.'
+                    : '✓ ប្រព័ន្ធបានចាប់ផ្ដើមទាញយកឯកសារ PDF ដោយស្វ័យប្រវត្តិរួចហើយ! ប្រសិនបើមិនទាន់ឃើញឯកសារ សូមចុចប៊ូតុងខាងក្រោមដើម្បី Save ភ្លាមៗ។'}
+                </span>
+              </div>
+            )}
+
             {/* Direct Save & Share Action Buttons */}
             <div className="space-y-3 pt-1">
-              {/* Button 1: Direct Save Link (Direct user gesture - Works 100% on iPhone & Android) */}
+              {/* Button 1: Direct Save Link (Direct user gesture - Works 100% on Desktop, iPhone & Android) */}
               <a
                 href={downloadedFileModal.blobUrl}
                 download={downloadedFileModal.filename}
@@ -1122,7 +1186,13 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
                 className="w-full py-4 px-5 rounded-2xl bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98] text-white font-black text-sm sm:text-base flex items-center justify-center gap-3 shadow-lg shadow-emerald-900/25 transition-all text-center cursor-pointer"
               >
                 <Download className="w-5 h-5 shrink-0 animate-bounce" />
-                <span>📥 ចុចត្រង់នេះដើម្បី Save / ទាញយក PDF</span>
+                <span>
+                  {lang === 'ko'
+                    ? '📥 PDF 저장 / 다운로드 (Save as PDF)'
+                    : lang === 'en'
+                    ? '📥 Save / Download Clean PDF'
+                    : '📥 ចុចត្រង់នេះដើម្បី Save / ទាញយក PDF'}
+                </span>
               </a>
 
               {/* Button 2: Native System Share (Save to Files / Telegram / Drive) */}
@@ -1198,7 +1268,7 @@ export const Step3PdfPreview: React.FC<Step3PdfPreviewProps> = ({
             <div className="text-center pt-1">
               <button
                 type="button"
-                onClick={() => setDownloadedFileModal(null)}
+                onClick={closeDownloadedModal}
                 className="text-xs text-slate-400 hover:text-slate-600 underline font-medium cursor-pointer"
               >
                 បិទផ្ទាំងនេះ (Close)

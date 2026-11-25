@@ -31,7 +31,7 @@ import { auth, recordPaymentTransaction, verifyAndRedeemFirestorePromo } from '.
 interface PaymentModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onPaymentSuccess: () => void;
+  onPaymentSuccess: (options?: { autoDownloadPdf?: boolean; source?: 'promo' | 'redeem' | 'payment' }) => void;
   lang?: Language;
   formData?: ApplicationFormData;
   userEmail?: string;
@@ -122,7 +122,17 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     });
   }, []);
 
-  // 30-second countdown timer for saving/downloading on mobile before auto-advancing to Step 4
+  // Reset transient states whenever modal opens fresh
+  useEffect(() => {
+    if (!isOpen) return;
+    setIsProcessing(false);
+    setProcessingStep('');
+    setIsSuccess(false);
+    setRedeemError(null);
+    setPromoCodeError(null);
+  }, [isOpen]);
+
+  // 30-second countdown timer for saving/downloading on mobile before auto-advancing
   useEffect(() => {
     if (!isOpen || !isSuccess) return;
 
@@ -130,7 +140,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       setSuccessSecondsLeft((prev) => {
         if (prev <= 1) {
           clearInterval(timer);
-          onPaymentSuccess();
+          onPaymentSuccess({ autoDownloadPdf: true, source: 'payment' });
           return 0;
         }
         return prev - 1;
@@ -295,13 +305,24 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
 
       setProcessingStep(
         isKm
-          ? '✓ លេខកូដត្រឹមត្រូវ! កំពុងដោះសោ Clean PDF...'
+          ? '✓ លេខកូដត្រឹមត្រូវ! កំពុងដោះសោ និងទាញយក Clean PDF...'
           : isKo
-          ? '✓ 코드 확인 완료! Clean PDF 잠금 해제 중...'
-          : '✓ Code verified! Unlocking Clean PDF...'
+          ? '✓ 코드 확인 완료! Clean PDF 자동 저장 중...'
+          : '✓ Code verified! Unlocking & downloading Clean PDF...'
       );
-      await new Promise((r) => setTimeout(r, 450));
-      completeUnlock();
+      try {
+        localStorage.setItem('kiip_doc_paid_v3', 'true');
+      } catch {
+        // ignore storage errors
+      }
+      confetti({
+        particleCount: 150,
+        spread: 95,
+        origin: { y: 0.5 },
+      });
+      await new Promise((r) => setTimeout(r, 420));
+      setIsProcessing(false);
+      onPaymentSuccess({ autoDownloadPdf: true, source });
     } else {
       setIsProcessing(false);
       setErr(
@@ -554,7 +575,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
             <div className="pt-2 flex flex-col sm:flex-row items-center justify-center gap-3">
               <button
                 type="button"
-                onClick={onPaymentSuccess}
+                onClick={() => onPaymentSuccess({ autoDownloadPdf: true, source: 'payment' })}
                 className="w-full sm:w-auto px-6 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-bold text-sm shadow-lg shadow-emerald-900/20 inline-flex items-center justify-center gap-2 transition-all hover:scale-105 cursor-pointer"
               >
                 <span>{t.downloadCleanNow}</span>
