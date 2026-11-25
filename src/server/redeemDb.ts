@@ -311,6 +311,30 @@ export function getRedeemDb(): DatabaseSync {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_verified_receipts_fp ON verified_receipts(transfer_fingerprint);
+
+    CREATE TABLE IF NOT EXISTS ocr_transactions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tx_id TEXT NOT NULL UNIQUE,
+      session_hash TEXT NOT NULL DEFAULT '',
+      tx_type TEXT NOT NULL DEFAULT 'document_ocr' CHECK (tx_type IN ('document_ocr', 'bank_receipt')),
+      doc_types_json TEXT NOT NULL DEFAULT '[]',
+      model_version TEXT NOT NULL DEFAULT 'unknown',
+      confidence_score INTEGER NOT NULL DEFAULT 0,
+      verification_status TEXT NOT NULL DEFAULT 'pending' CHECK (verification_status IN ('verified', 'needs_review', 'failed', 'false_positive', 'pending')),
+      extracted_fields_json TEXT NOT NULL DEFAULT '[]',
+      missing_fields_json TEXT NOT NULL DEFAULT '[]',
+      field_confidence_json TEXT NOT NULL DEFAULT '{}',
+      error_pattern TEXT NOT NULL DEFAULT 'NONE',
+      fallback_used INTEGER NOT NULL DEFAULT 0,
+      latency_ms INTEGER NOT NULL DEFAULT 0,
+      admin_note TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_ocr_tx_created ON ocr_transactions(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_ocr_tx_status ON ocr_transactions(verification_status);
+    CREATE INDEX IF NOT EXISTS idx_ocr_tx_model ON ocr_transactions(model_version);
+    CREATE INDEX IF NOT EXISTS idx_ocr_tx_pattern ON ocr_transactions(error_pattern);
   `);
 
   ensureRedeemSchemaMigrations(db);
@@ -2477,6 +2501,507 @@ export function checkServerPromoCodeExists(rawCode: string): boolean {
     .get(code, compact) as { code: string } | undefined;
   return Boolean(row);
 }
+
+// ============================================================================
+// ANONYMIZED OCR TRANSACTION AUDIT LOGS (ZERO PII STORED)
+// ============================================================================
+
+export type OcrTransactionType = 'document_ocr' | 'bank_receipt';
+export type OcrVerificationStatus = 'verified' | 'needs_review' | 'failed' | 'false_positive' | 'pending';
+
+export interface OcrTransactionRecord {
+  id: number;
+  txId: string;
+  sessionHash: string;
+  txType: OcrTransactionType;
+  docTypes: string[];
+  modelVersion: string;
+  confidenceScore: number;
+  verificationStatus: OcrVerificationStatus;
+  extractedFields: string[];
+  missingFields: string[];
+  fieldConfidence: Record<string, number>;
+  errorPattern: string;
+  fallbackUsed: boolean;
+  latencyMs: number;
+  adminNote: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface OcrModelPerformanceRow {
+  modelVersion: string;
+  totalRuns: number;
+  avgConfidence: number;
+  avgLatencyMs: number;
+  verifiedCount: number;
+  failedCount: number;
+  passRate: number;
+}
+
+export interface OcrPatternStatRow {
+  pattern: string;
+  count: number;
+  sharePct: number;
+  avgConfidence: number;
+}
+
+export interface OcrMissingFieldStatRow {
+  field: string;
+  count: number;
+}
+
+export interface OcrAnalyticsSummary {
+  totalCount: number;
+  docOcrCount: number;
+  receiptOcrCount: number;
+  avgConfidence: number;
+  verifiedCount: number;
+  needsReviewCount: number;
+  failedCount: number;
+  falsePositiveCount: number;
+  pendingCount: number;
+  fallbackCount: number;
+  avgLatencyMs: number;
+  passRate: number;
+  modelBreakdown: OcrModelPerformanceRow[];
+  failingPatterns: OcrPatternStatRow[];
+  topMissingFields: OcrMissingFieldStatRow[];
+}
+
+const ALLOWED_OCR_DOC_TYPES = new Set([
+  'arcFront',
+  'arcBack',
+  'topikCert',
+  'passport',
+  'pdfText',
+  'bankReceipt',
+]);
+
+const ALLOWED_OCR_FIELD_KEYS = new Set([
+  'name',
+  'regNumber1',
+  'regNumber2',
+  'regNumber',
+  'gender',
+  'nationality',
+  'visaStatus',
+  'address',
+  'docVerificationNo',
+  'examNumber',
+  'examDate',
+  'round',
+  'validUntil',
+  'grade',
+  'passportNo',
+  'passportExpiry',
+  'isReceipt',
+  'recipientMatched',
+  'amountMatched',
+  'statusSuccess',
+  'timeVerified',
+]);
+
+const ALLOWED_VERIFICATION_STATUSES = new Set<OcrVerificationStatus>([
+  'verified',
+  'needs_review',
+  'failed',
+  'false_positive',
+  'pending',
+]);
+
+function sanitizeAllowedList(values: string[] | undefined, allowlist: Set<string>): string[] {
+  if (!Array.isArray(values)) return [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const raw of values) {
+    const clean = String(raw || '').trim();
+    if (allowlist.has(clean) && !seen.has(clean)) {
+      seen.add(clean);
+      out.push(clean);
+    }
+  }
+  return out;
+}
+
+function sanitizeFieldConfidenceMap(raw: Record<string, number> | undefined): Record<string, number> {
+  if (!raw || typeof raw !== 'object') return {};
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (!ALLOWED_OCR_FIELD_KEYS.has(k)) continue;
+    const num = Number(v);
+    if (Number.isFinite(num)) {
+      out[k] = Math.max(0, Math.min(100, Math.round(num)));
+    }
+  }
+  return out;
+}
+
+function sanitizeErrorPattern(raw: string | undefined): string {
+  const clean = String(raw || 'NONE')
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9_]/g, '_')
+    .replace(/_+/g, '_')
+    .slice(0, 64);
+  return clean || 'NONE';
+}
+
+function safeJsonParseArray(raw: string): string[] {
+  try {
+    const parsed = JSON.parse(raw || '[]');
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+function safeJsonParseConfidence(raw: string): Record<string, number> {
+  try {
+    const parsed = JSON.parse(raw || '{}');
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const out: Record<string, number> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      const n = Number(v);
+      if (Number.isFinite(n)) out[k] = Math.max(0, Math.min(100, Math.round(n)));
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+function mapOcrTxRow(r: any): OcrTransactionRecord {
+  return {
+    id: Number(r.id),
+    txId: String(r.tx_id || ''),
+    sessionHash: String(r.session_hash || ''),
+    txType: r.tx_type === 'bank_receipt' ? 'bank_receipt' : 'document_ocr',
+    docTypes: safeJsonParseArray(r.doc_types_json),
+    modelVersion: String(r.model_version || 'unknown'),
+    confidenceScore: Math.max(0, Math.min(100, Math.round(Number(r.confidence_score) || 0))),
+    verificationStatus: ALLOWED_VERIFICATION_STATUSES.has(r.verification_status)
+      ? (r.verification_status as OcrVerificationStatus)
+      : 'pending',
+    extractedFields: safeJsonParseArray(r.extracted_fields_json),
+    missingFields: safeJsonParseArray(r.missing_fields_json),
+    fieldConfidence: safeJsonParseConfidence(r.field_confidence_json),
+    errorPattern: String(r.error_pattern || 'NONE'),
+    fallbackUsed: Number(r.fallback_used) === 1,
+    latencyMs: Math.max(0, Math.round(Number(r.latency_ms) || 0)),
+    adminNote: String(r.admin_note || ''),
+    createdAt: String(r.created_at || ''),
+    updatedAt: String(r.updated_at || ''),
+  };
+}
+
+export function recordOcrTransaction(input: {
+  sessionHash: string;
+  txType: OcrTransactionType;
+  docTypes: string[];
+  modelVersion: string;
+  confidenceScore: number;
+  verificationStatus: OcrVerificationStatus;
+  extractedFields: string[];
+  missingFields: string[];
+  fieldConfidence?: Record<string, number>;
+  errorPattern?: string;
+  fallbackUsed?: boolean;
+  latencyMs?: number;
+}): OcrTransactionRecord {
+  const db = getRedeemDb();
+  const nowIso = new Date().toISOString();
+  const prefix = input.txType === 'bank_receipt' ? 'RCP' : 'OCR';
+  const txId = `${prefix}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
+  const sessionHash = String(input.sessionHash || 'anon')
+    .replace(/[^a-fA-F0-9a-z_-]/g, '')
+    .slice(0, 16) || 'anon';
+  const txType: OcrTransactionType = input.txType === 'bank_receipt' ? 'bank_receipt' : 'document_ocr';
+  const docTypes = sanitizeAllowedList(input.docTypes, ALLOWED_OCR_DOC_TYPES);
+  const modelVersion = String(input.modelVersion || 'unknown')
+    .trim()
+    .replace(/[^a-zA-Z0-9._:/ -]/g, '')
+    .slice(0, 64) || 'unknown';
+  const confidenceScore = Math.max(0, Math.min(100, Math.round(Number(input.confidenceScore) || 0)));
+  const verificationStatus: OcrVerificationStatus = ALLOWED_VERIFICATION_STATUSES.has(input.verificationStatus)
+    ? input.verificationStatus
+    : 'pending';
+  const extractedFields = sanitizeAllowedList(input.extractedFields, ALLOWED_OCR_FIELD_KEYS);
+  const missingFields = sanitizeAllowedList(input.missingFields, ALLOWED_OCR_FIELD_KEYS);
+  const fieldConfidence = sanitizeFieldConfidenceMap(input.fieldConfidence);
+  const errorPattern = sanitizeErrorPattern(input.errorPattern);
+  const fallbackUsed = input.fallbackUsed ? 1 : 0;
+  const latencyMs = Math.max(0, Math.min(300000, Math.round(Number(input.latencyMs) || 0)));
+
+  db.prepare(
+    `INSERT INTO ocr_transactions (
+      tx_id, session_hash, tx_type, doc_types_json, model_version,
+      confidence_score, verification_status, extracted_fields_json, missing_fields_json,
+      field_confidence_json, error_pattern, fallback_used, latency_ms, admin_note,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?)`
+  ).run(
+    txId,
+    sessionHash,
+    txType,
+    JSON.stringify(docTypes),
+    modelVersion,
+    confidenceScore,
+    verificationStatus,
+    JSON.stringify(extractedFields),
+    JSON.stringify(missingFields),
+    JSON.stringify(fieldConfidence),
+    errorPattern,
+    fallbackUsed,
+    latencyMs,
+    nowIso,
+    nowIso
+  );
+
+  const inserted = db
+    .prepare('SELECT * FROM ocr_transactions WHERE tx_id = ?')
+    .get(txId);
+  return mapOcrTxRow(inserted);
+}
+
+export function queryOcrTransactions(params?: {
+  page?: number;
+  limit?: number;
+  status?: string;
+  model?: string;
+  txType?: string;
+  errorPattern?: string;
+  search?: string;
+}): {
+  items: OcrTransactionRecord[];
+  total: number;
+  page: number;
+  limit: number;
+  totalPages: number;
+  availableModels: string[];
+  summary: OcrAnalyticsSummary;
+} {
+  const db = getRedeemDb();
+  const page = Math.max(1, Math.floor(Number(params?.page) || 1));
+  const limit = Math.max(1, Math.min(100, Math.floor(Number(params?.limit) || 25)));
+  const offset = (page - 1) * limit;
+
+  const whereClauses: string[] = [];
+  const bindValues: any[] = [];
+
+  const statusFilter = String(params?.status || '').trim().toLowerCase();
+  if (statusFilter && statusFilter !== 'all' && ALLOWED_VERIFICATION_STATUSES.has(statusFilter as OcrVerificationStatus)) {
+    whereClauses.push('verification_status = ?');
+    bindValues.push(statusFilter);
+  }
+
+  const txTypeFilter = String(params?.txType || '').trim().toLowerCase();
+  if (txTypeFilter === 'document_ocr' || txTypeFilter === 'bank_receipt') {
+    whereClauses.push('tx_type = ?');
+    bindValues.push(txTypeFilter);
+  }
+
+  const modelFilter = String(params?.model || '').trim();
+  if (modelFilter && modelFilter !== 'all') {
+    whereClauses.push('model_version = ?');
+    bindValues.push(modelFilter.slice(0, 64));
+  }
+
+  const patternFilter = String(params?.errorPattern || '').trim().toUpperCase();
+  if (patternFilter && patternFilter !== 'ALL') {
+    whereClauses.push('error_pattern = ?');
+    bindValues.push(patternFilter.slice(0, 64));
+  }
+
+  const searchFilter = String(params?.search || '').trim();
+  if (searchFilter) {
+    const likePattern = `%${searchFilter.slice(0, 64)}%`;
+    whereClauses.push(
+      '(tx_id LIKE ? OR session_hash LIKE ? OR model_version LIKE ? OR error_pattern LIKE ? OR missing_fields_json LIKE ? OR admin_note LIKE ?)'
+    );
+    bindValues.push(likePattern, likePattern, likePattern, likePattern, likePattern, likePattern);
+  }
+
+  const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
+
+  const totalRow = db
+    .prepare(`SELECT COUNT(*) as cnt FROM ocr_transactions ${whereSql}`)
+    .get(...bindValues) as { cnt: number };
+  const total = Number(totalRow?.cnt || 0);
+
+  const rows = db
+    .prepare(
+      `SELECT * FROM ocr_transactions ${whereSql} ORDER BY id DESC LIMIT ? OFFSET ?`
+    )
+    .all(...bindValues, limit, offset);
+
+  const items = rows.map(mapOcrTxRow);
+
+  // Global analytics summary across all logged OCR transactions
+  const aggRow = db
+    .prepare(
+      `SELECT
+         COUNT(*) as total_count,
+         SUM(CASE WHEN tx_type = 'document_ocr' THEN 1 ELSE 0 END) as doc_count,
+         SUM(CASE WHEN tx_type = 'bank_receipt' THEN 1 ELSE 0 END) as receipt_count,
+         AVG(confidence_score) as avg_conf,
+         AVG(latency_ms) as avg_latency,
+         SUM(CASE WHEN verification_status = 'verified' THEN 1 ELSE 0 END) as verified_count,
+         SUM(CASE WHEN verification_status = 'needs_review' THEN 1 ELSE 0 END) as review_count,
+         SUM(CASE WHEN verification_status = 'failed' THEN 1 ELSE 0 END) as failed_count,
+         SUM(CASE WHEN verification_status = 'false_positive' THEN 1 ELSE 0 END) as fp_count,
+         SUM(CASE WHEN verification_status = 'pending' THEN 1 ELSE 0 END) as pending_count,
+         SUM(CASE WHEN fallback_used = 1 THEN 1 ELSE 0 END) as fallback_count
+       FROM ocr_transactions`
+    )
+    .get() as any;
+
+  const totalCount = Number(aggRow?.total_count || 0);
+  const verifiedCount = Number(aggRow?.verified_count || 0);
+
+  const modelRows = db
+    .prepare(
+      `SELECT
+         model_version,
+         COUNT(*) as total_runs,
+         AVG(confidence_score) as avg_conf,
+         AVG(latency_ms) as avg_latency,
+         SUM(CASE WHEN verification_status = 'verified' THEN 1 ELSE 0 END) as verified_cnt,
+         SUM(CASE WHEN verification_status IN ('failed', 'false_positive') THEN 1 ELSE 0 END) as failed_cnt
+       FROM ocr_transactions
+       GROUP BY model_version
+       ORDER BY total_runs DESC`
+    )
+    .all() as any[];
+
+  const modelBreakdown: OcrModelPerformanceRow[] = modelRows.map((m) => {
+    const runs = Number(m.total_runs || 0);
+    const vCnt = Number(m.verified_cnt || 0);
+    return {
+      modelVersion: String(m.model_version || 'unknown'),
+      totalRuns: runs,
+      avgConfidence: Math.round(Number(m.avg_conf || 0)),
+      avgLatencyMs: Math.round(Number(m.avg_latency || 0)),
+      verifiedCount: vCnt,
+      failedCount: Number(m.failed_cnt || 0),
+      passRate: runs > 0 ? Math.round((vCnt / runs) * 100) : 0,
+    };
+  });
+
+  const patternRows = db
+    .prepare(
+      `SELECT
+         error_pattern,
+         COUNT(*) as cnt,
+         AVG(confidence_score) as avg_conf
+       FROM ocr_transactions
+       WHERE error_pattern != 'NONE'
+       GROUP BY error_pattern
+       ORDER BY cnt DESC
+       LIMIT 10`
+    )
+    .all() as any[];
+
+  const totalPatternErrors = patternRows.reduce((acc, r) => acc + Number(r.cnt || 0), 0);
+  const failingPatterns: OcrPatternStatRow[] = patternRows.map((p) => {
+    const cnt = Number(p.cnt || 0);
+    return {
+      pattern: String(p.error_pattern || 'UNKNOWN'),
+      count: cnt,
+      sharePct: totalPatternErrors > 0 ? Math.round((cnt / totalPatternErrors) * 100) : 0,
+      avgConfidence: Math.round(Number(p.avg_conf || 0)),
+    };
+  });
+
+  // Aggregate top missing field keys across recent 1,000 transactions (zero PII, field keys only)
+  const missingRows = db
+    .prepare(
+      `SELECT missing_fields_json FROM ocr_transactions
+       WHERE missing_fields_json != '[]'
+       ORDER BY id DESC
+       LIMIT 1000`
+    )
+    .all() as Array<{ missing_fields_json: string }>;
+
+  const missingFreq = new Map<string, number>();
+  for (const r of missingRows) {
+    for (const fieldKey of safeJsonParseArray(r.missing_fields_json)) {
+      missingFreq.set(fieldKey, (missingFreq.get(fieldKey) || 0) + 1);
+    }
+  }
+  const topMissingFields: OcrMissingFieldStatRow[] = Array.from(missingFreq.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([field, count]) => ({ field, count }));
+
+  return {
+    items,
+    total,
+    page,
+    limit,
+    totalPages: Math.max(1, Math.ceil(total / limit)),
+    availableModels: modelBreakdown.map((m) => m.modelVersion),
+    summary: {
+      totalCount,
+      docOcrCount: Number(aggRow?.doc_count || 0),
+      receiptOcrCount: Number(aggRow?.receipt_count || 0),
+      avgConfidence: Math.round(Number(aggRow?.avg_conf || 0)),
+      verifiedCount,
+      needsReviewCount: Number(aggRow?.review_count || 0),
+      failedCount: Number(aggRow?.failed_count || 0),
+      falsePositiveCount: Number(aggRow?.fp_count || 0),
+      pendingCount: Number(aggRow?.pending_count || 0),
+      fallbackCount: Number(aggRow?.fallback_count || 0),
+      avgLatencyMs: Math.round(Number(aggRow?.avg_latency || 0)),
+      passRate: totalCount > 0 ? Math.round((verifiedCount / totalCount) * 100) : 0,
+      modelBreakdown,
+      failingPatterns,
+      topMissingFields,
+    },
+  };
+}
+
+export function updateOcrTransactionVerification(
+  txId: string,
+  verificationStatus: OcrVerificationStatus,
+  adminNote?: string
+): OcrTransactionRecord | null {
+  const cleanTxId = String(txId || '').trim().toUpperCase().slice(0, 32);
+  if (!cleanTxId || !ALLOWED_VERIFICATION_STATUSES.has(verificationStatus)) {
+    return null;
+  }
+  const db = getRedeemDb();
+  const existing = db
+    .prepare('SELECT * FROM ocr_transactions WHERE tx_id = ?')
+    .get(cleanTxId) as any;
+  if (!existing) return null;
+
+  const cleanNote =
+    typeof adminNote === 'string'
+      ? adminNote.trim().slice(0, 280)
+      : String(existing.admin_note || '');
+  const nowIso = new Date().toISOString();
+
+  db.prepare(
+    `UPDATE ocr_transactions
+     SET verification_status = ?, admin_note = ?, updated_at = ?
+     WHERE tx_id = ?`
+  ).run(verificationStatus, cleanNote, nowIso, cleanTxId);
+
+  const updated = db
+    .prepare('SELECT * FROM ocr_transactions WHERE tx_id = ?')
+    .get(cleanTxId);
+  return updated ? mapOcrTxRow(updated) : null;
+}
+
+export function deleteOcrTransaction(txId: string): boolean {
+  const cleanTxId = String(txId || '').trim().toUpperCase().slice(0, 32);
+  if (!cleanTxId) return false;
+  const db = getRedeemDb();
+  const result = db.prepare('DELETE FROM ocr_transactions WHERE tx_id = ?').run(cleanTxId);
+  return Number(result.changes || 0) > 0;
+}
+
 
 
 

@@ -28,6 +28,7 @@ export interface KoreanReceiptAnalysisResult {
   checks: KoreanReceiptChecks;
   reason: string;
   httpStatus?: number;
+  modelUsed?: string;
 }
 
 let sharedAiClient: GoogleGenAI | null = null;
@@ -520,6 +521,7 @@ Return ONLY valid JSON matching the schema.`;
             transferFingerprint,
             transferCompleted: false,
             checks,
+            modelUsed: model,
             reason:
               lang === 'ko'
                 ? '한국 은행 이체 확인 스크린샷이 아닙니다. 이체완료 화면을 업로드해 주세요.'
@@ -541,6 +543,7 @@ Return ONLY valid JSON matching the schema.`;
             transferFingerprint,
             transferCompleted: false,
             checks,
+            modelUsed: model,
             reason:
               lang === 'ko'
                 ? '이체 완료 상태(이체완료 / 송금완료)가 확인되지 않았습니다.'
@@ -562,6 +565,7 @@ Return ONLY valid JSON matching the schema.`;
             transferFingerprint,
             transferCompleted: true,
             checks,
+            modelUsed: model,
             reason:
               lang === 'ko'
                 ? `받는 분(${recipientName || '미확인'}) 또는 계좌번호가 지정 계좌(${expectedHolder})와 일치하지 않습니다.`
@@ -583,6 +587,7 @@ Return ONLY valid JSON matching the schema.`;
             transferFingerprint,
             transferCompleted: true,
             checks,
+            modelUsed: model,
             reason:
               lang === 'ko'
                 ? `이체 금액(₩${amountKrw.toLocaleString()})이 서비스 금액 ₩35,000 미만입니다.`
@@ -604,6 +609,7 @@ Return ONLY valid JSON matching the schema.`;
             transferFingerprint,
             transferCompleted: true,
             checks,
+            modelUsed: model,
             reason: timeFailureReason,
           };
         }
@@ -619,6 +625,7 @@ Return ONLY valid JSON matching the schema.`;
           transferFingerprint,
           transferCompleted: true,
           checks,
+          modelUsed: model,
           reason: 'ពិត (Verified)',
         };
       } catch (err: any) {

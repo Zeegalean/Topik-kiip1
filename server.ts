@@ -44,9 +44,14 @@ import {
   getUserAccountByEmail,
   changeUserAccountPassword,
   resetUserAccountPassword,
+  recordOcrTransaction,
+  queryOcrTransactions,
+  updateOcrTransactionVerification,
+  deleteOcrTransaction,
   type RedeemCodeStatus,
   type AdminAccountRole,
   type PublicUserRecord,
+  type OcrVerificationStatus,
 } from './src/server/redeemDb.ts';
 import {
   runServerSideOcrFallback,
@@ -750,7 +755,155 @@ function extractFromSvgOrText(textCorpus: string): Record<string, any> {
 }
 
 // API endpoint to extract form data from uploaded documents
+function buildAnonymizedSessionHash(req: express.Request): string {
+  const xff = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  const rawIp = xff || req.socket?.remoteAddress || 'unknown';
+  const ua = String(req.headers['user-agent'] || '').slice(0, 120);
+  return crypto
+    .createHmac('sha256', SESSION_SIGNING_SECRET)
+    .update(`ocr_anon:${rawIp}:${ua}`)
+    .digest('hex')
+    .slice(0, 12);
+}
+
+function evaluateDocumentOcrAudit(params: {
+  uploadedDocTypes: string[];
+  extractedData: Record<string, any>;
+  rawFieldConfidence?: Record<string, any>;
+  modelVersion: string;
+  fallbackUsed: boolean;
+  authErrorDetected?: boolean;
+  lastErrorDetail?: string;
+}): {
+  confidenceScore: number;
+  verificationStatus: OcrVerificationStatus;
+  extractedFields: string[];
+  missingFields: string[];
+  fieldConfidence: Record<string, number>;
+  errorPattern: string;
+} {
+  const {
+    uploadedDocTypes,
+    extractedData,
+    rawFieldConfidence,
+    modelVersion,
+    fallbackUsed,
+    authErrorDetected,
+    lastErrorDetail,
+  } = params;
+
+  const expectedFields: string[] = [];
+  if (uploadedDocTypes.includes('arcFront')) {
+    expectedFields.push('name', 'regNumber1', 'regNumber2', 'nationality', 'visaStatus');
+  }
+  if (uploadedDocTypes.includes('arcBack')) {
+    expectedFields.push('address');
+  }
+  if (uploadedDocTypes.includes('topikCert')) {
+    expectedFields.push('docVerificationNo', 'examNumber', 'examDate', 'round', 'validUntil', 'grade');
+  }
+  if (uploadedDocTypes.includes('passport')) {
+    expectedFields.push('passportNo', 'passportExpiry');
+  }
+
+  const extractedFields = Object.keys(extractedData || {}).filter((k) => {
+    const v = extractedData[k];
+    if (Array.isArray(v)) return v.filter(Boolean).length > 0;
+    return v !== undefined && v !== null && String(v).trim().length > 0;
+  });
+
+  const missingFields = expectedFields.filter((f) => !extractedFields.includes(f));
+
+  const fieldConfidence: Record<string, number> = {};
+  if (rawFieldConfidence && typeof rawFieldConfidence === 'object') {
+    for (const [k, v] of Object.entries(rawFieldConfidence)) {
+      const n = Number(v);
+      if (Number.isFinite(n)) {
+        fieldConfidence[k] = Math.max(0, Math.min(100, Math.round(n)));
+      }
+    }
+  }
+
+  const coverageRatio =
+    expectedFields.length > 0
+      ? (expectedFields.length - missingFields.length) / expectedFields.length
+      : extractedFields.length > 0
+      ? 0.85
+      : 0;
+  const coverageScore = Math.round(coverageRatio * 100);
+
+  const modelConfValues = Object.values(fieldConfidence);
+  let confidenceScore = coverageScore;
+  if (modelConfValues.length > 0) {
+    const avgModelConf = modelConfValues.reduce((a, b) => a + b, 0) / modelConfValues.length;
+    confidenceScore = Math.round(avgModelConf * 0.6 + coverageScore * 0.4);
+  } else if (fallbackUsed) {
+    confidenceScore = Math.min(82, Math.round(coverageScore * 0.85));
+  }
+  if (extractedFields.length === 0) {
+    confidenceScore = 0;
+  }
+  confidenceScore = Math.max(0, Math.min(100, confidenceScore));
+
+  let errorPattern = 'NONE';
+  const errLower = String(lastErrorDetail || '').toLowerCase();
+  if (extractedFields.length === 0) {
+    if (authErrorDetected) errorPattern = 'GEMINI_AUTH_ERROR';
+    else if (errLower.includes('429') || errLower.includes('quota') || errLower.includes('timeout')) {
+      errorPattern = 'GEMINI_QUOTA_OR_TIMEOUT';
+    } else {
+      errorPattern = 'ZERO_FIELDS_EXTRACTED';
+    }
+  } else if (missingFields.includes('address') && uploadedDocTypes.includes('arcBack')) {
+    errorPattern = 'MISSING_ARC_ADDRESS';
+  } else if (
+    (missingFields.includes('regNumber1') || missingFields.includes('regNumber2') || missingFields.includes('name')) &&
+    uploadedDocTypes.includes('arcFront')
+  ) {
+    errorPattern = 'MISSING_ARC_IDENTITY';
+  } else if (
+    (missingFields.includes('examDate') || missingFields.includes('validUntil')) &&
+    uploadedDocTypes.includes('topikCert')
+  ) {
+    errorPattern = 'MISSING_TOPIK_DATES';
+  } else if (
+    (missingFields.includes('docVerificationNo') || missingFields.includes('examNumber')) &&
+    uploadedDocTypes.includes('topikCert')
+  ) {
+    errorPattern = 'MISSING_TOPIK_VERIFY_NO';
+  } else if (
+    (missingFields.includes('passportNo') || missingFields.includes('passportExpiry')) &&
+    uploadedDocTypes.includes('passport')
+  ) {
+    errorPattern = 'MISSING_PASSPORT_FIELDS';
+  } else if (fallbackUsed || modelVersion.includes('tesseract') || modelVersion.includes('text-parser')) {
+    errorPattern = 'SERVER_FALLBACK_OCR';
+  } else if (confidenceScore < 75) {
+    errorPattern = 'LOW_CONFIDENCE';
+  }
+
+  let verificationStatus: OcrVerificationStatus = 'verified';
+  if (extractedFields.length === 0) {
+    verificationStatus = 'failed';
+  } else if (confidenceScore < 65 || missingFields.length >= 3) {
+    verificationStatus = 'needs_review';
+  } else if (missingFields.length > 0 || fallbackUsed || confidenceScore < 82) {
+    verificationStatus = 'needs_review';
+  }
+
+  return {
+    confidenceScore,
+    verificationStatus,
+    extractedFields,
+    missingFields,
+    fieldConfidence,
+    errorPattern,
+  };
+}
+
 app.post('/api/extract-documents', aiApiRateLimiter, async (req, res) => {
+  const ocrStartMs = Date.now();
+  const sessionHash = buildAnonymizedSessionHash(req);
   try {
     const { arcFront, arcBack, topikCert, topikCertList, passport, passportList, pdfTexts } = req.body || {};
 
@@ -939,6 +1092,27 @@ Return ONLY structured JSON according to the schema.
         grade: { type: Type.STRING, description: "등급 (1급~6급)" },
         passportNo: { type: Type.STRING, description: "Passport Number if visible" },
         passportExpiry: { type: Type.STRING, description: "Passport Expiry Date YYYY-MM-DD if visible" },
+        fieldConfidence: {
+          type: Type.OBJECT,
+          description: "0-100 integer visual legibility confidence per extracted field",
+          properties: {
+            name: { type: Type.INTEGER },
+            regNumber1: { type: Type.INTEGER },
+            regNumber2: { type: Type.INTEGER },
+            gender: { type: Type.INTEGER },
+            nationality: { type: Type.INTEGER },
+            visaStatus: { type: Type.INTEGER },
+            address: { type: Type.INTEGER },
+            docVerificationNo: { type: Type.INTEGER },
+            examNumber: { type: Type.INTEGER },
+            examDate: { type: Type.INTEGER },
+            round: { type: Type.INTEGER },
+            validUntil: { type: Type.INTEGER },
+            grade: { type: Type.INTEGER },
+            passportNo: { type: Type.INTEGER },
+            passportExpiry: { type: Type.INTEGER },
+          },
+        },
       },
     };
 
@@ -1005,6 +1179,15 @@ Return ONLY structured JSON according to the schema.
           .slice(0, 2000)
       : '';
 
+    const uploadedDocTypes: string[] = [];
+    if (arcFront) uploadedDocTypes.push('arcFront');
+    if (arcBack) uploadedDocTypes.push('arcBack');
+    if (firstTopikUrl) uploadedDocTypes.push('topikCert');
+    if (firstPassportUrl) uploadedDocTypes.push('passport');
+    if (pdfTexts && typeof pdfTexts === 'object' && Object.values(pdfTexts).some((v) => typeof v === 'string' && v.trim())) {
+      uploadedDocTypes.push('pdfText');
+    }
+
     if (extractedData) {
       let merged = { ...parsedFromPdfTexts, ...sanitizeExtractedData(extractedData) };
       const needsBackFill = Boolean(arcBack && !merged.address);
@@ -1013,6 +1196,7 @@ Return ONLY structured JSON according to the schema.
           (!merged.examDate || !merged.validUntil || !merged.round || !merged.examNumber || !merged.grade)
       );
       let rawTextPreview = pdfRawPreview;
+      let gapFillFallbackUsed = false;
 
       if (needsBackFill || needsTopikFill) {
         try {
@@ -1022,6 +1206,9 @@ Return ONLY structured JSON according to the schema.
             pdfTexts: pdfTexts && typeof pdfTexts === 'object' ? pdfTexts : undefined,
           });
           const sanitizedTargeted = sanitizeExtractedData(targetedOcr.data);
+          if (Object.keys(sanitizedTargeted).length > 0) {
+            gapFillFallbackUsed = true;
+          }
           merged = { ...sanitizedTargeted, ...merged };
           if (targetedOcr.rawTextPreview) {
             rawTextPreview = [rawTextPreview, targetedOcr.rawTextPreview].filter(Boolean).join('\n\n').slice(0, 3500);
@@ -1032,10 +1219,43 @@ Return ONLY structured JSON according to the schema.
       }
 
       if (Object.keys(merged).length > 0) {
+        const audit = evaluateDocumentOcrAudit({
+          uploadedDocTypes,
+          extractedData: merged,
+          rawFieldConfidence: extractedData?.fieldConfidence,
+          modelVersion: successfulModel || 'gemini-4-hydrogen',
+          fallbackUsed: gapFillFallbackUsed,
+          authErrorDetected,
+          lastErrorDetail,
+        });
+        let ocrTxId = '';
+        try {
+          const logged = recordOcrTransaction({
+            sessionHash,
+            txType: 'document_ocr',
+            docTypes: uploadedDocTypes,
+            modelVersion: successfulModel || 'gemini-4-hydrogen',
+            confidenceScore: audit.confidenceScore,
+            verificationStatus: audit.verificationStatus,
+            extractedFields: audit.extractedFields,
+            missingFields: audit.missingFields,
+            fieldConfidence: audit.fieldConfidence,
+            errorPattern: audit.errorPattern,
+            fallbackUsed: gapFillFallbackUsed,
+            latencyMs: Date.now() - ocrStartMs,
+          });
+          ocrTxId = logged.txId;
+        } catch (logErr) {
+          console.warn('[OCR Audit] Failed to record transaction:', logErr);
+        }
+
         return res.json({
           success: true,
           data: merged,
           model: successfulModel,
+          confidence: audit.fieldConfidence,
+          confidenceScore: audit.confidenceScore,
+          ...(ocrTxId ? { ocrTxId } : {}),
           ...(rawTextPreview ? { rawTextPreview } : {}),
         });
       }
@@ -1054,10 +1274,39 @@ Return ONLY structured JSON according to the schema.
       const sanitizedServerOcr = { ...parsedFromPdfTexts, ...sanitizeExtractedData(ocrFallback.data) };
       if (Object.keys(sanitizedServerOcr).length > 0) {
         console.log('[OCR] Successfully extracted document fields via server-side Tesseract/PDF parser.');
+        const audit = evaluateDocumentOcrAudit({
+          uploadedDocTypes,
+          extractedData: sanitizedServerOcr,
+          modelVersion: 'server-ocr-tesseract',
+          fallbackUsed: true,
+          authErrorDetected,
+          lastErrorDetail,
+        });
+        let ocrTxId = '';
+        try {
+          const logged = recordOcrTransaction({
+            sessionHash,
+            txType: 'document_ocr',
+            docTypes: uploadedDocTypes,
+            modelVersion: 'server-ocr-tesseract',
+            confidenceScore: audit.confidenceScore,
+            verificationStatus: audit.verificationStatus,
+            extractedFields: audit.extractedFields,
+            missingFields: audit.missingFields,
+            fieldConfidence: audit.fieldConfidence,
+            errorPattern: audit.errorPattern,
+            fallbackUsed: true,
+            latencyMs: Date.now() - ocrStartMs,
+          });
+          ocrTxId = logged.txId;
+        } catch {}
+
         return res.json({
           success: true,
           data: sanitizedServerOcr,
           model: 'server-ocr-tesseract',
+          confidenceScore: audit.confidenceScore,
+          ...(ocrTxId ? { ocrTxId } : {}),
           rawTextPreview: ocrFallback.rawTextPreview || pdfRawPreview,
         });
       }
@@ -1069,16 +1318,69 @@ Return ONLY structured JSON according to the schema.
         const sanitizedFallback = sanitizeExtractedData(fallbackResult);
         if (Object.keys(sanitizedFallback).length > 0) {
           console.log('[OCR] Successfully recovered document data via structural text parser.');
+          const audit = evaluateDocumentOcrAudit({
+            uploadedDocTypes,
+            extractedData: sanitizedFallback,
+            modelVersion: 'server-text-parser',
+            fallbackUsed: true,
+            authErrorDetected,
+            lastErrorDetail,
+          });
+          let ocrTxId = '';
+          try {
+            const logged = recordOcrTransaction({
+              sessionHash,
+              txType: 'document_ocr',
+              docTypes: uploadedDocTypes,
+              modelVersion: 'server-text-parser',
+              confidenceScore: audit.confidenceScore,
+              verificationStatus: audit.verificationStatus,
+              extractedFields: audit.extractedFields,
+              missingFields: audit.missingFields,
+              fieldConfidence: audit.fieldConfidence,
+              errorPattern: audit.errorPattern,
+              fallbackUsed: true,
+              latencyMs: Date.now() - ocrStartMs,
+            });
+            ocrTxId = logged.txId;
+          } catch {}
+
           return res.json({
             success: true,
             data: sanitizedFallback,
             model: 'server-text-parser',
+            confidenceScore: audit.confidenceScore,
+            ...(ocrTxId ? { ocrTxId } : {}),
             rawTextPreview: ocrFallback.rawTextPreview,
           });
         }
       }
 
       // Signal client to run secondary browser pass if server OCR detected 0 fields
+      const failedAudit = evaluateDocumentOcrAudit({
+        uploadedDocTypes,
+        extractedData: {},
+        modelVersion: 'client-fallback-required',
+        fallbackUsed: true,
+        authErrorDetected,
+        lastErrorDetail,
+      });
+      try {
+        recordOcrTransaction({
+          sessionHash,
+          txType: 'document_ocr',
+          docTypes: uploadedDocTypes,
+          modelVersion: 'client-fallback-required',
+          confidenceScore: 0,
+          verificationStatus: 'failed',
+          extractedFields: [],
+          missingFields: failedAudit.missingFields,
+          errorPattern: failedAudit.errorPattern,
+          fallbackUsed: true,
+          latencyMs: Date.now() - ocrStartMs,
+        });
+      } catch {}
+
       return res.json({
         success: false,
         fallbackMode: true,
@@ -1090,6 +1392,22 @@ Return ONLY structured JSON according to the schema.
       });
     } catch (ocrErr: any) {
       console.warn('[OCR] Server-side fallback failed:', ocrErr);
+      try {
+        recordOcrTransaction({
+          sessionHash,
+          txType: 'document_ocr',
+          docTypes: uploadedDocTypes,
+          modelVersion: 'server-ocr-error',
+          confidenceScore: 0,
+          verificationStatus: 'failed',
+          extractedFields: [],
+          missingFields: [],
+          errorPattern: authErrorDetected ? 'GEMINI_AUTH_ERROR' : 'SERVER_OCR_EXCEPTION',
+          fallbackUsed: true,
+          latencyMs: Date.now() - ocrStartMs,
+        });
+      } catch {}
+
       return res.json({
         success: false,
         fallbackMode: true,
@@ -1099,6 +1417,21 @@ Return ONLY structured JSON according to the schema.
     }
   } catch (error: any) {
     console.error('Unexpected error during document extraction:', error);
+    try {
+      recordOcrTransaction({
+        sessionHash,
+        txType: 'document_ocr',
+        docTypes: [],
+        modelVersion: 'server-error',
+        confidenceScore: 0,
+        verificationStatus: 'failed',
+        extractedFields: [],
+        missingFields: [],
+        errorPattern: 'UNEXPECTED_EXTRACTION_ERROR',
+        fallbackUsed: true,
+        latencyMs: Date.now() - ocrStartMs,
+      });
+    } catch {}
     return res.json({
       success: false,
       fallbackMode: true,
@@ -2505,6 +2838,8 @@ app.get('/api/payments/kr-config', (_req, res) => {
 });
 
 app.post('/api/payments/verify-kr-receipt', paymentRateLimiter, async (req, res) => {
+  const receiptStartMs = Date.now();
+  const sessionHash = buildAnonymizedSessionHash(req);
   try {
     const receiptImage = String(req.body?.receiptImage || '');
     const userEmail = String(req.body?.userEmail || 'guest@kiip-portal.kr').slice(0, 254);
@@ -2562,7 +2897,38 @@ app.post('/api/payments/verify-kr-receipt', paymentRateLimiter, async (req, res)
       .digest('hex');
 
     const analysis = await analyzeKoreanBankReceiptWithGemini(base64Data, mimeType, lang, getAiClient());
+    const checkEntries = Object.entries(analysis.checks || {});
+    const passedChecks = checkEntries.filter(([, v]) => Boolean(v)).map(([k]) => k);
+    const failedChecks = checkEntries.filter(([, v]) => !v).map(([k]) => k);
+    const receiptConfidence = Math.round((passedChecks.length / Math.max(1, checkEntries.length)) * 100);
+    const receiptModel = analysis.modelUsed || (analysis.httpStatus === 429 ? 'gemini-quota-limited' : 'gemini-4-hydrogen');
+
     if (!analysis.isValidReceipt) {
+      let receiptPattern = 'RECEIPT_UNREADABLE';
+      if (analysis.httpStatus === 429) receiptPattern = 'GEMINI_QUOTA_OR_TIMEOUT';
+      else if (analysis.httpStatus === 503) receiptPattern = 'GEMINI_AUTH_ERROR';
+      else if (!analysis.checks.isReceipt) receiptPattern = 'RECEIPT_NOT_BANK_SCREENSHOT';
+      else if (!analysis.checks.statusSuccess) receiptPattern = 'RECEIPT_STATUS_INCOMPLETE';
+      else if (!analysis.checks.recipientMatched) receiptPattern = 'RECEIPT_RECIPIENT_MISMATCH';
+      else if (!analysis.checks.amountMatched) receiptPattern = 'RECEIPT_AMOUNT_LOW';
+      else if (!analysis.checks.timeVerified) receiptPattern = 'RECEIPT_TIME_INVALID';
+
+      try {
+        recordOcrTransaction({
+          sessionHash,
+          txType: 'bank_receipt',
+          docTypes: ['bankReceipt'],
+          modelVersion: receiptModel,
+          confidenceScore: receiptConfidence,
+          verificationStatus: 'failed',
+          extractedFields: passedChecks,
+          missingFields: failedChecks,
+          errorPattern: receiptPattern,
+          fallbackUsed: false,
+          latencyMs: Date.now() - receiptStartMs,
+        });
+      } catch {}
+
       return res.status(analysis.httpStatus || 422).json({
         success: false,
         verdict: 'មិនពិត',
@@ -2593,6 +2959,22 @@ app.post('/api/payments/verify-kr-receipt', paymentRateLimiter, async (req, res)
     });
 
     if (!reservation.ok || reservation.duplicate || !reservation.record) {
+      try {
+        recordOcrTransaction({
+          sessionHash,
+          txType: 'bank_receipt',
+          docTypes: ['bankReceipt'],
+          modelVersion: receiptModel,
+          confidenceScore: receiptConfidence,
+          verificationStatus: 'false_positive',
+          extractedFields: passedChecks,
+          missingFields: [],
+          errorPattern: 'RECEIPT_DUPLICATE_REPLAY',
+          fallbackUsed: false,
+          latencyMs: Date.now() - receiptStartMs,
+        });
+      } catch {}
+
       return res.status(409).json({
         success: false,
         verdict: 'មិនពិត',
@@ -2607,6 +2989,22 @@ app.post('/api/payments/verify-kr-receipt', paymentRateLimiter, async (req, res)
             : 'រូបភាពវិក្កយបត្រផ្ទេរប្រាក់នេះត្រូវបានប្រើដើម្បីបញ្ចេញ Redeem Code រួចហើយ! មិនអាចប្រើវិក្កយបត្រដដែលម្តងទៀតបានទេ។',
       });
     }
+
+    try {
+      recordOcrTransaction({
+        sessionHash,
+        txType: 'bank_receipt',
+        docTypes: ['bankReceipt'],
+        modelVersion: receiptModel,
+        confidenceScore: 100,
+        verificationStatus: 'verified',
+        extractedFields: passedChecks,
+        missingFields: [],
+        errorPattern: 'NONE',
+        fallbackUsed: false,
+        latencyMs: Date.now() - receiptStartMs,
+      });
+    } catch {}
 
     const unlockCode = reservation.record.code;
     issuedUnlockCodes.set(unlockCode, {
@@ -2649,6 +3047,21 @@ app.post('/api/payments/verify-kr-receipt', paymentRateLimiter, async (req, res)
     });
   } catch (err: any) {
     console.error('[KR Receipt] Verification failed:', err);
+    try {
+      recordOcrTransaction({
+        sessionHash,
+        txType: 'bank_receipt',
+        docTypes: ['bankReceipt'],
+        modelVersion: 'server-error',
+        confidenceScore: 0,
+        verificationStatus: 'failed',
+        extractedFields: [],
+        missingFields: [],
+        errorPattern: 'RECEIPT_SERVER_EXCEPTION',
+        fallbackUsed: false,
+        latencyMs: Date.now() - receiptStartMs,
+      });
+    } catch {}
     return res.status(500).json({
       success: false,
       verdict: 'មិនពិត',
@@ -3039,6 +3452,61 @@ app.delete('/api/admin/promo-codes/:code', requireAdminAuth, (req, res) => {
   } catch (err) {
     console.error('[Admin PromoDB] Delete failed:', err);
     return res.status(500).json({ success: false, error: 'Failed to delete promo code' });
+  }
+});
+
+// ============================================================================
+// ADMIN INTERNAL OCR TRANSACTION AUDIT LOGS (ANONYMIZED, ZERO PII)
+// ============================================================================
+app.get('/api/admin/ocr-logs', requireAdminAuth, (req, res) => {
+  try {
+    const result = queryOcrTransactions({
+      page: Number(req.query.page) || 1,
+      limit: Number(req.query.limit) || 25,
+      status: typeof req.query.status === 'string' ? req.query.status : 'all',
+      model: typeof req.query.model === 'string' ? req.query.model : 'all',
+      txType: typeof req.query.txType === 'string' ? req.query.txType : 'all',
+      errorPattern: typeof req.query.errorPattern === 'string' ? req.query.errorPattern : 'ALL',
+      search: typeof req.query.search === 'string' ? req.query.search : '',
+    });
+    return res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('[Admin OCR Logs] Query failed:', err);
+    return res.status(500).json({ success: false, error: 'Failed to load OCR audit logs' });
+  }
+});
+
+app.patch('/api/admin/ocr-logs/:txId/verification', requireAdminAuth, (req, res) => {
+  try {
+    const txId = String(req.params.txId || '');
+    const status = String(req.body?.verificationStatus || '').trim().toLowerCase() as OcrVerificationStatus;
+    const adminNote = typeof req.body?.adminNote === 'string' ? req.body.adminNote : undefined;
+    const allowed: OcrVerificationStatus[] = ['verified', 'needs_review', 'failed', 'false_positive', 'pending'];
+    if (!allowed.includes(status)) {
+      return res.status(400).json({ success: false, error: 'Invalid verification status' });
+    }
+    const updated = updateOcrTransactionVerification(txId, status, adminNote);
+    if (!updated) {
+      return res.status(404).json({ success: false, error: 'OCR transaction not found' });
+    }
+    return res.json({ success: true, item: updated });
+  } catch (err) {
+    console.error('[Admin OCR Logs] Update verification failed:', err);
+    return res.status(500).json({ success: false, error: 'Failed to update verification status' });
+  }
+});
+
+app.delete('/api/admin/ocr-logs/:txId', requireAdminAuth, (req, res) => {
+  try {
+    const txId = String(req.params.txId || '');
+    const deleted = deleteOcrTransaction(txId);
+    if (!deleted) {
+      return res.status(404).json({ success: false, error: 'OCR transaction not found' });
+    }
+    return res.json({ success: true });
+  } catch (err) {
+    console.error('[Admin OCR Logs] Delete failed:', err);
+    return res.status(500).json({ success: false, error: 'Failed to delete OCR transaction' });
   }
 });
 
