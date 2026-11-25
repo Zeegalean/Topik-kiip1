@@ -360,7 +360,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     }
   };
 
-  // Handle Korean Bank Transfer Screenshot upload -> AI auto-verifies -> issues single-use unlock code
+  // Handle Korean Bank Transfer Screenshot upload -> auto-compress to crisp JPEG (<500KB) -> AI auto-verifies
   const handleKrReceiptFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -375,13 +375,13 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       );
       return;
     }
-    if (file.size > 10 * 1024 * 1024) {
+    if (file.size > 15 * 1024 * 1024) {
       setReceiptError(
         isKm
-          ? 'ទំហំរូបភាពធំពេក (អតិបរមា 10MB)។ សូមជ្រើសរើសរូប Screenshot ដែលមានទំហំតូចជាងនេះ!'
+          ? 'ទំហំរូបភាពធំពេក (អតិបរមា 15MB)។ សូមជ្រើសរើសរូប Screenshot ដែលមានទំហំតូចជាងនេះ!'
           : isKo
-          ? '이미지 용량이 너무 큽니다(최대 10MB). 더 작은 스크린샷을 선택해 주세요.'
-          : 'Image file is too large (max 10MB). Please choose a smaller screenshot.'
+          ? '이미지 용량이 너무 큽니다(최대 15MB). 더 작은 스크린샷을 선택해 주세요.'
+          : 'Image file is too large (max 15MB). Please choose a smaller screenshot.'
       );
       return;
     }
@@ -389,11 +389,45 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
     setReceiptChecks(null);
     setReceiptDetected(null);
     setIssuedKrCode(null);
+
     const reader = new FileReader();
     reader.onload = () => {
-      if (typeof reader.result === 'string') {
-        setReceiptPreview(reader.result);
-      }
+      const rawDataUrl = typeof reader.result === 'string' ? reader.result : '';
+      if (!rawDataUrl) return;
+
+      // Resize/compress large mobile screenshots on canvas so they stay well under serverless body limits (4.5MB) while keeping Korean text razor-sharp
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const maxDim = 1600;
+          let targetW = img.naturalWidth || img.width;
+          let targetH = img.naturalHeight || img.height;
+          if (targetW > maxDim || targetH > maxDim) {
+            const scale = Math.min(maxDim / targetW, maxDim / targetH);
+            targetW = Math.max(1, Math.round(targetW * scale));
+            targetH = Math.max(1, Math.round(targetH * scale));
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = targetW;
+          canvas.height = targetH;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            setReceiptPreview(rawDataUrl);
+            return;
+          }
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, targetW, targetH);
+          ctx.drawImage(img, 0, 0, targetW, targetH);
+          const compressed = canvas.toDataURL('image/jpeg', 0.86);
+          setReceiptPreview(compressed.length < rawDataUrl.length ? compressed : rawDataUrl);
+        } catch {
+          setReceiptPreview(rawDataUrl);
+        }
+      };
+      img.onerror = () => {
+        setReceiptPreview(rawDataUrl);
+      };
+      img.src = rawDataUrl;
     };
     reader.readAsDataURL(file);
   };
@@ -434,14 +468,22 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
       }
 
       if (!resp.ok || !data?.success || !data?.unlockCode) {
-        setReceiptError(
-          data?.error ||
-            (isKm
-              ? 'AI ឆ្លើយតប "មិនពិត" — មិនអាចផ្ទៀងផ្ទាត់វិក្កយបត្រស្វ័យប្រវត្តិបានទេ។ សូមពិនិត្យឈ្មោះអ្នកទទួល ទឹកប្រាក់ ₩35,000 ស្ថានភាពជោគជ័យ និងពេលវេលា ឬផ្ញើ Screenshot ទៅ Telegram Bot / Facebook Page ខាងក្រោម!'
-              : isKo
-              ? 'AI 검증 결과 "불일치" — 수취인, ₩35,000 금액, 이체완료 상태 및 이체 일시를 확인 후 다시 시도해 주세요.'
-              : 'AI returned FALSE — Could not auto-verify receipt. Please check recipient name, ₩35,000 amount, completed status, and timestamp.')
-        );
+        const statusFallback =
+          resp.status === 413
+            ? isKm
+              ? 'ទំហំរូបភាព Screenshot ធំពេកសម្រាប់ម៉ាស៊ីនមេ (HTTP 413)។ សូមជ្រើសរើសរូបភាពម្តងទៀត!'
+              : 'Screenshot file size is too large (HTTP 413). Please re-select the image.'
+            : resp.status === 404
+            ? isKm
+              ? 'រកមិនឃើញសេវាផ្ទៀងផ្ទាត់ AI លើម៉ាស៊ីនមេ (HTTP 404)។ សូម Deploy ម្តងទៀត ឬផ្ញើ Screenshot ទៅ Telegram Bot ខាងក្រោម!'
+              : 'Auto-verify API endpoint not found on this deployment (HTTP 404). Please redeploy or send your screenshot below.'
+            : isKm
+            ? 'AI ឆ្លើយតប "មិនពិត" — មិនអាចផ្ទៀងផ្ទាត់វិក្កយបត្រស្វ័យប្រវត្តិបានទេ។ សូមពិនិត្យឈ្មោះអ្នកទទួល ទឹកប្រាក់ ₩35,000 ស្ថានភាពជោគជ័យ និងពេលវេលា ឬផ្ញើ Screenshot ទៅ Telegram Bot / Facebook Page ខាងក្រោម!'
+            : isKo
+            ? 'AI 검증 결과 "불일치" — 수취인, ₩35,000 금액, 이체완료 상태 및 이체 일시를 확인 후 다시 시도해 주세요.'
+            : 'AI returned FALSE — Could not auto-verify receipt. Please check recipient name, ₩35,000 amount, completed status, and timestamp.';
+
+        setReceiptError(data?.error || statusFallback);
         return;
       }
 
