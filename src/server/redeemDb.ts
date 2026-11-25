@@ -810,7 +810,7 @@ export function verifyAndBurnRedeemCode(
         statusCode: 402,
         errorCode: 'PAYMENT_REQUIRED',
         error:
-          'លេខកូដ Redeem Code (Google Sheet) នេះមិនទាន់បានបង់ប្រាក់ទេ! សូមបង់ប្រាក់តាមធនាគារកូរ៉េ ឬ ABA PayWay ជាមុនសិន ទើបអាចដោះសោបាន។',
+          'លេខកូដ Redeem Code នេះមិនទាន់បានបង់ប្រាក់ទេ! សូមបង់ប្រាក់តាមធនាគារកូរ៉េ ឬ ABA PayWay ជាមុនសិន ទើបអាចដោះសោបាន។',
       };
     }
 

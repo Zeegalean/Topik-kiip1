@@ -287,7 +287,7 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
         if (data.centerId) matchedCenterId = String(data.centerId);
         if (data.type === 'telegram_bot' || data.type === 'telegram_receipt') matchedType = 'Telegram Auto-Unlock';
         else if (data.type === 'kr_receipt') matchedType = 'Korea Bank Receipt Code';
-        else if (data.type === 'google_sheets') matchedType = 'Google Sheet Paid Redeem Code';
+        else if (data.type === 'google_sheets') matchedType = 'Paid Redeem Code';
         else if (data.type === 'admin_promo') matchedType = 'Admin Promo Code';
         else if (data.type === 'database' || data.type === 'admin' || data.type === 'redeem') matchedType = 'Paid Redeem Code';
         else matchedType = 'Promo Code';
@@ -745,8 +745,8 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {/* BOX 1: Paid Redeem Code */}
               <div className="p-3.5 bg-gradient-to-br from-indigo-50 via-blue-50 to-slate-50 border-2 border-indigo-300 rounded-2xl space-y-2 shadow-xs">
-                <div className="flex items-start gap-2">
-                  <span className="p-1.5 rounded-lg bg-indigo-600 text-white shadow-2xs shrink-0 mt-0.5">
+                <div className="flex items-center gap-2">
+                  <span className="p-1.5 rounded-lg bg-indigo-600 text-white shadow-2xs shrink-0">
                     <Ticket className="w-3.5 h-3.5" />
                   </span>
                   <div className="min-w-0">
@@ -756,13 +756,6 @@ export const PaymentModal: React.FC<PaymentModalProps> = ({
                         : isKo
                         ? '리딤 코드 입력 (결제 완료 코드)'
                         : 'Paid Redeem Code'}
-                    </span>
-                    <span className="text-[10.5px] text-indigo-700 leading-snug block mt-0.5">
-                      {isKm
-                        ? 'សម្រាប់លេខកូដដែលទទួលបានក្រោយបង់ប្រាក់តាមធនាគារកូរ៉េ ឬ ABA'
-                        : isKo
-                        ? '결제 확인 후 발급받은 리딤 코드를 입력하세요'
-                        : 'Enter the Redeem Code issued after completing payment'}
                     </span>
                   </div>
                 </div>
