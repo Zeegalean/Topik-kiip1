@@ -468,6 +468,7 @@ function sanitizeExtractedData(raw: any): Record<string, any> {
     ]);
     const cleanedTokens = String(raw.name)
       .replace(/(?:성명|영문성명|Name\s*in\s*English|Name|NAME|Surname|Given\s*Names?)\s*[:：]?\s*/gi, ' ')
+      .replace(/[,]+/g, ' ')
       .replace(/[^a-zA-Z\s가-힣]/g, ' ')
       .replace(/\s+/g, ' ')
       .trim()
@@ -1029,36 +1030,54 @@ app.post('/api/extract-documents', aiApiRateLimiter, async (req, res) => {
       });
     }
 
-    const extractionPrompt = `
-You are an expert OCR and legal document analyst for Korea Immigration Service (출입국관리사무소) and TOPIK (국립국제교육원 한국어능력시험).
-Analyze the provided images of Alien Registration Card (외국인등록증), Passport (여권), and TOPIK score certificate (한국어능력시험 성적증명서).
+    const hasArcFrontDoc = Boolean(arcFront || (pdfTexts && pdfTexts.arcFront));
+    const hasArcBackDoc = Boolean(arcBack || (pdfTexts && pdfTexts.arcBack));
+    const hasTopikDoc = Boolean(firstTopikUrl || (pdfTexts && pdfTexts.topikCert));
+    const hasPassportDoc = Boolean(firstPassportUrl || (pdfTexts && pdfTexts.passport));
+    const includeAllDocs = !hasArcFrontDoc && !hasArcBackDoc && !hasTopikDoc && !hasPassportDoc;
 
-IMPORTANT RULE: ONLY extract values that are ACTUALLY VISIBLE in the provided images. If a specific document or field is not present in the uploaded images, return an empty string "" (or empty array [] for docVerificationNo). NEVER invent, guess, or output placeholder values.
+    const promptSections: string[] = [
+      'You are an expert OCR and document analyst for Korea Immigration Service (출입국관리사무소) and TOPIK (한국어능력시험).',
+      'STRICT RULE: ONLY extract values ACTUALLY VISIBLE in the provided image(s). If a field is not visible or unreadable, return "" (or [] for docVerificationNo). NEVER guess or invent placeholders.',
+    ];
 
-CRITICAL INSTRUCTIONS FOR ALIEN REGISTRATION CARD (외국인등록증) & PASSPORT (여권):
-1. name: ONLY the applicant's personal English full name in uppercase (Surname + Given Names, e.g. "EANG VEASNA" or "SOK SRORNG") as printed on the Alien Registration Card ("성명" / "Name"), Passport ("Surname" + "Given Names" or MRZ line without filler "<"), or TOPIK certificate ("성명 / Name in English"). NEVER append or include adjacent country/nationality words or clipped suffixes (such as "CAMBODIA", "CAMBODIAN", "KHM", "IA" clipped from CAMBODIA, "SEX", "M", "F", "COUNTRY", "NAME"). Cross-check across ARC, Passport, and TOPIK if multiple are provided so the name spelling is 100% clean.
-2. regNumber1: 외국인등록번호 front 6 digits (birth date YYMMDD).
-3. regNumber2: 외국인등록번호 back 7 digits.
-4. gender: "남" (Male) or "여" (Female).
-5. nationality: Country/region name in English as printed on the card or passport.
-6. visaStatus: 체류자격 Visa code if visible on the card.
-7. address: Latest Korean residence address on the back of the card (체류지 / 체류지 변경사항 table). Read EVERY row carefully (including road name 도로명, building number 건물번호, and multi-line wrapped 동/호 details), ignore the printed fine notice ("새로운 체류지... 14일 이내..."), and return ONLY the row with the MOST RECENT 신고일 (Report Date) or bottom-most entered row.
-8. passportNo: Passport Number (여권번호 / Passport No.) if a passport is uploaded.
-9. passportExpiry: Passport Date of Expiry formatted as YYYY-MM-DD.
-10. entryDate: Date of Entry into Korea (입국일 / 입국일자 / Date of Entry / Korean arrival stamp date) formatted as YYYY-MM-DD if visible on the ARC or Passport (otherwise fallback to ARC 발급일자 / Issue Date only if labeled as entry/registration date; leave empty "" if not visible).
+    if (includeAllDocs || hasArcFrontDoc || hasPassportDoc) {
+      promptSections.push(
+        `IDENTITY / ARC FRONT / PASSPORT FIELDS:
+- name: Applicant full English name in UPPERCASE (Surname + Given Names, e.g. "SOK SRORNG"). Strip commas and NEVER include country words ("CAMBODIA", "KHM", "IA"), labels ("NAME", "SURNAME"), or sex markers.
+- regNumber1: 6-digit front part of Alien Registration Number (YYMMDD) or birth date from Passport MRZ if ARC not shown.
+- regNumber2: 7-digit back part of Alien Registration Number (외국인등록번호 뒷자리).
+- gender: "남" (Male/M) or "여" (Female/F).
+- nationality: Country name in English (e.g. "Cambodia").
+- visaStatus: Korean visa code on ARC front (체류자격, e.g. "E-9", "E-9-1", "E-7-4", "D-2", "F-2-R", "F-6", "H-2").
+- passportNo: Passport Number (여권번호 / Passport No.) if visible.
+- passportExpiry: Passport Date of Expiry in YYYY-MM-DD format if visible.
+- entryDate: Date of Entry into Korea (입국일 / 입국일자 / Entry Date / Admitted date) in YYYY-MM-DD format if visible (leave "" if not printed).`
+      );
+    }
 
-CRITICAL INSTRUCTIONS FOR TOPIK SCORE CERTIFICATE (한국어능력시험 성적증명서):
-1. docVerificationNo: 문서확인번호 (16 digits at top-right header, returned as array of 4 strings of 4 digits each).
-2. examNumber: 수험번호 (10 to 16 numeric digits in the table).
-3. round: 회 / 회차 / 시행회차 numeric digits ONLY (e.g. from "제 93 회", "107회", or "The 93rd Test" extract "93" or "107").
-4. examDate: 시험일 / 시행일 / Test Date formatted STRICTLY as YYYY-MM-DD (NEVER return 생년월일 Birth Date or 발급일 Issue Date).
-5. validUntil: 성적유효기간 / Valid Until formatted STRICTLY as YYYY-MM-DD. If printed as a range like "2024.05.30 ~ 2026.05.30", ALWAYS return the END/EXPIRATION date ("2026-05-30").
-6. grade: 등급 (1급, 2급, 3급, 4급, 5급, or 6급).
+    if (includeAllDocs || hasArcBackDoc) {
+      promptSections.push(
+        `ARC BACK (외국인등록증 뒷면 체류지 변경사항) FIELD:
+- address: Read EVERY row in the Korean residence table (체류지 / 체류지 변경사항), including road name (도로명), building number, and wrapped 동/호 lines. Ignore the printed legal notice ("새로운 체류지... 14일 이내..."). Return ONLY the single address with the MOST RECENT 신고일 (Report Date) or bottom-most written row.`
+      );
+    }
 
-Return ONLY structured JSON according to the schema.
-`;
+    if (includeAllDocs || hasTopikDoc) {
+      promptSections.push(
+        `TOPIK SCORE CERTIFICATE (한국어능력시험 성적증명서) FIELDS:
+- name: Applicant English name in UPPERCASE if printed (성명 / Name in English).
+- docVerificationNo: 문서확인번호 (16 digits at top-right, returned as array of 4 strings of 4 digits each).
+- examNumber: 수험번호 (10-16 digits).
+- round: 회차 / 시행회차 digits ONLY (e.g. from "제 107 회" or "93rd" return "107" or "93").
+- examDate: 시험일 / 시행일 / Test Date in YYYY-MM-DD format (NEVER birth date or issue date).
+- validUntil: 성적유효기간 / Valid Until END date in YYYY-MM-DD format (for a range like "2024.05.30 ~ 2026.05.30", return "2026-05-30").
+- grade: 취득등급 ("1급" to "6급").`
+      );
+    }
 
-    parts.push({ text: extractionPrompt });
+    promptSections.push('Return ONLY valid JSON matching the schema.');
+    parts.push({ text: promptSections.join('\n\n') });
 
     // Also parse digital PDF texts upfront as a structured safety net
     const parsedFromPdfTexts =
@@ -1073,122 +1092,148 @@ Return ONLY structured JSON according to the schema.
           )
         : {};
 
-    // Multi-model resilience using supported @google/genai models: gemini-4-hydrogen primary, gemini-3.1-flash-lite fallback
-    const candidateModels = ['gemini-4-hydrogen', 'gemini-3.1-flash-lite'] as const;
+    // Build focused responseSchema containing ONLY fields relevant to the uploaded document(s)
+    const schemaProperties: Record<string, any> = {};
+    const confProperties: Record<string, any> = {};
+    const addSchemaField = (key: string, spec: any) => {
+      schemaProperties[key] = spec;
+      confProperties[key] = { type: Type.INTEGER };
+    };
+
+    if (includeAllDocs || hasArcFrontDoc || hasPassportDoc || hasTopikDoc) {
+      addSchemaField('name', {
+        type: Type.STRING,
+        description: 'Applicant full English name in uppercase if visible, otherwise empty string',
+      });
+    }
+    if (includeAllDocs || hasArcFrontDoc || hasPassportDoc) {
+      addSchemaField('regNumber1', {
+        type: Type.STRING,
+        description: '6-digit YYMMDD part of ARC number if visible, otherwise empty string',
+      });
+      addSchemaField('regNumber2', {
+        type: Type.STRING,
+        description: '7-digit back part of ARC number if visible, otherwise empty string',
+      });
+      addSchemaField('gender', { type: Type.STRING });
+      addSchemaField('nationality', { type: Type.STRING });
+      addSchemaField('entryDate', {
+        type: Type.STRING,
+        description: 'Date of Entry into Korea (입국일) YYYY-MM-DD if visible',
+      });
+    }
+    if (includeAllDocs || hasArcFrontDoc) {
+      addSchemaField('visaStatus', { type: Type.STRING });
+    }
+    if (includeAllDocs || hasPassportDoc) {
+      addSchemaField('passportNo', { type: Type.STRING, description: 'Passport Number if visible' });
+      addSchemaField('passportExpiry', { type: Type.STRING, description: 'Passport Expiry Date YYYY-MM-DD if visible' });
+    }
+    if (includeAllDocs || hasArcBackDoc) {
+      addSchemaField('address', {
+        type: Type.STRING,
+        description: 'Latest Korean residence address (체류지) from ARC back based on most recent 신고일 or bottom-most row',
+      });
+    }
+    if (includeAllDocs || hasTopikDoc) {
+      addSchemaField('docVerificationNo', {
+        type: Type.ARRAY,
+        items: { type: Type.STRING },
+        description: '문서확인번호: 4 groups of 4 digits',
+      });
+      addSchemaField('examNumber', { type: Type.STRING, description: '수험번호 digits' });
+      addSchemaField('examDate', { type: Type.STRING, description: 'TOPIK 시험일 YYYY-MM-DD' });
+      addSchemaField('round', { type: Type.STRING, description: 'TOPIK 회차 numeric digits only' });
+      addSchemaField('validUntil', { type: Type.STRING, description: 'TOPIK 성적유효기간 END date YYYY-MM-DD' });
+      addSchemaField('grade', { type: Type.STRING, description: '등급 (1급~6급)' });
+    }
+
+    schemaProperties.fieldConfidence = {
+      type: Type.OBJECT,
+      description: '0-100 integer visual legibility confidence per extracted field',
+      properties: confProperties,
+    };
+
+    const responseSchema = {
+      type: Type.OBJECT,
+      properties: schemaProperties,
+    };
+
+    // Interleaved multi-model failover using supported @google/genai models:
+    // If gemini-4-hydrogen hits a transient 503 spike, immediately try gemini-3.1-flash-lite
+    // instead of wasting retries on the overloaded model, then allow one final retry if within time budget.
+    const attemptSchedule: { model: 'gemini-4-hydrogen' | 'gemini-3.1-flash-lite'; timeoutMs: number }[] = [
+      { model: 'gemini-4-hydrogen', timeoutMs: 22000 },
+      { model: 'gemini-3.1-flash-lite', timeoutMs: 16000 },
+      { model: 'gemini-4-hydrogen', timeoutMs: 16000 },
+    ];
     let extractedData: any = null;
     let successfulModel = '';
     let lastErrorDetail = '';
     let authErrorDetected = false;
-
-    const responseSchema = {
-      type: Type.OBJECT,
-      properties: {
-        name: { type: Type.STRING, description: "Applicant full English name in uppercase if visible in the image, otherwise empty string" },
-        regNumber1: { type: Type.STRING, description: "6-digit birth date part of ARC number if visible, otherwise empty string" },
-        regNumber2: { type: Type.STRING, description: "7-digit back part of ARC number if visible, otherwise empty string" },
-        gender: { type: Type.STRING },
-        nationality: { type: Type.STRING },
-        visaStatus: { type: Type.STRING },
-        address: {
-          type: Type.STRING,
-          description: "LATEST residence address (체류지 주소) from the back of the card, determined by the most recent report date (신고일 / 신고일자) or the bottom-most entered row in the 체류지 변경사항 table.",
-        },
-        docVerificationNo: {
-          type: Type.ARRAY,
-          items: { type: Type.STRING },
-          description: "문서확인번호: 4 groups of 4 digits if visible on TOPIK certificate",
-        },
-        examNumber: { type: Type.STRING, description: "수험번호 digits if visible on TOPIK certificate" },
-        examDate: { type: Type.STRING, description: "TOPIK 시험일 / 시행일 / Test Date in YYYY-MM-DD format (not birth date)" },
-        round: { type: Type.STRING, description: "TOPIK 제XX회 / 시행회차 numeric digits only (e.g. 93 or 107)" },
-        validUntil: { type: Type.STRING, description: "TOPIK 성적유효기간 / Valid Until END date in YYYY-MM-DD format" },
-        grade: { type: Type.STRING, description: "등급 (1급~6급)" },
-        passportNo: { type: Type.STRING, description: "Passport Number if visible" },
-        passportExpiry: { type: Type.STRING, description: "Passport Expiry Date YYYY-MM-DD if visible" },
-        entryDate: { type: Type.STRING, description: "Date of Entry into Korea (입국일 / Entry Date) YYYY-MM-DD if visible" },
-        fieldConfidence: {
-          type: Type.OBJECT,
-          description: "0-100 integer visual legibility confidence per extracted field",
-          properties: {
-            name: { type: Type.INTEGER },
-            regNumber1: { type: Type.INTEGER },
-            regNumber2: { type: Type.INTEGER },
-            gender: { type: Type.INTEGER },
-            nationality: { type: Type.INTEGER },
-            visaStatus: { type: Type.INTEGER },
-            address: { type: Type.INTEGER },
-            docVerificationNo: { type: Type.INTEGER },
-            examNumber: { type: Type.INTEGER },
-            examDate: { type: Type.INTEGER },
-            round: { type: Type.INTEGER },
-            validUntil: { type: Type.INTEGER },
-            grade: { type: Type.INTEGER },
-            passportNo: { type: Type.INTEGER },
-            passportExpiry: { type: Type.INTEGER },
-            entryDate: { type: Type.INTEGER },
-          },
-        },
-      },
-    };
+    let sawTransientError = false;
 
     const ai = getAiClient();
     const modelErrors: string[] = [];
     if (ai) {
-      outer: for (const model of candidateModels) {
-        const maxAttempts = 2;
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 12000);
-          try {
-            console.log(`[OCR] Invoking Gemini model '${model}' (attempt ${attempt}/${maxAttempts})...`);
-            const config: any = {
-              responseMimeType: 'application/json',
-              responseSchema,
-              abortSignal: controller.signal,
-            };
-            if (model === 'gemini-4-hydrogen') {
-              config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
-            }
+      for (let i = 0; i < attemptSchedule.length; i++) {
+        const { model, timeoutMs } = attemptSchedule[i];
+        // Skip final retry if no transient error happened or if we already spent > 26s
+        if (i === 2 && (!sawTransientError || Date.now() - ocrStartMs > 26000)) {
+          break;
+        }
+        if (i === 2) {
+          await sleep(600);
+        }
 
-            const response = await ai.models.generateContent({
-              model,
-              contents: { parts },
-              config,
-            });
-
-            const text = response.text;
-            if (text) {
-              try {
-                extractedData = JSON.parse(text);
-              } catch {
-                const cleaned = text.replace(/```json/gi, '').replace(/```/g, '').trim();
-                extractedData = JSON.parse(cleaned);
-              }
-              successfulModel = model;
-              console.log(`[OCR] Successfully extracted details using model '${model}'!`);
-              break outer;
-            }
-          } catch (err: any) {
-            const detail = controller.signal.aborted
-              ? `Model '${model}' timed out after 12s`
-              : formatGeminiError(err);
-            lastErrorDetail = detail;
-            modelErrors.push(`${model}#${attempt}: ${detail}`);
-            if (isAuthOrKeyError(err)) {
-              authErrorDetected = true;
-              console.log(`[OCR] Gemini API key issue (${detail}); falling back to structural/client OCR.`);
-              break outer;
-            }
-            if (!controller.signal.aborted && isTransientError(err) && attempt < maxAttempts) {
-              console.log(`[OCR] Transient error on '${model}' (${detail}), retrying...`);
-              await sleep(700 * attempt);
-              continue;
-            }
-            console.log(`[OCR] Model '${model}' unavailable (${detail}), trying next fallback...`);
-            break;
-          } finally {
-            clearTimeout(timeoutId);
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+        try {
+          console.log(`[OCR] Invoking Gemini model '${model}' (step ${i + 1}/${attemptSchedule.length}, timeout ${timeoutMs}ms)...`);
+          const config: any = {
+            responseMimeType: 'application/json',
+            responseSchema,
+            abortSignal: controller.signal,
+          };
+          if (model === 'gemini-4-hydrogen') {
+            config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
           }
+
+          const response = await ai.models.generateContent({
+            model,
+            contents: { parts },
+            config,
+          });
+
+          const text = response.text;
+          if (text) {
+            try {
+              extractedData = JSON.parse(text);
+            } catch {
+              const cleaned = text.replace(/```json/gi, '').replace(/```/g, '').trim();
+              extractedData = JSON.parse(cleaned);
+            }
+            successfulModel = model;
+            console.log(`[OCR] Successfully extracted details using model '${model}' in ${Date.now() - ocrStartMs}ms!`);
+            break;
+          }
+        } catch (err: any) {
+          const detail = controller.signal.aborted
+            ? `Model '${model}' timed out after ${Math.round(timeoutMs / 1000)}s`
+            : formatGeminiError(err);
+          lastErrorDetail = detail;
+          modelErrors.push(`${model}#${i + 1}: ${detail}`);
+          if (isAuthOrKeyError(err)) {
+            authErrorDetected = true;
+            console.log(`[OCR] Gemini API key issue (${detail}); falling back to structural/client OCR.`);
+            break;
+          }
+          if (isTransientError(err) || controller.signal.aborted) {
+            sawTransientError = true;
+          }
+          console.log(`[OCR] Model '${model}' unavailable (${detail}), trying next fallback...`);
+        } finally {
+          clearTimeout(timeoutId);
         }
       }
       if (!extractedData && modelErrors.length > 0) {

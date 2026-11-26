@@ -607,10 +607,16 @@ export const Step2OcrReview: React.FC<Step2OcrReviewProps> = ({
       : 'Reset to OCR',
     backBtn: isKm ? 'ត្រឡប់ទៅជំហ៊ានទី ១' : isKo ? '1단계 서류 업로드' : 'Back to Upload',
     confirmBtn: isKm
-      ? 'បន្តទៅជំហាន 2.5: ពិនិត្យ និងកែតម្រូវ'
+      ? isStep1Ready
+        ? 'បញ្ជាក់ និងបញ្ចូលទៅទម្រង់ពាក្យ (ជំហានទី ៣)'
+        : 'រក្សាទុកព័ត៌មាន & ត្រឡប់ទៅជំហានទី ១'
       : isKo
-      ? '2.5단계(검토 및 수정)로 이동'
-      : 'Continue to Step 2.5: Review & Correct',
+      ? isStep1Ready
+        ? '확인 후 공식 신청서(3단계)에 반영'
+        : '검증 내용 저장 후 1단계로 돌아가기'
+      : isStep1Ready
+      ? 'Confirm & Inject into Official Form (Step 3)'
+      : 'Save Verified Data & Return to Step 1',
     viewerTitle: isKm
       ? 'ឯកសារដើម & អក្សរ OCR'
       : isKo

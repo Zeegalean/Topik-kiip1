@@ -976,10 +976,10 @@ export const Step2FormTemplate: React.FC<Step2FormTemplateProps> = ({
             className="text-xs font-semibold text-blue-600 hover:text-blue-800 hover:underline cursor-pointer whitespace-nowrap shrink-0"
           >
             {lang === 'ko'
-              ? '2.5단계(검토·수정)에서 다시 수정 →'
+              ? '2단계(OCR 검증)에서 다시 수정 →'
               : lang === 'en'
-              ? 'Review & Correct (Step 2.5) →'
-              : 'ពិនិត្យ និងកែតម្រូវ (ជំហាន 2.5) →'}
+              ? 'Edit in Step 2 (OCR Verification) →'
+              : 'កែសម្រួលក្នុងជំហានទី ២ (ផ្ទៀងផ្ទាត់ OCR) →'}
           </button>
         </div>
 

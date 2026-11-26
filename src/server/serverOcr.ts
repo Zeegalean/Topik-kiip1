@@ -199,11 +199,11 @@ function findArcRegNumber(text: string): { reg1: string; reg2: string; matchInde
       matchLength: cleanMatch[0].length,
     };
   }
-  const tokenRegex = /\b([0-9OIlSB]{6})\s*[-–~._:/\s]+\s*([1-8OIlSB][0-9OIlSB]{6})\b/g;
+  const tokenRegex = /\b([0-9OIlSBZ]{6})\s*[-–~._:/\s]*([1-8OIlSB][0-9OIlSBZ]{6})\b/g;
   let m: RegExpExecArray | null;
   while ((m = tokenRegex.exec(text)) !== null) {
     const fix = (s: string) =>
-      s.replace(/O/gi, '0').replace(/[Il|]/g, '1').replace(/S/gi, '5').replace(/B/gi, '8');
+      s.replace(/O/gi, '0').replace(/[Il|]/g, '1').replace(/Z/gi, '2').replace(/S/gi, '5').replace(/B/gi, '8');
     const r1 = fix(m[1]);
     const r2 = fix(m[2]);
     if (/^\d{6}$/.test(r1) && /^[1-8]\d{6}$/.test(r2)) {
@@ -352,9 +352,42 @@ function extractMrzName(text: string): string | null {
   return null;
 }
 
+function extractSingleUpperWord(line: string): string | null {
+  const cleaned = line
+    .replace(/[가-힣()/:：,]+/g, ' ')
+    .replace(/\b(?:Name|in|English|Surname|Given|Names|Sex|Gender|Male|Female|Country|Region|Nationality)\b/gi, ' ')
+    .replace(/[^A-Z\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const tokens = cleaned.split(' ').filter((w) => w.length >= 2 && !NON_NAME_WORDS.has(w));
+  if (tokens.length >= 1 && tokens.length <= 3) return tokens.join(' ');
+  return null;
+}
+
 function extractLabeledName(text: string): string | null {
   if (!text) return null;
   const lines = text.split(/[\r\n<>]+/).map((l) => l.trim()).filter(Boolean);
+
+  // Pair separate Surname + Given Names fields (standard Passport & newer ARC layout)
+  let detectedSurname = '';
+  let detectedGiven = '';
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/\bSurname\b|성\s*\(?\s*Surname/i.test(line)) {
+      detectedSurname =
+        extractSingleUpperWord(line) ||
+        (i + 1 < lines.length ? extractSingleUpperWord(lines[i + 1]) || '' : '');
+    } else if (/\bGiven\s*Names?\b|이름\s*\(?\s*Given/i.test(line)) {
+      detectedGiven =
+        extractSingleUpperWord(line) ||
+        (i + 1 < lines.length ? extractSingleUpperWord(lines[i + 1]) || '' : '');
+    }
+  }
+  if (detectedSurname && detectedGiven) {
+    const paired = filterValidNameWords(`${detectedSurname} ${detectedGiven}`);
+    if (paired) return paired;
+  }
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (/(?:성\s*명|영문성명|Name\s*in\s*English|\bName\b|\bSurname\b)/i.test(line)) {
@@ -364,6 +397,8 @@ function extractLabeledName(text: string): string | null {
       const sameCandidate = filterValidNameWords(same);
       if (sameCandidate) return sameCandidate;
 
+      // Check single-line or 2-line split name immediately after the label
+      const collectedWords: string[] = [];
       for (let off = 1; off <= 2; off++) {
         if (i + off < lines.length) {
           const upperMatches = lines[i + off].match(/\b([A-Z]{2,18}(?:[,\s]+[A-Z]{2,18}){1,3})\b/g);
@@ -373,7 +408,13 @@ function extractLabeledName(text: string): string | null {
               if (nextCandidate) return nextCandidate;
             }
           }
+          const single = extractSingleUpperWord(lines[i + off]);
+          if (single) collectedWords.push(single);
         }
+      }
+      if (collectedWords.length >= 2) {
+        const joined = filterValidNameWords(collectedWords.join(' '));
+        if (joined) return joined;
       }
     }
   }
@@ -630,13 +671,13 @@ export function parseStructuredTextCorpus(params: {
 
   // 5. Visa Status
   const visaMatch =
-    arcFrontText.match(/\b(E-?9-?1|E-?7-?4|E-?7-?1|E-?9|E-?7|F-?2-?R|F-?2|F-?5|F-?6|D-?2|D-?4|D-?10|H-?2)\b/i) ||
-    combined.match(/(?:체\s*류\s*자\s*격|Status)[^\nA-Za-z0-9]{0,12}([A-Z]\s*[-–]?\s*\d(?:\s*[-–]?\s*[A-Z0-9])?)/i);
+    arcFrontText.match(/\b(E[-._\s]?9[-._\s]?[1-5]|E[-._\s]?7[-._\s]?[1-4]|E[-._\s]?9|E[-._\s]?7|F[-._\s]?2[-._\s]?R|F[-._\s]?[1-6]|D[-._\s]?2[-._\s]?[1-8]|D[-._\s]?4[-._\s]?[1-7]|D[-._\s]?2|D[-._\s]?4|D[-._\s]?10|H[-._\s]?2|G[-._\s]?1|C[-._\s]?3)\b/i) ||
+    combined.match(/(?:체\s*류\s*자\s*격|Status)[^\nA-Za-z0-9]{0,16}([A-Z]\s*[-–._]?\s*\d{1,2}(?:\s*[-–._]?\s*[A-Z0-9])?)/i);
   if (visaMatch) {
-    let v = visaMatch[1].toUpperCase().replace(/\s+/g, '');
-    if (/^E91$/.test(v)) v = 'E-9-1';
-    else if (/^E74$/.test(v)) v = 'E-7-4';
-    else if (/^E71$/.test(v)) v = 'E-7-1';
+    let v = visaMatch[1].toUpperCase().replace(/[._\s–]+/g, '-').replace(/--+/g, '-');
+    if (/^[A-Z]\d$/.test(v)) v = `${v[0]}-${v[1]}`;
+    else if (/^[A-Z]\d\d$/.test(v) && !v.startsWith('D10')) v = `${v[0]}-${v[1]}-${v[2]}`;
+    else if (v === 'D10') v = 'D-10';
     else if (/^F2R$/.test(v)) v = 'F-2-R';
     result.visaStatus = v;
   }
@@ -735,9 +776,9 @@ export function parseStructuredTextCorpus(params: {
     if (passMatch) result.passportNo = passMatch[1].toUpperCase();
   }
 
-  // 13. Entry Date into Korea (입국일 / 입국일자 / Entry Date)
+  // 13. Entry Date into Korea (입국일 / 입국일자 / Entry Date / Admitted)
   const entryDateMatch = combined.match(
-    /(?:입\s*국\s*일(?:\s*자)?|최\s*초\s*입\s*국\s*일|Date\s*of\s*Entry|Entry\s*Date)[^\d\n]{0,20}(\d{4}\s*[.\-년/]\s*\d{1,2}\s*[.\-월/]\s*\d{1,2}|\d{1,2}\s+[A-Za-z]{3,9}[.,]?\s+\d{4})/i
+    /(?:최\s*초\s*입\s*국\s*일(?:\s*자)?|입\s*국\s*일(?:\s*자)?|입\s*국\s*허\s*가|Date\s*of\s*Entry|Entry\s*Date|ADMITTED)[^\d\n]{0,24}(\d{4}\s*[.\-년/]\s*\d{1,2}\s*[.\-월/]\s*\d{1,2}|\d{1,2}\s+[A-Za-z]{3,9}[.,]?\s+\d{4})/i
   );
   if (entryDateMatch) {
     const parsedEntry = parseFlexibleDate(entryDateMatch[1], 1995, 2035);

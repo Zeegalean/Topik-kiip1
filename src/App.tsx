@@ -13,7 +13,6 @@ import { AuthModal } from './components/AuthModal';
 import { TopikKiipGuide } from './components/TopikKiipGuide';
 import { Step1Upload } from './components/Step1Upload';
 import { Step2OcrReview } from './components/Step2OcrReview';
-import { ReviewAndCorrect } from './components/ReviewAndCorrect';
 import { Step2FormTemplate } from './components/Step2FormTemplate';
 import { Step3PdfPreview } from './components/Step3PdfPreview';
 import { Step4EmailSender } from './components/Step4EmailSender';
@@ -359,19 +358,6 @@ export default function App() {
   const handleConfirmOcrInjection = (confirmedDraft: ExtractedDocumentData) => {
     setExtractedOcrDraft(confirmedDraft);
     setFormData((prev) => mergeExtractedIntoFormData(prev, confirmedDraft, true));
-    setCurrentStep(2.5);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
-  };
-
-  const handleFinalizeReviewAndCorrect = (
-    updatedFormFields: Partial<ApplicationFormData>,
-    updatedDraft: ExtractedDocumentData
-  ) => {
-    setExtractedOcrDraft(updatedDraft);
-    setFormData((prev) => ({
-      ...mergeExtractedIntoFormData(prev, updatedDraft, true),
-      ...updatedFormFields,
-    }));
     setHasConfirmedOcrReview(true);
     setCurrentStep(isStep1Ready ? 3 : 1);
     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -519,13 +505,13 @@ export default function App() {
   };
 
   const handleNavigateStep = (s: number) => {
-    if ((s === 2 || s === 2.5) && !canOpenVerification) {
+    if (s === 2 && !canOpenVerification) {
       return;
     }
-    if (s > 2.5 && !isStep1Ready) {
+    if (s > 2 && !isStep1Ready) {
       return;
     }
-    if (s >= 3 && (currentStep === 2 || currentStep === 2.5 || (!hasConfirmedOcrReview && Object.keys(extractedOcrDraft).length > 0))) {
+    if (s >= 3 && (currentStep === 2 || (!hasConfirmedOcrReview && Object.keys(extractedOcrDraft).length > 0))) {
       setFormData((prev) => mergeExtractedIntoFormData(prev, extractedOcrDraft, true));
       setHasConfirmedOcrReview(true);
     }
@@ -602,7 +588,7 @@ export default function App() {
         )}
         <div className="flex flex-col lg:flex-row items-start justify-center gap-6">
           {/* Primary Content Column */}
-          <div className={`flex-1 min-w-0 w-full ${currentStep === 2 || currentStep === 2.5 ? 'max-w-none' : 'max-w-4xl'}`}>
+          <div className={`flex-1 min-w-0 w-full ${currentStep === 2 ? 'max-w-none' : 'max-w-4xl'}`}>
             {activeTab === 'about' ? (
               <AboutMePage
                 lang={lang}
@@ -665,31 +651,6 @@ export default function App() {
                   />
                 )}
 
-                {currentStep === 2.5 && (
-                  <ReviewAndCorrect
-                    lang={lang}
-                    docs={docs}
-                    formData={formData}
-                    draft={extractedOcrDraft}
-                    initialSnapshot={ocrInitialSnapshot}
-                    confidenceMap={ocrConfidenceMap}
-                    rawTextPreview={ocrRawText}
-                    isScanning={isRescanningOcr}
-                    isStep1Ready={isStep1Ready}
-                    missingStep1Count={missingStep1Items.length}
-                    onRescanOcr={handleRescanOcrFromReview}
-                    onBackToStep2={() => {
-                      setCurrentStep(2);
-                      window.scrollTo({ top: 0, behavior: 'smooth' });
-                    }}
-                    onGoToStep1Upload={() => {
-                      setCurrentStep(1);
-                      window.scrollTo({ top: 0, behavior: 'smooth' });
-                    }}
-                    onFinalizeForPdfForm={handleFinalizeReviewAndCorrect}
-                  />
-                )}
-
                 {currentStep === 3 && (
                   <Step2FormTemplate
                     formData={formData}
@@ -700,7 +661,7 @@ export default function App() {
                     setSigSettings={setSigSettings}
                     lang={lang}
                     onNext={() => setCurrentStep(4)}
-                    onPrev={() => setCurrentStep(2.5)}
+                    onPrev={() => setCurrentStep(2)}
                     formRef={formRef}
                     isPaid={isPaid}
                     setIsPaid={handleSetIsPaid}

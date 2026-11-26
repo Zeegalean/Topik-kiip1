@@ -3,7 +3,6 @@ import { Language } from '../types';
 import {
   Upload,
   ScanText,
-  ClipboardCheck,
   FileEdit,
   FileSearch,
   Send,
@@ -54,20 +53,6 @@ const STAGES: StageDefinition[] = [
       en: 'OCR Scan',
       ko: 'OCR 확인',
       km: 'ស្កេន OCR',
-    },
-  },
-  {
-    num: 2.5,
-    icon: ClipboardCheck,
-    title: {
-      en: 'Review & Correct',
-      ko: '검토·수정',
-      km: 'ពិនិត្យកែតម្រូវ',
-    },
-    subtitle: {
-      en: 'Step 2.5 Fix',
-      ko: '2.5단계 오류 수정',
-      km: 'ជំហាន 2.5',
     },
   },
   {
@@ -189,11 +174,11 @@ export const StepsProgressBar: React.FC<StepsProgressBarProps> = ({
         </span>
       </div>
 
-      {/* 6-stage horizontal progress track (including Step 2.5 Review & Correct) */}
+      {/* 5-stage horizontal progress track */}
       <div className="relative">
         {/* Background rail connecting node 1 center to final node center */}
         <div
-          className="pointer-events-none absolute top-[18px] sm:top-[20px] left-[8.33%] right-[8.33%] h-0.5 bg-slate-200 rounded-full overflow-hidden"
+          className="pointer-events-none absolute top-[18px] sm:top-[20px] left-[10%] right-[10%] h-0.5 bg-slate-200 rounded-full overflow-hidden"
           aria-hidden="true"
         >
           <div
@@ -202,15 +187,15 @@ export const StepsProgressBar: React.FC<StepsProgressBarProps> = ({
           />
         </div>
 
-        <ol className="relative grid grid-cols-6 gap-1 sm:gap-2">
+        <ol className="relative grid grid-cols-5 gap-1 sm:gap-2">
           {STAGES.map((stage, idx) => {
             const Icon = stage.icon;
             const isCompleted = idx < activeIndex;
             const isActive = idx === activeIndex;
             const isLockedByUpload =
-              stage.num === 2 || stage.num === 2.5
+              stage.num === 2
                 ? !(canOpenVerification ?? isStep1Ready)
-                : stage.num > 2.5 && !isStep1Ready;
+                : stage.num > 2 && !isStep1Ready;
             const isLockedByPayment = stage.num === 5 && !isPaid && isStep1Ready;
             const isDisabled = isLockedByUpload;
 
@@ -260,7 +245,7 @@ export const StepsProgressBar: React.FC<StepsProgressBarProps> = ({
                     ) : isLockedByUpload || isLockedByPayment ? (
                       <Lock className="w-3.5 h-3.5 sm:w-4 sm:h-4" aria-hidden="true" />
                     ) : (
-                      <span className={`${stage.num === 2.5 ? 'text-[11px] sm:text-xs' : 'text-xs sm:text-sm'} font-bold tabular-nums`}>
+                      <span className="text-xs sm:text-sm font-bold tabular-nums">
                         {stage.num}
                       </span>
                     )}

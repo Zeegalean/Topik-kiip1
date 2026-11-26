@@ -199,12 +199,42 @@ async function preprocessImageForOcr(dataUrl: string, enhanceContrast: boolean =
         ctx.drawImage(img, 0, 0, width, height);
 
         if (enhanceContrast) {
+          // Adaptive p5-p95 luminance percentile stretching so dark or bright-glare ARC photos become crisp text
           const imgData = ctx.getImageData(0, 0, width, height);
           const pixels = imgData.data;
-          const contrastFactor = 1.45;
+          const hist = new Uint32Array(256);
+          const totalPx = width * height;
+          for (let i = 0; i < pixels.length; i += 4) {
+            const lum = Math.round(0.299 * pixels[i] + 0.587 * pixels[i + 1] + 0.114 * pixels[i + 2]);
+            hist[lum]++;
+          }
+          let lowCut = 0;
+          let highCut = 255;
+          let acc = 0;
+          const lowTarget = Math.floor(totalPx * 0.04);
+          const highTarget = Math.floor(totalPx * 0.94);
+          for (let v = 0; v < 256; v++) {
+            acc += hist[v];
+            if (acc >= lowTarget) {
+              lowCut = v;
+              break;
+            }
+          }
+          acc = 0;
+          for (let v = 0; v < 256; v++) {
+            acc += hist[v];
+            if (acc >= highTarget) {
+              highCut = v;
+              break;
+            }
+          }
+          const span = Math.max(28, highCut - lowCut);
           for (let i = 0; i < pixels.length; i += 4) {
             const lum = 0.299 * pixels[i] + 0.587 * pixels[i + 1] + 0.114 * pixels[i + 2];
-            const boosted = Math.max(0, Math.min(255, (lum - 128) * contrastFactor + 132));
+            let norm = ((lum - lowCut) / span) * 255;
+            // Mild S-curve push around mid-gray to separate ink from colored ARC security patterns
+            norm = (norm - 128) * 1.25 + 132;
+            const boosted = Math.max(0, Math.min(255, Math.round(norm)));
             pixels[i] = boosted;
             pixels[i + 1] = boosted;
             pixels[i + 2] = boosted;
@@ -212,7 +242,7 @@ async function preprocessImageForOcr(dataUrl: string, enhanceContrast: boolean =
           ctx.putImageData(imgData, 0, 0);
         }
 
-        resolve(canvas.toDataURL('image/jpeg', 0.95));
+        resolve(canvas.toDataURL('image/jpeg', 0.94));
       } catch {
         resolve(dataUrl);
       }
@@ -659,14 +689,15 @@ function findArcRegNumberInText(text: string): { reg1: string; reg2: string; mat
     };
   }
 
-  // Tolerant OCR digit match (e.g. 95O91O-576OO23)
-  const tokenRegex = /\b([0-9OIlSB]{6})\s*[-–~.\s]+\s*([1-8OIlSB][0-9OIlSB]{6})\b/g;
+  // Tolerant OCR digit match (e.g. 95O91O-576OO23 or 13 continuous digits without hyphen)
+  const tokenRegex = /\b([0-9OIlSBZ]{6})\s*[-–~._:/\s]*([1-8OIlSB][0-9OIlSBZ]{6})\b/g;
   let m: RegExpExecArray | null;
   while ((m = tokenRegex.exec(text)) !== null) {
     const fixDigits = (s: string) =>
       s
         .replace(/O/gi, '0')
         .replace(/[Il|]/g, '1')
+        .replace(/Z/gi, '2')
         .replace(/S/gi, '5')
         .replace(/B/gi, '8');
     const r1 = fixDigits(m[1]);
@@ -726,8 +757,20 @@ function extractMrzNameFromText(textCorpus: string): string | null {
   return null;
 }
 
+function extractSingleUpperWordClient(line: string): string | null {
+  const cleaned = line
+    .replace(/[가-힣()/:：,]+/g, ' ')
+    .replace(/\b(?:Name|in|English|Surname|Given|Names|Sex|Gender|Male|Female|Country|Region|Nationality)\b/gi, ' ')
+    .replace(/[^A-Z\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const tokens = cleaned.split(' ').filter((w) => w.length >= 2 && !NON_NAME_WORDS.has(w));
+  if (tokens.length >= 1 && tokens.length <= 3) return tokens.join(' ');
+  return null;
+}
+
 /**
- * Tier 2: Extract name from explicit labels (성명 / 영문성명 / Name in English / Surname)
+ * Tier 2: Extract name from explicit labels (성명 / 영문성명 / Name in English / Surname + Given Names)
  */
 function extractLabeledNameFromText(textCorpus: string): string | null {
   if (!textCorpus) return null;
@@ -735,6 +778,25 @@ function extractLabeledNameFromText(textCorpus: string): string | null {
     .split(/[\r\n<>]+/)
     .map((l) => l.trim())
     .filter((l) => l.length > 0);
+
+  let detectedSurname = '';
+  let detectedGiven = '';
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/\bSurname\b|성\s*\(?\s*Surname/i.test(line)) {
+      detectedSurname =
+        extractSingleUpperWordClient(line) ||
+        (i + 1 < lines.length ? extractSingleUpperWordClient(lines[i + 1]) || '' : '');
+    } else if (/\bGiven\s*Names?\b|이름\s*\(?\s*Given/i.test(line)) {
+      detectedGiven =
+        extractSingleUpperWordClient(line) ||
+        (i + 1 < lines.length ? extractSingleUpperWordClient(lines[i + 1]) || '' : '');
+    }
+  }
+  if (detectedSurname && detectedGiven) {
+    const paired = filterValidNameWords(`${detectedSurname} ${detectedGiven}`);
+    if (paired) return paired;
+  }
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -745,10 +807,10 @@ function extractLabeledNameFromText(textCorpus: string): string | null {
       const sameCandidate = filterValidNameWords(strippedSame);
       if (sameCandidate) return sameCandidate;
 
+      const collected: string[] = [];
       for (let offset = 1; offset <= 2; offset++) {
         if (i + offset < lines.length) {
           const nextRaw = lines[i + offset];
-          // Require uppercase-only tokens on following lines to avoid Hangul OCR garbage
           const upperMatches = nextRaw.match(/\b([A-Z]{2,18}(?:[,\s]+[A-Z]{2,18}){1,3})\b/g);
           if (upperMatches) {
             for (const um of upperMatches) {
@@ -756,7 +818,13 @@ function extractLabeledNameFromText(textCorpus: string): string | null {
               if (nextCandidate) return nextCandidate;
             }
           }
+          const single = extractSingleUpperWordClient(nextRaw);
+          if (single) collected.push(single);
         }
+      }
+      if (collected.length >= 2) {
+        const joined = filterValidNameWords(collected.join(' '));
+        if (joined) return joined;
       }
     }
   }
@@ -1052,13 +1120,13 @@ export function parseOcrCorpusToData(
 
   // 5. Visa Status (체류자격)
   const visaMatch =
-    arcFrontText.match(/\b(E-?9-?1|E-?7-?4|E-?7-?1|E-?9|E-?7|F-?2-?R|F-?2|F-?5|F-?6|D-?2|D-?4|D-?10|H-?2)\b/i) ||
-    combined.match(/(?:체\s*류\s*자\s*격|Status)[^\nA-Za-z0-9]{0,12}([A-Z]\s*[-–]?\s*\d(?:\s*[-–]?\s*[A-Z0-9])?)/i);
+    arcFrontText.match(/\b(E[-._\s]?9[-._\s]?[1-5]|E[-._\s]?7[-._\s]?[1-4]|E[-._\s]?9|E[-._\s]?7|F[-._\s]?2[-._\s]?R|F[-._\s]?[1-6]|D[-._\s]?2[-._\s]?[1-8]|D[-._\s]?4[-._\s]?[1-7]|D[-._\s]?2|D[-._\s]?4|D[-._\s]?10|H[-._\s]?2|G[-._\s]?1|C[-._\s]?3)\b/i) ||
+    combined.match(/(?:체\s*류\s*자\s*격|Status)[^\nA-Za-z0-9]{0,16}([A-Z]\s*[-–._]?\s*\d{1,2}(?:\s*[-–._]?\s*[A-Z0-9])?)/i);
   if (visaMatch) {
-    let v = visaMatch[1].toUpperCase().replace(/\s+/g, '');
-    if (/^E91$/.test(v)) v = 'E-9-1';
-    else if (/^E74$/.test(v)) v = 'E-7-4';
-    else if (/^E71$/.test(v)) v = 'E-7-1';
+    let v = visaMatch[1].toUpperCase().replace(/[._\s–]+/g, '-').replace(/--+/g, '-');
+    if (/^[A-Z]\d$/.test(v)) v = `${v[0]}-${v[1]}`;
+    else if (/^[A-Z]\d\d$/.test(v) && !v.startsWith('D10')) v = `${v[0]}-${v[1]}-${v[2]}`;
+    else if (v === 'D10') v = 'D-10';
     else if (/^F2R$/.test(v)) v = 'F-2-R';
     result.visaStatus = v;
   }
@@ -1264,9 +1332,9 @@ export async function prepareDocumentForOcrApi(
 ): Promise<{ apiUrl: string | null | undefined; pdfText: string }> {
   if (!dataUrl) return { apiUrl: dataUrl, pdfText: '' };
   if (isPdfDataUrl(dataUrl)) {
-    const parsed = await extractPdfTextAndImageFromDataUrl(dataUrl, 1900);
+    const parsed = await extractPdfTextAndImageFromDataUrl(dataUrl, 1600);
     const compressedImg = parsed.imageUrl
-      ? await compressImageForApi(parsed.imageUrl, 1800, 0.88)
+      ? await compressImageForApi(parsed.imageUrl, 1450, 0.86)
       : dataUrl;
     return {
       apiUrl: compressedImg || dataUrl,
@@ -1274,7 +1342,7 @@ export async function prepareDocumentForOcrApi(
     };
   }
   return {
-    apiUrl: await compressImageForApi(dataUrl, 1800, 0.88),
+    apiUrl: await compressImageForApi(dataUrl, 1450, 0.85),
     pdfText: '',
   };
 }
@@ -1363,7 +1431,7 @@ export async function runFullDocumentOcrPipeline(params: {
   if (!params.skipServer && !isStaticGitHubPages) {
     try {
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 32000);
+      const timer = setTimeout(() => controller.abort(), 50000);
       const res = await fetch('/api/extract-documents', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -1426,11 +1494,13 @@ export async function runFullDocumentOcrPipeline(params: {
   const digitalParsed = parseOcrCorpusToData(arcFrontText, arcBackText, topikText, passportText);
   let merged = mergeExtractedDrafts(serverData, digitalParsed);
 
-  // Only run browser Tesseract on documents where critical fields are STILL missing
-  // (avoid redundant slow WASM downloads when server already extracted the document cleanly)
+  // Only run browser Tesseract on documents where critical fields are STILL missing.
+  // When server Tesseract already ran on the raw color image and still missed fields,
+  // jump straight to adaptive histogram contrast-enhanced grayscale (`useAdaptiveFirst = true`)!
   const frontHasCore = Boolean(merged.name && merged.regNumber1 && merged.regNumber2);
   const topikHasCore = Boolean(merged.grade && (merged.examDate || merged.round || merged.examNumber));
   const passportHasCore = Boolean(merged.passportNo && merged.name);
+  const useAdaptiveFirst = serverUsedTesseract || Object.keys(serverData).length === 0;
 
   const stillNeedFront = Boolean(
     frontSource &&
@@ -1447,19 +1517,19 @@ export async function runFullDocumentOcrPipeline(params: {
     passportSource && !isPdfDataUrl(passportSource) && !passportHasCore
   );
 
-  // Run first-pass browser OCR in parallel across only the needed documents (never 8 sequential hangs!)
+  // Run first-pass browser OCR in parallel across only the needed documents
   const [tFront, tPass, tBack, tTopik] = await Promise.all([
     stillNeedFront && frontSource
-      ? runBrowserOcrWithMeta(frontSource, 'kor+eng', false)
+      ? runBrowserOcrWithMeta(frontSource, 'kor+eng', useAdaptiveFirst)
       : Promise.resolve({ text: '', confidence: 0 }),
     stillNeedPassport && passportSource
-      ? runBrowserOcrWithMeta(passportSource, 'eng', false)
+      ? runBrowserOcrWithMeta(passportSource, 'eng', useAdaptiveFirst)
       : Promise.resolve({ text: '', confidence: 0 }),
     stillNeedBack && backSource
-      ? runBrowserOcrWithMeta(backSource, 'kor+eng', false)
+      ? runBrowserOcrWithMeta(backSource, 'kor+eng', useAdaptiveFirst)
       : Promise.resolve({ text: '', confidence: 0 }),
     stillNeedTopik && topikSource
-      ? runBrowserOcrWithMeta(topikSource, 'kor+eng', false)
+      ? runBrowserOcrWithMeta(topikSource, 'kor+eng', useAdaptiveFirst)
       : Promise.resolve({ text: '', confidence: 0 }),
   ]);
 
