@@ -352,6 +352,19 @@ export function getRedeemDb(): DatabaseSync {
     );
     CREATE INDEX IF NOT EXISTS idx_promo_codes_compact ON promo_codes(code_compact);
 
+    CREATE TABLE IF NOT EXISTS promo_code_usages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      promo_code TEXT NOT NULL,
+      arc_name TEXT NOT NULL DEFAULT '',
+      user_email TEXT NOT NULL DEFAULT '',
+      center_id TEXT NOT NULL DEFAULT 'general',
+      promo_source TEXT NOT NULL DEFAULT 'admin_promo',
+      session_hash TEXT NOT NULL DEFAULT '',
+      used_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_promo_usages_code_time ON promo_code_usages(promo_code, used_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_promo_usages_arc ON promo_code_usages(arc_name);
+
     CREATE TABLE IF NOT EXISTS verified_receipts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       image_sha256 TEXT NOT NULL UNIQUE,
@@ -2384,6 +2397,19 @@ export interface ServerPromoCodeRecord {
   expiresAt: string;
   isActive: boolean;
   createdAt: string;
+  recentArcNames?: string[];
+  lastUsedAt?: string | null;
+}
+
+export interface PromoCodeUsageRecord {
+  id: number;
+  promoCode: string;
+  arcName: string;
+  userEmail: string;
+  centerId: string;
+  promoSource: string;
+  usedAt: string;
+  codeTotalUses: number;
 }
 
 export type PromoErrorCode = 'EMPTY' | 'NOT_FOUND' | 'INACTIVE' | 'EXPIRED' | 'LIMIT_REACHED';
@@ -2400,17 +2426,23 @@ interface PromoCodeDbRow {
   created_at: string;
 }
 
-function mapPromoRow(r: PromoCodeDbRow): ServerPromoCodeRecord {
+function mapPromoRow(
+  r: PromoCodeDbRow,
+  extras?: { recentArcNames?: string[]; lastUsedAt?: string | null; loggedUsageCount?: number }
+): ServerPromoCodeRecord {
+  const usageCount = Math.max(Number(r.usage_count) || 0, Number(extras?.loggedUsageCount) || 0);
   return {
     id: String(r.code),
     code: String(r.code),
     centerId: String(r.center_id || 'general'),
     monthLabel: String(r.month_label || ''),
     usageLimit: Math.max(1, Number(r.usage_limit) || 50),
-    usageCount: Math.max(0, Number(r.usage_count) || 0),
+    usageCount,
     expiresAt: String(r.expires_at || ''),
     isActive: Number(r.is_active) !== 0,
     createdAt: String(r.created_at || ''),
+    recentArcNames: extras?.recentArcNames || [],
+    lastUsedAt: extras?.lastUsedAt || null,
   };
 }
 
@@ -2423,7 +2455,43 @@ export function listServerPromoCodes(): ServerPromoCodeRecord[] {
        ORDER BY created_at DESC`
     )
     .all() as unknown as PromoCodeDbRow[];
-  return rows.map(mapPromoRow);
+
+  const usageRows = db
+    .prepare(
+      `SELECT promo_code, arc_name, used_at
+       FROM promo_code_usages
+       ORDER BY used_at DESC, id DESC
+       LIMIT 2000`
+    )
+    .all() as unknown as Array<{ promo_code: string; arc_name: string; used_at: string }>;
+
+  const usageMetaByCode = new Map<
+    string,
+    { recentArcNames: string[]; lastUsedAt: string | null; loggedCount: number }
+  >();
+  for (const u of usageRows) {
+    const codeKey = String(u.promo_code || '').toUpperCase();
+    if (!codeKey) continue;
+    let entry = usageMetaByCode.get(codeKey);
+    if (!entry) {
+      entry = { recentArcNames: [], lastUsedAt: u.used_at || null, loggedCount: 0 };
+      usageMetaByCode.set(codeKey, entry);
+    }
+    entry.loggedCount += 1;
+    const arc = String(u.arc_name || '').trim();
+    if (arc && !entry.recentArcNames.includes(arc) && entry.recentArcNames.length < 15) {
+      entry.recentArcNames.push(arc);
+    }
+  }
+
+  return rows.map((r) => {
+    const meta = usageMetaByCode.get(String(r.code || '').toUpperCase());
+    return mapPromoRow(r, {
+      recentArcNames: meta?.recentArcNames || [],
+      lastUsedAt: meta?.lastUsedAt || null,
+      loggedUsageCount: meta?.loggedCount || 0,
+    });
+  });
 }
 
 export function upsertServerPromoCode(params: {
@@ -2514,12 +2582,20 @@ function isPromoExpired(expiresAt: string): boolean {
   return Date.now() > parsed.getTime();
 }
 
-export function verifyAndIncrementServerPromoCode(rawCode: string): {
+export function verifyAndIncrementServerPromoCode(
+  rawCode: string,
+  metadata?: {
+    applicantName?: string;
+    userEmail?: string;
+    sessionHash?: string;
+  }
+): {
   ok: boolean;
   statusCode: number;
   errorCode?: PromoErrorCode;
   error?: string;
   promo?: ServerPromoCodeRecord;
+  arcNameRecorded?: string;
 } {
   const code = normalizeCode(rawCode);
   const compact = compactCode(rawCode);
@@ -2531,6 +2607,11 @@ export function verifyAndIncrementServerPromoCode(rawCode: string): {
       error: 'សូមបញ្ចូលលេខកូដ Promo Code ឱ្យបានត្រឹមត្រូវ!',
     };
   }
+
+  const safeArcName = sanitizeApplicantName(metadata?.applicantName);
+  const safeEmail = String(metadata?.userEmail || '').trim().slice(0, 160);
+  const safeSession = String(metadata?.sessionHash || '').trim().slice(0, 64);
+  const nowIso = new Date().toISOString();
 
   const db = getRedeemDb();
   db.exec('BEGIN IMMEDIATE');
@@ -2600,11 +2681,17 @@ export function verifyAndIncrementServerPromoCode(rawCode: string): {
        WHERE code = ? AND is_active = 1 AND usage_count < usage_limit`
     ).run(row.code);
 
+    db.prepare(
+      `INSERT INTO promo_code_usages (promo_code, arc_name, user_email, center_id, promo_source, session_hash, used_at)
+       VALUES (?, ?, ?, ?, 'admin_promo', ?, ?)`
+    ).run(row.code, safeArcName, safeEmail, String(row.center_id || 'general'), safeSession, nowIso);
+
     db.exec('COMMIT');
     return {
       ok: true,
       statusCode: 200,
       promo: mapPromoRow({ ...row, usage_count: currentCount + 1 }),
+      arcNameRecorded: safeArcName,
     };
   } catch (err) {
     try {
@@ -2614,6 +2701,144 @@ export function verifyAndIncrementServerPromoCode(rawCode: string): {
     }
     throw err;
   }
+}
+
+export function recordMasterOrExternalPromoUsage(params: {
+  code: string;
+  applicantName?: string;
+  userEmail?: string;
+  centerId?: string;
+  promoSource?: 'master_promo' | 'firebase_promo' | 'admin_promo';
+  sessionHash?: string;
+}): { usageCount: number; arcNameRecorded: string } {
+  const code = normalizeCode(params.code);
+  const compact = compactCode(params.code);
+  const safeArcName = sanitizeApplicantName(params.applicantName);
+  const safeEmail = String(params.userEmail || '').trim().slice(0, 160);
+  const safeCenter =
+    String(params.centerId || 'general')
+      .trim()
+      .replace(/[^a-zA-Z0-9_-]/g, '')
+      .slice(0, 64) || 'general';
+  const promoSource = params.promoSource || 'admin_promo';
+  const safeSession = String(params.sessionHash || '').trim().slice(0, 64);
+  const nowIso = new Date().toISOString();
+
+  if (!code) return { usageCount: 0, arcNameRecorded: safeArcName };
+
+  const db = getRedeemDb();
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    db.prepare(
+      `INSERT OR IGNORE INTO promo_codes
+        (code, code_compact, center_id, month_label, usage_limit, usage_count, expires_at, is_active, created_at)
+       VALUES (?, ?, ?, ?, 100000, 0, '2099-12-31', 1, ?)`
+    ).run(code, compact, safeCenter, promoSource === 'master_promo' ? 'MASTER' : '', nowIso);
+
+    db.prepare(`UPDATE promo_codes SET usage_count = usage_count + 1 WHERE code = ?`).run(code);
+
+    db.prepare(
+      `INSERT INTO promo_code_usages (promo_code, arc_name, user_email, center_id, promo_source, session_hash, used_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(code, safeArcName, safeEmail, safeCenter, promoSource, safeSession, nowIso);
+
+    const row = db
+      .prepare(`SELECT usage_count FROM promo_codes WHERE code = ?`)
+      .get(code) as { usage_count: number } | undefined;
+
+    db.exec('COMMIT');
+    return {
+      usageCount: Math.max(1, Number(row?.usage_count) || 1),
+      arcNameRecorded: safeArcName,
+    };
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      // ignore
+    }
+    throw err;
+  }
+}
+
+export function listPromoCodeUsages(params?: {
+  promoCode?: string;
+  search?: string;
+  limit?: number;
+}): {
+  usages: PromoCodeUsageRecord[];
+  totalUsages: number;
+  uniqueCodesCount: number;
+  uniqueArcNamesCount: number;
+} {
+  const db = getRedeemDb();
+  const limit = Math.max(10, Math.min(1000, Math.floor(params?.limit ?? 300)));
+  const filterCode = normalizeCode(params?.promoCode || '');
+  const rawSearch = String(params?.search || '').trim().slice(0, 80);
+
+  const conditions: string[] = [];
+  const args: Array<string | number> = [];
+
+  if (filterCode && filterCode !== 'ALL') {
+    conditions.push('u.promo_code = ?');
+    args.push(filterCode);
+  }
+  if (rawSearch) {
+    const escaped = rawSearch.replace(/[\\%_]/g, '\\$&');
+    const like = `%${escaped}%`;
+    conditions.push(
+      `(u.promo_code LIKE ? ESCAPE '\\' OR u.arc_name LIKE ? ESCAPE '\\' OR u.user_email LIKE ? ESCAPE '\\' OR u.center_id LIKE ? ESCAPE '\\')`
+    );
+    args.push(like, like, like, like);
+  }
+
+  const whereSql = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+
+  const rows = db
+    .prepare(
+      `SELECT u.id, u.promo_code, u.arc_name, u.user_email, u.center_id, u.promo_source, u.used_at,
+              COALESCE(p.usage_count, 1) AS code_total_uses
+       FROM promo_code_usages u
+       LEFT JOIN promo_codes p ON u.promo_code = p.code
+       ${whereSql}
+       ORDER BY u.used_at DESC, u.id DESC
+       LIMIT ?`
+    )
+    .all(...args, limit) as unknown as Array<{
+    id: number;
+    promo_code: string;
+    arc_name: string;
+    user_email: string;
+    center_id: string;
+    promo_source: string;
+    used_at: string;
+    code_total_uses: number;
+  }>;
+
+  const statsRow = db
+    .prepare(
+      `SELECT COUNT(*) AS total_usages,
+              COUNT(DISTINCT promo_code) AS unique_codes,
+              COUNT(DISTINCT CASE WHEN TRIM(arc_name) != '' THEN UPPER(TRIM(arc_name)) END) AS unique_arcs
+       FROM promo_code_usages`
+    )
+    .get() as { total_usages: number; unique_codes: number; unique_arcs: number } | undefined;
+
+  return {
+    usages: rows.map((r) => ({
+      id: Number(r.id),
+      promoCode: String(r.promo_code || ''),
+      arcName: String(r.arc_name || ''),
+      userEmail: String(r.user_email || ''),
+      centerId: String(r.center_id || 'general'),
+      promoSource: String(r.promo_source || 'admin_promo'),
+      usedAt: String(r.used_at || ''),
+      codeTotalUses: Math.max(1, Number(r.code_total_uses) || 1),
+    })),
+    totalUsages: Number(statsRow?.total_usages || 0),
+    uniqueCodesCount: Number(statsRow?.unique_codes || 0),
+    uniqueArcNamesCount: Number(statsRow?.unique_arcs || 0),
+  };
 }
 
 export function checkServerPromoCodeExists(rawCode: string): boolean {

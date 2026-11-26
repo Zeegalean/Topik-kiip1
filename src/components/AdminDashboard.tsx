@@ -22,6 +22,8 @@ import {
   Copy,
   Check,
   ScanSearch,
+  Search,
+  Download,
 } from 'lucide-react';
 import { Language } from '../types';
 import {
@@ -66,6 +68,19 @@ interface PromoCodeItem {
   expiresAt: string;
   isActive: boolean;
   createdAt: string;
+  recentArcNames?: string[];
+  lastUsedAt?: string | null;
+}
+
+interface PromoCodeUsageItem {
+  id: number;
+  promoCode: string;
+  arcName: string;
+  userEmail: string;
+  centerId: string;
+  promoSource: string;
+  usedAt: string;
+  codeTotalUses: number;
 }
 
 interface CenterItem {
@@ -170,6 +185,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [newExpiresAt, setNewExpiresAt] = useState(defaultExpiry);
   const [promoFeedback, setPromoFeedback] = useState<string | null>(null);
   const [copiedPromoCode, setCopiedPromoCode] = useState<string | null>(null);
+  const [promoUsages, setPromoUsages] = useState<PromoCodeUsageItem[]>([]);
+  const [promoUsagesStats, setPromoUsagesStats] = useState({
+    totalUsages: 0,
+    uniqueCodesCount: 0,
+    uniqueArcNamesCount: 0,
+  });
+  const [promoUsageSearch, setPromoUsageSearch] = useState('');
+  const [promoUsageCodeFilter, setPromoUsageCodeFilter] = useState('ALL');
+  const [loadingPromoUsages, setLoadingPromoUsages] = useState(false);
 
   // New Support Center Form State
   const [newCenterName, setNewCenterName] = useState('');
@@ -251,23 +275,29 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     // 1. Fetch real server-side analytics & server-side promo codes (auto-refresh token on 401 if Google Admin)
     if (tokenToUse) {
       try {
-        let [resp, promosResp] = await Promise.all([
+        let [resp, promosResp, promoUsagesResp] = await Promise.all([
           fetch('/api/admin/analytics', {
             headers: { Authorization: `Bearer ${tokenToUse}` },
           }),
           fetch('/api/admin/promo-codes', {
             headers: { Authorization: `Bearer ${tokenToUse}` },
           }).catch(() => null),
+          fetch('/api/admin/promo-usages?limit=300', {
+            headers: { Authorization: `Bearer ${tokenToUse}` },
+          }).catch(() => null),
         ]);
-        if ((resp.status === 401 || promosResp?.status === 401) && isFirebaseRootAdmin) {
+        if ((resp.status === 401 || promosResp?.status === 401 || promoUsagesResp?.status === 401) && isFirebaseRootAdmin) {
           const refreshed = await ensureServerAdminToken(true);
           if (refreshed) {
             tokenToUse = refreshed;
-            [resp, promosResp] = await Promise.all([
+            [resp, promosResp, promoUsagesResp] = await Promise.all([
               fetch('/api/admin/analytics', {
                 headers: { Authorization: `Bearer ${tokenToUse}` },
               }),
               fetch('/api/admin/promo-codes', {
+                headers: { Authorization: `Bearer ${tokenToUse}` },
+              }).catch(() => null),
+              fetch('/api/admin/promo-usages?limit=300', {
                 headers: { Authorization: `Bearer ${tokenToUse}` },
               }).catch(() => null),
             ]);
@@ -327,8 +357,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 expiresAt: String(p.expiresAt || ''),
                 isActive: p.isActive !== false,
                 createdAt: String(p.createdAt || ''),
+                recentArcNames: Array.isArray(p.recentArcNames) ? p.recentArcNames : [],
+                lastUsedAt: p.lastUsedAt || null,
               });
             }
+          }
+        }
+        if (promoUsagesResp && promoUsagesResp.ok) {
+          const uJson = await promoUsagesResp.json().catch(() => null);
+          if (uJson?.success && Array.isArray(uJson.usages)) {
+            setPromoUsages(uJson.usages);
+            setPromoUsagesStats({
+              totalUsages: Number(uJson.totalUsages || uJson.usages.length || 0),
+              uniqueCodesCount: Number(uJson.uniqueCodesCount || 0),
+              uniqueArcNamesCount: Number(uJson.uniqueArcNamesCount || 0),
+            });
           }
         }
       } catch {
@@ -365,6 +408,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           promosByCode.set(key, {
             ...item,
             usageCount: Math.max(item.usageCount, existing?.usageCount || 0),
+            recentArcNames: existing?.recentArcNames || [],
+            lastUsedAt: existing?.lastUsedAt || null,
           });
         });
         // Automatically mirror ALL Firestore promo codes to server SQLite (awaited with 401 retry)
@@ -793,6 +838,64 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     } catch {
       // ignore clipboard errors
     }
+  };
+
+  const handleRefreshPromoUsages = async (codeOverride?: string, searchOverride?: string) => {
+    const token = await ensureServerAdminToken(false);
+    if (!token) return;
+    setLoadingPromoUsages(true);
+    try {
+      const codeParam = codeOverride ?? promoUsageCodeFilter;
+      const searchParam = searchOverride ?? promoUsageSearch;
+      const qs = new URLSearchParams();
+      qs.set('limit', '300');
+      if (codeParam && codeParam !== 'ALL') qs.set('code', codeParam);
+      if (searchParam.trim()) qs.set('search', searchParam.trim());
+      const resp = await fetch(`/api/admin/promo-usages?${qs.toString()}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (resp.ok) {
+        const json = await resp.json().catch(() => null);
+        if (json?.success && Array.isArray(json.usages)) {
+          setPromoUsages(json.usages);
+          setPromoUsagesStats({
+            totalUsages: Number(json.totalUsages || 0),
+            uniqueCodesCount: Number(json.uniqueCodesCount || 0),
+            uniqueArcNamesCount: Number(json.uniqueArcNamesCount || 0),
+          });
+        }
+      }
+    } catch {
+      // Non-blocking
+    } finally {
+      setLoadingPromoUsages(false);
+    }
+  };
+
+  const handleExportPromoUsagesCsv = () => {
+    const rows = [
+      ['#', 'Promo Code', 'ARC Name', 'Code Total Uses', 'Center', 'User Email', 'Source', 'Used At'],
+      ...promoUsages.map((u, idx) => [
+        String(idx + 1),
+        u.promoCode,
+        u.arcName || 'N/A',
+        String(u.codeTotalUses),
+        u.centerId,
+        u.userEmail || '-',
+        u.promoSource,
+        u.usedAt,
+      ]),
+    ];
+    const csv = rows
+      .map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(','))
+      .join('\n');
+    const blob = new Blob([`\uFEFF${csv}`], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `promo_usage_arc_log_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   const handleCreateCenter = async (e: React.FormEvent) => {
@@ -1299,6 +1402,46 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 {/* TAB 3: PROMOTION CODE MANAGEMENT */}
                 {activeTab === 'promos' && (
                   <div className="space-y-6 animate-in fade-in duration-200">
+                    {/* KPI Summary for Promo Codes & ARC Name Logs */}
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                      <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs flex items-center justify-between">
+                        <div>
+                          <p className="text-[11px] font-bold text-slate-500">
+                            {isKm ? 'ចំនួន Promo Code សកម្ម' : 'Active Promo Codes'}
+                          </p>
+                          <p className="text-2xl font-black text-purple-700 tabular-nums mt-0.5">
+                            {promoCodes.filter((p) => p.isActive).length}
+                          </p>
+                        </div>
+                        <Ticket className="w-7 h-7 text-purple-400" />
+                      </div>
+                      <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs flex items-center justify-between">
+                        <div>
+                          <p className="text-[11px] font-bold text-slate-500">
+                            {isKm ? 'ចំនួនដងប្រើ Promo សរុប' : 'Total Promo Uses'}
+                          </p>
+                          <p className="text-2xl font-black text-indigo-700 tabular-nums mt-0.5">
+                            {Math.max(
+                              promoUsagesStats.totalUsages,
+                              promoCodes.reduce((acc, p) => acc + (p.usageCount || 0), 0)
+                            )}
+                          </p>
+                        </div>
+                        <BarChart3 className="w-7 h-7 text-indigo-400" />
+                      </div>
+                      <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs flex items-center justify-between">
+                        <div>
+                          <p className="text-[11px] font-bold text-slate-500">
+                            {isKm ? 'ឈ្មោះកាត ARC បានកត់ត្រា' : 'Recorded ARC Names'}
+                          </p>
+                          <p className="text-2xl font-black text-emerald-700 tabular-nums mt-0.5">
+                            {promoUsagesStats.uniqueArcNamesCount}
+                          </p>
+                        </div>
+                        <Users className="w-7 h-7 text-emerald-400" />
+                      </div>
+                    </div>
+
                     {/* Create Monthly Promo Code Card */}
                     <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-xs space-y-4">
                       <h4 className="font-extrabold text-slate-900 text-sm sm:text-base flex items-center gap-2">
@@ -1419,7 +1562,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               <tr className="bg-slate-50 border-b border-slate-200 text-xs text-slate-500 font-bold">
                                 <th className="p-4">Promo Code</th>
                                 <th className="p-4">{isKm ? 'មជ្ឈមណ្ឌល' : 'Support Center'}</th>
-                                <th className="p-4">{isKm ? 'ការប្រើប្រាស់ (Used / Limit)' : 'Usage'}</th>
+                                <th className="p-4">{isKm ? 'ចំនួនដងប្រើ (Used / Limit)' : 'Usage Count'}</th>
+                                <th className="p-4">{isKm ? 'ឈ្មោះកាត ARC ដែលបានប្រើ' : 'ARC Card Names'}</th>
                                 <th className="p-4">{isKm ? 'ថ្ងៃផុតកំណត់' : 'Expires At'}</th>
                                 <th className="p-4 text-right">Actions</th>
                               </tr>
@@ -1427,6 +1571,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                             <tbody className="divide-y divide-slate-100 text-xs font-semibold text-slate-800">
                               {promoCodes.map((p) => {
                                 const centerObj = centers.find((c) => c.id === p.centerId);
+                                const arcList = p.recentArcNames || [];
                                 return (
                                   <tr key={p.id} className="hover:bg-slate-50/80">
                                     <td className="p-4">
@@ -1462,6 +1607,27 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                         </div>
                                       </div>
                                     </td>
+                                    <td className="p-4">
+                                      {arcList.length === 0 ? (
+                                        <span className="text-slate-400 font-normal">—</span>
+                                      ) : (
+                                        <div className="flex flex-wrap gap-1 max-w-xs">
+                                          {arcList.slice(0, 4).map((arc) => (
+                                            <span
+                                              key={arc}
+                                              className="px-2 py-0.5 rounded-md bg-emerald-50 border border-emerald-200 text-emerald-900 font-mono text-[10.5px] font-bold"
+                                            >
+                                              {arc}
+                                            </span>
+                                          ))}
+                                          {arcList.length > 4 && (
+                                            <span className="px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600 text-[10px] font-bold">
+                                              +{arcList.length - 4}
+                                            </span>
+                                          )}
+                                        </div>
+                                      )}
+                                    </td>
                                     <td className="p-4 tabular-nums text-slate-600">{p.expiresAt}</td>
                                     <td className="p-4 text-right">
                                       <button
@@ -1472,6 +1638,141 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                       >
                                         <Trash2 className="w-4 h-4" />
                                       </button>
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Promo Code Usage History & ARC Name Log Table */}
+                    <div className="bg-white rounded-3xl border border-slate-200 shadow-xs overflow-hidden">
+                      <div className="p-5 border-b border-slate-200 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                        <div>
+                          <h4 className="font-extrabold text-slate-900 text-sm flex items-center gap-2">
+                            <FileText className="w-4 h-4 text-emerald-600" />
+                            <span>
+                              {isKm
+                                ? 'កំណត់ត្រាការប្រើប្រាស់ Promo Code និងឈ្មោះលើកាត ARC (Usage & ARC Name Log)'
+                                : 'Promo Code Usage History & Recorded ARC Names'}
+                            </span>
+                          </h4>
+                          <p className="text-[11px] text-slate-500 mt-0.5">
+                            {isKm
+                              ? 'កត់ត្រាដោយស្វ័យប្រវត្តិរាល់ដងដែលអ្នកប្រើប្រាស់បញ្ចូល Promo Code ព្រមជាមួយឈ្មោះលើកាត ARC'
+                              : 'Automatically logs every promo code redemption count and applicant ARC card name.'}
+                          </p>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2">
+                          <div className="relative">
+                            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+                            <input
+                              type="text"
+                              value={promoUsageSearch}
+                              onChange={(e) => setPromoUsageSearch(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') {
+                                  e.preventDefault();
+                                  handleRefreshPromoUsages(promoUsageCodeFilter, promoUsageSearch);
+                                }
+                              }}
+                              placeholder={isKm ? 'ស្វែងរកឈ្មោះ ARC ឬ Promo Code...' : 'Search ARC name or code...'}
+                              className="pl-8 pr-3 py-1.5 border border-slate-300 rounded-xl text-xs font-semibold w-48"
+                            />
+                          </div>
+
+                          <select
+                            value={promoUsageCodeFilter}
+                            onChange={(e) => {
+                              const next = e.target.value;
+                              setPromoUsageCodeFilter(next);
+                              handleRefreshPromoUsages(next, promoUsageSearch);
+                            }}
+                            className="px-2.5 py-1.5 border border-slate-300 rounded-xl text-xs font-bold bg-white"
+                          >
+                            <option value="ALL">{isKm ? 'គ្រប់ Promo Code' : 'All Promo Codes'}</option>
+                            {promoCodes.map((p) => (
+                              <option key={p.code} value={p.code}>
+                                {p.code}
+                              </option>
+                            ))}
+                          </select>
+
+                          <button
+                            type="button"
+                            onClick={() => handleRefreshPromoUsages()}
+                            className="px-3 py-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold flex items-center gap-1 cursor-pointer"
+                          >
+                            <RefreshCw className={`w-3.5 h-3.5 ${loadingPromoUsages ? 'animate-spin' : ''}`} />
+                            <span>{isKm ? 'ស្វែងរក' : 'Refresh'}</span>
+                          </button>
+
+                          {promoUsages.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={handleExportPromoUsagesCsv}
+                              className="px-3 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 text-xs font-bold flex items-center gap-1 cursor-pointer"
+                            >
+                              <Download className="w-3.5 h-3.5" />
+                              <span>CSV</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+
+                      {promoUsages.length === 0 ? (
+                        <div className="p-10 text-center text-xs text-slate-500">
+                          {isKm
+                            ? 'មិនទាន់មានកំណត់ត្រាការប្រើប្រាស់ Promo Code នៅឡើយទេ។'
+                            : 'No promo code usages recorded yet.'}
+                        </div>
+                      ) : (
+                        <div className="overflow-x-auto max-h-96">
+                          <table className="w-full text-left border-collapse">
+                            <thead className="sticky top-0 z-10">
+                              <tr className="bg-slate-50 border-b border-slate-200 text-xs text-slate-500 font-bold">
+                                <th className="p-3.5">#</th>
+                                <th className="p-3.5">Promo Code</th>
+                                <th className="p-3.5">{isKm ? 'ឈ្មោះលើកាត ARC (ARC Name)' : 'ARC Card Name'}</th>
+                                <th className="p-3.5">{isKm ? 'ចំនួនដងប្រើសរុប' : 'Code Total Uses'}</th>
+                                <th className="p-3.5">{isKm ? 'មជ្ឈមណ្ឌល' : 'Center'}</th>
+                                <th className="p-3.5">Email</th>
+                                <th className="p-3.5">{isKm ? 'កាលបរិច្ឆេទប្រើ' : 'Used At'}</th>
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y divide-slate-100 text-xs font-semibold text-slate-800">
+                              {promoUsages.map((u, idx) => {
+                                const centerObj = centers.find((c) => c.id === u.centerId);
+                                return (
+                                  <tr key={u.id} className="hover:bg-slate-50/80">
+                                    <td className="p-3.5 text-slate-400 tabular-nums">{idx + 1}</td>
+                                    <td className="p-3.5">
+                                      <span className="font-mono font-bold text-purple-900 bg-purple-50 px-2 py-0.5 rounded-md border border-purple-200">
+                                        {u.promoCode}
+                                      </span>
+                                    </td>
+                                    <td className="p-3.5">
+                                      {u.arcName ? (
+                                        <span className="font-mono font-bold text-emerald-900 bg-emerald-50 px-2 py-0.5 rounded-md border border-emerald-200">
+                                          {u.arcName}
+                                        </span>
+                                      ) : (
+                                        <span className="text-slate-400 font-normal">
+                                          {isKm ? '(មិនបានបញ្ចូលឈ្មោះ ARC)' : '(No ARC Name)'}
+                                        </span>
+                                      )}
+                                    </td>
+                                    <td className="p-3.5 tabular-nums font-bold text-indigo-700">
+                                      {u.codeTotalUses} {isKm ? 'ដង' : 'uses'}
+                                    </td>
+                                    <td className="p-3.5 text-slate-600">{centerObj ? centerObj.centerName : u.centerId}</td>
+                                    <td className="p-3.5 text-slate-500">{u.userEmail || '-'}</td>
+                                    <td className="p-3.5 text-slate-500 tabular-nums">
+                                      {u.usedAt ? u.usedAt.slice(0, 19).replace('T', ' ') : '-'}
                                     </td>
                                   </tr>
                                 );

@@ -31,6 +31,8 @@ import {
   upsertServerPromoCode,
   deleteServerPromoCode,
   verifyAndIncrementServerPromoCode,
+  recordMasterOrExternalPromoUsage,
+  listPromoCodeUsages,
   checkServerPromoCodeExists,
   getOrCreateSessionSigningSecret,
   listAdminAccounts,
@@ -293,6 +295,63 @@ app.use((req, res, next) => {
   }
 
   next();
+});
+
+function resolveSeoBaseUrl(req: express.Request): string {
+  const configured = String(process.env.APP_URL || '').trim().replace(/\/+$/, '');
+  if (configured && /^https?:\/\//i.test(configured)) {
+    return configured;
+  }
+  const forwardedProto = String(req.headers['x-forwarded-proto'] || req.protocol || 'https')
+    .split(',')[0]
+    .trim();
+  const rawHost = String(req.headers['x-forwarded-host'] || req.headers.host || 'localhost:3000')
+    .split(',')[0]
+    .trim();
+  const proto = forwardedProto === 'http' ? 'http' : 'https';
+  return `${proto}://${rawHost}`;
+}
+
+app.get('/robots.txt', (req, res) => {
+  const baseUrl = resolveSeoBaseUrl(req);
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  return res.send(
+    `User-agent: *\nAllow: /\nDisallow: /api/\n\nSitemap: ${baseUrl}/sitemap.xml\n`
+  );
+});
+
+app.get('/sitemap.xml', (req, res) => {
+  const baseUrl = resolveSeoBaseUrl(req);
+  const lastMod = new Date().toISOString().slice(0, 10);
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:xhtml="http://www.w3.org/1999/xhtml">
+  <url>
+    <loc>${baseUrl}/</loc>
+    <lastmod>${lastMod}</lastmod>
+    <xhtml:link rel="alternate" hreflang="km" href="${baseUrl}/?lang=km" />
+    <xhtml:link rel="alternate" hreflang="ko" href="${baseUrl}/?lang=ko" />
+    <xhtml:link rel="alternate" hreflang="en" href="${baseUrl}/?lang=en" />
+    <changefreq>weekly</changefreq>
+    <priority>1.0</priority>
+  </url>
+  <url>
+    <loc>${baseUrl}/?tab=guide</loc>
+    <lastmod>${lastMod}</lastmod>
+    <changefreq>weekly</changefreq>
+    <priority>0.9</priority>
+  </url>
+  <url>
+    <loc>${baseUrl}/?tab=about</loc>
+    <lastmod>${lastMod}</lastmod>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+  </url>
+</urlset>`;
+  res.setHeader('Content-Type', 'application/xml; charset=utf-8');
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  return res.send(xml);
 });
 
 app.use(express.static(path.resolve('public')));
@@ -1777,10 +1836,15 @@ app.post('/api/payments/check-id-paid', paymentRateLimiter, (req, res) => {
 app.post('/api/payments/verify-redeem', paymentRateLimiter, async (req, res) => {
   const rawCode = String(req.body?.code || '').trim().toUpperCase();
   const userEmail = String(req.body?.userEmail || '').trim().slice(0, 160);
-  const applicantName = sanitizeApplicantName(req.body?.applicantName);
+  const applicantName = sanitizeApplicantName(req.body?.applicantName || req.body?.arcName);
   const lang = String(req.body?.lang || 'km').trim().toLowerCase();
   const mode: 'redeem' | 'promo' = req.body?.mode === 'promo' ? 'promo' : 'redeem';
   const firebaseIdToken = String(req.body?.firebaseIdToken || '').trim();
+  const sessionHash = crypto
+    .createHash('sha256')
+    .update(`${extractClientIp(req)}|${String(req.headers['user-agent'] || '')}`)
+    .digest('hex')
+    .slice(0, 24);
 
   if (!rawCode) {
     return res.status(400).json({
@@ -1795,12 +1859,30 @@ app.post('/api/payments/verify-redeem', paymentRateLimiter, async (req, res) => 
   // ============================================================================
   if (mode === 'promo') {
     if (MASTER_PROMO_CODES.has(rawCode)) {
+      const recorded = recordMasterOrExternalPromoUsage({
+        code: rawCode,
+        applicantName,
+        userEmail,
+        centerId: 'master',
+        promoSource: 'master_promo',
+        sessionHash,
+      });
       grantUnlockCookie(req, res, 'promo', rawCode);
-      return res.json({ success: true, type: 'promo', code: rawCode });
+      return res.json({
+        success: true,
+        type: 'promo',
+        code: rawCode,
+        usageCount: recorded.usageCount,
+        arcNameRecorded: recorded.arcNameRecorded,
+      });
     }
 
     try {
-      let promoCheck = verifyAndIncrementServerPromoCode(rawCode);
+      let promoCheck = verifyAndIncrementServerPromoCode(rawCode, {
+        applicantName,
+        userEmail,
+        sessionHash,
+      });
       // If not yet mirrored in Server SQLite (or if Admin updated its status/limit/expiry in Firestore),
       // verify live by exact code ID against Cloud Firestore /promoCodes/{CODE} (works for BOTH guests and signed-in users!)
       // and automatically mirror it into SQLite!
@@ -1817,7 +1899,11 @@ app.post('/api/payments/verify-redeem', paymentRateLimiter, async (req, res) => 
             isActive: fsPromo.isActive,
             preserveUsageCount: true,
           });
-          promoCheck = verifyAndIncrementServerPromoCode(fsPromo.code);
+          promoCheck = verifyAndIncrementServerPromoCode(fsPromo.code, {
+            applicantName,
+            userEmail,
+            sessionHash,
+          });
         }
       }
       if (promoCheck.ok && promoCheck.promo) {
@@ -1829,6 +1915,7 @@ app.post('/api/payments/verify-redeem', paymentRateLimiter, async (req, res) => 
           centerId: promoCheck.promo.centerId,
           usageCount: promoCheck.promo.usageCount,
           usageLimit: promoCheck.promo.usageLimit,
+          arcNameRecorded: promoCheck.arcNameRecorded || applicantName,
         });
       }
       if (
@@ -2391,8 +2478,27 @@ app.post('/api/payments/confirm-firebase-unlock', paymentRateLimiter, async (req
     if (!isActive) {
       return res.status(403).json({ success: false, error: 'Promo code is inactive.' });
     }
+    const applicantName = sanitizeApplicantName(req.body?.applicantName || req.body?.arcName);
+    const centerId = String(fsDoc?.fields?.centerId?.stringValue || 'general');
+    const sessionHash = crypto
+      .createHash('sha256')
+      .update(`${extractClientIp(req)}|${String(req.headers['user-agent'] || '')}`)
+      .digest('hex')
+      .slice(0, 24);
+    const recorded = recordMasterOrExternalPromoUsage({
+      code: promoCode,
+      applicantName,
+      userEmail: verifiedUser.email,
+      centerId,
+      promoSource: 'firebase_promo',
+      sessionHash,
+    });
     grantUnlockCookie(req, res, 'firebase_promo', promoCode);
-    return res.json({ success: true });
+    return res.json({
+      success: true,
+      usageCount: recorded.usageCount,
+      arcNameRecorded: recorded.arcNameRecorded,
+    });
   } catch {
     return res.status(500).json({ success: false, error: 'Unable to confirm promo unlock.' });
   }
@@ -3526,6 +3632,23 @@ app.get('/api/admin/promo-codes', requireAdminAuth, (_req, res) => {
   } catch (err) {
     console.error('[Admin PromoDB] Read failed:', err);
     return res.status(500).json({ success: false, error: 'Failed to read promo codes' });
+  }
+});
+
+app.get('/api/admin/promo-usages', requireAdminAuth, (req, res) => {
+  try {
+    const result = listPromoCodeUsages({
+      promoCode: typeof req.query.code === 'string' ? req.query.code : undefined,
+      search: typeof req.query.search === 'string' ? req.query.search : undefined,
+      limit: Number(req.query.limit) || 300,
+    });
+    return res.json({
+      success: true,
+      ...result,
+    });
+  } catch (err) {
+    console.error('[Admin PromoUsages] Read failed:', err);
+    return res.status(500).json({ success: false, error: 'Failed to read promo code usages' });
   }
 });
 

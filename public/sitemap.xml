@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9"
+        xmlns:xhtml="http://www.w3.org/1999/xhtml">
+  <url>
+    <loc>https://ais-pre-6hupm32wkiwhqvn2wyhiat-657750387084.asia-northeast1.run.app/</loc>
+    <xhtml:link rel="alternate" hreflang="km" href="https://ais-pre-6hupm32wkiwhqvn2wyhiat-657750387084.asia-northeast1.run.app/?lang=km"/>
+    <xhtml:link rel="alternate" hreflang="ko" href="https://ais-pre-6hupm32wkiwhqvn2wyhiat-657750387084.asia-northeast1.run.app/?lang=ko"/>
+    <xhtml:link rel="alternate" hreflang="en" href="https://ais-pre-6hupm32wkiwhqvn2wyhiat-657750387084.asia-northeast1.run.app/?lang=en"/>
+    <changefreq>weekly</changefreq>
+    <priority>1.0</priority>
+  </url>
+  <url>
+    <loc>https://ais-pre-6hupm32wkiwhqvn2wyhiat-657750387084.asia-northeast1.run.app/?tab=guide</loc>
+    <changefreq>weekly</changefreq>
+    <priority>0.9</priority>
+  </url>
+  <url>
+    <loc>https://ais-pre-6hupm32wkiwhqvn2wyhiat-657750387084.asia-northeast1.run.app/?tab=about</loc>
+    <changefreq>monthly</changefreq>
+    <priority>0.6</priority>
+  </url>
+</urlset>

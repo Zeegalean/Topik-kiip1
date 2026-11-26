@@ -34,6 +34,7 @@ import { AdminDashboard } from './components/AdminDashboard';
 import { RightAdsAndStatsSidebar } from './components/RightAdsAndStatsSidebar';
 import { WebsiteGuideChatbot, NavActionId } from './components/WebsiteGuideChatbot';
 import { AboutMePage } from './components/AboutMePage';
+import { SeoGuideFooterSection } from './components/SeoGuideFooterSection';
 import { getTranslation } from './utils/translations';
 import { saveFormDraft, isFormDataWorthSaving } from './utils/draftStorage';
 import { auth } from './utils/firebase';
@@ -130,9 +131,53 @@ export default function App() {
     }
   };
 
-  // Workflow navigation
+  // Workflow navigation (supports ?tab=guide / ?tab=about from sitemap & deep links)
   const [currentStep, setCurrentStep] = useState<number>(1);
-  const [activeTab, setActiveTab] = useState<'flow' | 'guide' | 'about'>('flow');
+  const [activeTab, setActiveTab] = useState<'flow' | 'guide' | 'about'>(() => {
+    try {
+      const tabParam = new URLSearchParams(window.location.search).get('tab');
+      if (tabParam === 'guide' || tabParam === 'about') return tabParam;
+    } catch {}
+    return 'flow';
+  });
+
+  // Dynamic SEO <title>, <meta name="description">, and canonical URL per activeTab & language
+  useEffect(() => {
+    try {
+      const titles: Record<string, { km: string; ko: string; en: string }> = {
+        flow: {
+          km: 'ប្តូរ TOPIK to KIIP Online — KIIP & TOPIK 연계 신청 포털',
+          ko: 'TOPIK → KIIP 연계 신청 포털 — 자동 작성 & PDF 병합',
+          en: 'Convert TOPIK to KIIP Online — KIIP Integration Portal',
+        },
+        guide: {
+          km: 'របៀបប្តូរ TOPIK to KIIP និងតារាងកម្រិត — KIIP & TOPIK',
+          ko: 'TOPIK KIIP 단계 연계표 및 Socinet 신청 가이드',
+          en: 'TOPIK to KIIP Conversion Guide & Stage Mapping Table',
+        },
+        about: {
+          km: 'អំពីប្រព័ន្ធប្តូរ TOPIK to KIIP — KIIP Integration Portal',
+          ko: '소개 — KIIP & TOPIK 연계 신청 포털',
+          en: 'About — TOPIK to KIIP Integration Portal',
+        },
+      };
+      const descs: Record<string, string> = {
+        km: 'ប្តូរ TOPIK to KIIP (ផ្ទេរពិន្ទុ TOPIK ទៅ KIIP) ដោយស្វ័យប្រវត្តិ៖ ស្កេនកាត ARC និង TOPIK បង្កើតពាក្យសុំ PDF ផ្លូវការ និងផ្ញើទៅអន្តោប្រវេសន៍កូរ៉េភ្លាមៗ។',
+        ko: '사회통합프로그램(KIIP) TOPIK 성적 연계 신청서 원클릭 자동 작성, 서류 PDF 통합 병합, 출입국 이민통합지원센터 관할 이메일 자동 매칭 및 제출 시스템',
+        en: 'Convert TOPIK to KIIP online in minutes: AI OCR document scanning, automatic official PDF form generation, document merging, and Korean Immigration office email submission.',
+      };
+      const langKey = lang === 'ko' ? 'ko' : lang === 'en' ? 'en' : 'km';
+      document.title = titles[activeTab]?.[langKey] || titles.flow.km;
+
+      const descMeta = document.querySelector('meta[name="description"]');
+      if (descMeta) descMeta.setAttribute('content', descs[langKey]);
+
+      const suffix = activeTab === 'flow' ? '' : `?tab=${activeTab}`;
+      const canonicalHref = `${window.location.origin}${window.location.pathname}${suffix}`;
+      const canonicalEl = document.querySelector('link[rel="canonical"]');
+      if (canonicalEl) canonicalEl.setAttribute('href', canonicalHref);
+    } catch {}
+  }, [activeTab, lang]);
 
   // Background Wallpaper State (Always defaults to the user's provided background image)
   const [bgImage, setBgImage] = useState<string | null>(DEFAULT_BG_URL);
@@ -827,6 +872,16 @@ export default function App() {
           if (username) setAdminUsername(username);
         }}
         onAdminSessionLogout={handleAdminLogout}
+      />
+
+      {/* Semantic SEO Guide, Conversion Table & FAQ targeting "ប្តូរ TOPIK to KIIP" */}
+      <SeoGuideFooterSection
+        lang={lang}
+        onStartNow={() => {
+          setActiveTab('flow');
+          setCurrentStep(1);
+          window.scrollTo({ top: 0, behavior: 'smooth' });
+        }}
       />
 
       {/* Footer */}

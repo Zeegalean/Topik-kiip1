@@ -6,7 +6,7 @@
       (function() {
         // Purge stale Service Worker & Workbox caches on mobile browsers once per release version
         try {
-          var SW_VER = "kiip_ocr_v12";
+          var SW_VER = "kiip_ocr_v13";
           if (window.localStorage && localStorage.getItem("sw_cache_ver") !== SW_VER) {
             localStorage.setItem("sw_cache_ver", SW_VER);
             if ("serviceWorker" in navigator) {
@@ -109,19 +109,179 @@
     </script>
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="theme-color" content="#2563eb" />
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
+    <meta name="googlebot" content="index, follow" />
+    <meta name="author" content="KIIP &amp; TOPIK 연계 신청 포털 (KIIP Integration Portal)" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
-    <meta name="apple-mobile-web-app-title" content="KIIP App" />
+    <meta name="apple-mobile-web-app-title" content="ប្តូរ TOPIK to KIIP" />
     <link rel="apple-touch-icon" href="./apple-touch-icon.png" />
     <link rel="icon" type="image/svg+xml" href="./icon.svg" />
     <link rel="shortcut icon" href="./favicon.ico" />
-    <title>KIIP & TOPIK 연계 신청 포털 (KIIP Integration Portal)</title>
-    <meta name="description" content="사회통합프로그램(KIIP) TOPIK 성적 연계 신청서 원클릭 자동 작성, 서류 PDF 통합 병합, 출입국 이민통합지원센터 관할 이메일 자동 매칭 및 제출 시스템" />
-    <meta property="og:title" content="KIIP & TOPIK 연계 신청 포털 (KIIP Integration Portal)" />
-    <meta property="og:description" content="사회통합프로그램(KIIP) TOPIK 성적 연계 신청서 원클릭 자동 작성, 서류 PDF 통합 병합, 출입국 이민통합지원센터 관할 이메일 자동 매칭 및 제출 시스템" />
+    <title>ប្តូរ TOPIK to KIIP Online — KIIP &amp; TOPIK 연계 신청 포털</title>
+    <meta
+      name="description"
+      content="ប្តូរ TOPIK to KIIP (ផ្ទេរពិន្ទុ TOPIK ទៅ KIIP) ដោយស្វ័យប្រវត្តិ៖ ស្កេនកាត ARC និង TOPIK បង្កើតពាក្យសុំ PDF ផ្លូវការ និងផ្ញើទៅអន្តោប្រវេសន៍កូរ៉េភ្លាមៗ។"
+    />
+    <meta
+      name="keywords"
+      content="ប្តូរ TOPIK to KIIP, ប្តរូ topik to kiip, ប្តូរ TOPIK ទៅ KIIP, ផ្ទេរ TOPIK ទៅ KIIP, របៀបប្តូរ TOPIK to KIIP, ប្តូរពិន្ទុ TOPIK ទៅ KIIP, ពាក្យសុំ KIIP, TOPIK to KIIP, TOPIK KIIP 연계 신청, 사회통합프로그램 연계신청서, KIIP Integration Portal"
+    />
+    <meta property="og:site_name" content="ប្តូរ TOPIK to KIIP — KIIP &amp; TOPIK 연계 신청 포털" />
+    <meta property="og:locale" content="km_KH" />
+    <meta property="og:locale:alternate" content="ko_KR" />
+    <meta property="og:locale:alternate" content="en_US" />
+    <meta property="og:title" content="ប្តូរ TOPIK to KIIP Online — KIIP &amp; TOPIK 연계 신청 포털" />
+    <meta
+      property="og:description"
+      content="ប្តូរ TOPIK to KIIP ដោយស្វ័យប្រវត្តិ៖ AI ស្កេនកាត ARC &amp; TOPIK បង្កើតឯកសារ PDF Merge ផ្លូវការ និងផ្ញើអ៊ីមែលទៅការិយាល័យអន្តោប្រវេសន៍កូរ៉េតាមតំបន់ដោយ 1-Click។"
+    />
     <meta property="og:type" content="website" />
+    <meta property="og:image" content="./pwa-512x512.png" />
+    <meta property="og:image:width" content="512" />
+    <meta property="og:image:height" content="512" />
+    <meta property="og:image:alt" content="ប្តូរ TOPIK to KIIP — KIIP &amp; TOPIK Integration Portal" />
     <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="ប្តូរ TOPIK to KIIP Online — KIIP &amp; TOPIK 연계 신청 포털" />
+    <meta
+      name="twitter:description"
+      content="ប្តូរ TOPIK to KIIP (ផ្ទេរពិន្ទុ TOPIK ទៅ KIIP) តាមអនឡាញ៖ AI OCR ស្កេនកាត ARC &amp; TOPIK បង្កើត PDF ផ្លូវការ និងផ្ញើអ៊ីមែលទៅអន្តោប្រវេសន៍កូរ៉េ។"
+    />
+    <meta name="twitter:image" content="./pwa-512x512.png" />
+    <script>
+      // Runtime canonical & OpenGraph absolute URL injection for SEO across custom & Cloud Run domains
+      (function () {
+        try {
+          var currentUrl = window.location.origin + window.location.pathname;
+          var canonical = document.querySelector('link[rel="canonical"]');
+          if (!canonical) {
+            canonical = document.createElement('link');
+            canonical.setAttribute('rel', 'canonical');
+            document.head.appendChild(canonical);
+          }
+          canonical.setAttribute('href', currentUrl);
+
+          var ogUrl = document.querySelector('meta[property="og:url"]');
+          if (!ogUrl) {
+            ogUrl = document.createElement('meta');
+            ogUrl.setAttribute('property', 'og:url');
+            document.head.appendChild(ogUrl);
+          }
+          ogUrl.setAttribute('content', currentUrl);
+
+          var ogImg = document.querySelector('meta[property="og:image"]');
+          if (ogImg) ogImg.setAttribute('content', window.location.origin + '/pwa-512x512.png');
+          var twImg = document.querySelector('meta[name="twitter:image"]');
+          if (twImg) twImg.setAttribute('content', window.location.origin + '/pwa-512x512.png');
+        } catch (e) {}
+      })();
+    </script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "WebApplication",
+        "name": "ប្តូរ TOPIK to KIIP — KIIP & TOPIK 연계 신청 포털",
+        "alternateName": [
+          "ប្តូរ TOPIK to KIIP",
+          "ប្តរូ topik to kiip",
+          "ប្តូរ TOPIK ទៅ KIIP",
+          "ផ្ទេរពិន្ទុ TOPIK ទៅ KIIP",
+          "TOPIK to KIIP Online Portal",
+          "사회통합프로그램 TOPIK 연계 신청 포털"
+        ],
+        "description": "ប្រព័ន្ធស្វ័យប្រវត្តិសម្រាប់ប្តូរ TOPIK to KIIP (ផ្ទេរពិន្ទុ TOPIK ទៅកម្មវិធីសមាហរណកម្មសង្គម KIIP នៅកូរ៉េ) តាមរយៈ AI OCR ស្កេនកាត ARC លិខិតឆ្លងដែន សញ្ញាបត្រ TOPIK បង្កើត PDF ផ្លូវការ និងផ្ញើ Email ទៅការិយាល័យអន្តោប្រវេសន៍កូរ៉េ។",
+        "applicationCategory": "UtilitiesApplication",
+        "operatingSystem": "Web",
+        "inLanguage": ["km", "ko", "en"],
+        "featureList": [
+          "AI OCR ស្កេនកាតស្នាក់នៅ ARC, លិខិតឆ្លងដែន និងសញ្ញាបត្រ TOPIK ដោយស្វ័យប្រវត្តិ",
+          "បំពេញទម្រង់បែបបទផ្លូវការ 사회통합프로그램 연계 신청서 [서식 제1호] ដោយ 1-Click",
+          "ផ្គុំឯកសារ ARC មុខ-ក្រោយ, TOPIK និង Passport ជា PDF តែមួយ (PDF Merge)",
+          "ស្វែងរកអាសយដ្ឋាន Email ការិយាល័យអន្តោប្រវេសន៍កូរ៉េតាមតំបន់ដោយស្វ័យប្រវត្តិ"
+        ]
+      }
+    </script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "HowTo",
+        "name": "របៀបប្តូរ TOPIK to KIIP តាមអនឡាញ (How to Convert TOPIK to KIIP)",
+        "description": "ជំហានទាំង ៥ ដើម្បីប្តូរពិន្ទុ TOPIK ទៅកម្រិត KIIP និងផ្ញើពាក្យសុំទៅការិយាល័យអន្តោប្រវេសន៍កូរ៉េដោយខ្លួនឯង។",
+        "step": [
+          {
+            "@type": "HowToStep",
+            "position": 1,
+            "name": "Upload ឯកសារចាំបាច់",
+            "text": "បញ្ចូលរូបថត ឬ PDF កាតស្នាក់នៅ ARC (មុខ-ក្រោយ), សញ្ញាបត្រ TOPIK និងលិខិតឆ្លងដែន ព្រមទាំងគណនី Socinet។"
+          },
+          {
+            "@type": "HowToStep",
+            "position": 2,
+            "name": "ផ្ទៀងផ្ទាត់ទិន្នន័យ AI OCR",
+            "text": "ប្រព័ន្ធ AI ទាញយកឈ្មោះ លេខកាត ARC ថ្ងៃប្រឡង និងលេខបញ្ជាក់ TOPIK ១៦ខ្ទង់ដោយស្វ័យប្រវត្តិដើម្បីផ្ទៀងផ្ទាត់។"
+          },
+          {
+            "@type": "HowToStep",
+            "position": 3,
+            "name": "ត្រួតពិនិត្យពាក្យសុំផ្លូវការ KIIP [서식 제1호]",
+            "text": "ពិនិត្យទម្រង់ពាក្យសុំភាសាកូរ៉េ និងកំណត់ទីតាំងហត្ថលេខាថ្លា។"
+          },
+          {
+            "@type": "HowToStep",
+            "position": 4,
+            "name": "ទាញយកឯកសារ PDF Merge",
+            "text": "ទាញយកឯកសារ PDF តែមួយដែលបញ្ចូលពាក្យសុំ KIIP, TOPIK, ARC មុខ-ក្រោយ និង Passport។"
+          },
+          {
+            "@type": "HowToStep",
+            "position": 5,
+            "name": "ផ្ញើ Email ទៅការិយាល័យអន្តោប្រវេសន៍កូរ៉េ",
+            "text": "ភ្ជាប់ PDF ហើយផ្ញើតាម Email ទៅការិយាល័យអន្តោប្រវេសន៍ប្រចាំតំបន់ដោយស្វ័យប្រវត្តិ។"
+          }
+        ]
+      }
+    </script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "តើប្តូរ TOPIK to KIIP ត្រូវការឯកសារអ្វីខ្លះ?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "ការប្តូរ TOPIK ទៅ KIIP ត្រូវការ៖ ១) កាតស្នាក់នៅជនបរទេស ARC (មុខ-ក្រោយ), ២) សញ្ញាបត្រពិន្ទុ TOPIK ដែលមានសុពលភាព និងលេខផ្ទៀងផ្ទាត់ ១៦ខ្ទង់, ៣) លិខិតឆ្លងដែន (Passport), ៤) គណនី Socinet (www.socinet.go.kr) និង ៥) ពាក្យសុំ 연계 신청서 [서식 제1호]។"
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "តើ TOPIK កម្រិតណា ប្តូរបាន KIIP កម្រិតណា?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "TOPIK 1급 ប្តូរចូល KIIP 2단계, TOPIK 2급 ប្តូរចូល KIIP 3단계, TOPIK 3급 ប្តូរចូល KIIP 4단계 និង TOPIK 4급, 5급 ឬ 6급 ប្តូរចូល KIIP 5단계 (기본 ឬ 심화 តាមការកំណត់របស់ក្រសួងយុត្តិធម៌កូរ៉េ) ដោយមិនចាំបាច់ប្រឡងតេស្តកម្រិត 사전평가 ឡើយ។"
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "តើត្រូវផ្ញើពាក្យសុំប្តូរ TOPIK to KIIP ទៅកន្លែងណា?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "អ្នកត្រូវផ្ញើពាក្យសុំ និងឯកសារ PDF Merge តាម Email ទៅកាន់ការិយាល័យអន្តោប្រវេសន៍កូរ៉េ (출입국·외국인청) ដែលគ្រប់គ្រងអាសយដ្ឋានលើកាត ARC របស់អ្នក។ គេហទំព័រនេះជួយផ្គូផ្គង Email អន្តោប្រវេសន៍តាមតំបន់ដោយស្វ័យប្រវត្តិ។"
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "តើការប្តូរ TOPIK ទៅ KIIP ជួយអ្វីខ្លះដល់ទិដ្ឋាការ E-9 ទៅ E-7-4 ឬ F-2?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "ការប្តូរពិន្ទុ TOPIK ទៅកម្រិត KIIP ជួយឱ្យអ្នកអាចចូលរៀន KIIP ថ្នាក់ខ្ពស់បន្ត ឬប្រឡងបញ្ចប់ KIIP 5단계 ដើម្បីទទួលពិន្ទុបន្ថែមខ្ពស់សម្រាប់ការប្តូរទិដ្ឋាការ E-9 ទៅ E-7-4, F-2-99 ឬ F-5 នៅប្រទេសកូរ៉េ។"
+            }
+          }
+        ]
+      }
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="preconnect" href="https://t1.daumcdn.net" crossorigin>
@@ -144,6 +304,20 @@
   </head>
   <body class="bg-slate-50 text-slate-900 antialiased font-sans">
     <div id="root"></div>
+    <noscript>
+      <main style="max-width:780px;margin:2rem auto;padding:1.5rem;font-family:sans-serif;line-height:1.6;">
+        <h1>ប្តូរ TOPIK to KIIP Online — KIIP &amp; TOPIK 연계 신청 포털</h1>
+        <p>ប្រព័ន្ធជំនួយស្វ័យប្រវត្តិសម្រាប់បងប្អូនខ្មែរនៅប្រទេសកូរ៉េក្នុងការប្តូរពិន្ទុ TOPIK ទៅកម្មវិធីសមាហរណកម្មសង្គម KIIP (사회통합프로그램 연계 신청)។</p>
+        <h2>ជំហានទាំង ៥ ដើម្បីប្តូរ TOPIK ទៅ KIIP</h2>
+        <ol>
+          <li>Upload កាតស្នាក់នៅ ARC (មុខ-ក្រោយ), សញ្ញាបត្រ TOPIK និងលិខិតឆ្លងដែន</li>
+          <li>AI OCR ទាញយកទិន្នន័យដោយស្វ័យប្រវត្តិ និងផ្ទៀងផ្ទាត់</li>
+          <li>បង្កើតពាក្យសុំផ្លូវការ KIIP [서식 제1호] ដោយ 1-Click</li>
+          <li>ទាញយកឯកសារ PDF Merge តែមួយ</li>
+          <li>ផ្ញើ Email ទៅការិយាល័យអន្តោប្រវេសន៍កូរ៉េតាមតំបន់</li>
+        </ol>
+      </main>
+    </noscript>
     <script type="module" src="./src/main.tsx"></script>
   </body>
 </html>
