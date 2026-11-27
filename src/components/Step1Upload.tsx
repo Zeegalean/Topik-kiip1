@@ -57,6 +57,7 @@ import {
   clearSavedFormDraft, 
   hasSavedFormDraft 
 } from '../utils/draftStorage';
+import { DocumentSilhouette } from './DocumentSilhouette';
 
 interface Step1UploadProps {
   docs: UploadedDocuments;
@@ -1089,10 +1090,20 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
               </div>
             </div>
           ) : (
-            <label onClick={(e) => { if (checkAuth(e)) return; }} className="border-2 border-dashed border-slate-300 hover:border-blue-500 hover:bg-blue-50/30 rounded-xl p-6 flex flex-col items-center justify-center cursor-pointer transition-colors group">
-              <Upload className="w-8 h-8 text-slate-400 group-hover:text-blue-600 mb-2 transition-colors" />
-              <span className="text-xs font-bold text-slate-700">{t.clickUploadArcFront}</span>
-              <span className="text-[10px] text-slate-400 mt-1">{t.uploadArcHint}</span>
+            <label
+              onClick={(e) => {
+                if (checkAuth(e)) return;
+              }}
+              className="border-2 border-dashed border-slate-300 hover:border-blue-500 bg-slate-50/60 hover:bg-blue-50/40 rounded-xl px-4 py-5 flex flex-col items-center justify-center gap-3 cursor-pointer transition-all group"
+            >
+              <DocumentSilhouette type="arc-front" />
+              <div className="flex flex-col items-center text-center">
+                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-white border border-slate-200 group-hover:border-blue-300 group-hover:text-blue-700 text-xs font-bold text-slate-700 shadow-2xs transition-colors">
+                  <Upload className="w-3.5 h-3.5 text-slate-500 group-hover:text-blue-600 transition-colors" />
+                  <span>{t.clickUploadArcFront}</span>
+                </span>
+                <span className="text-[11px] text-slate-400 mt-1.5">{t.uploadArcHint}</span>
+              </div>
               <input
                 type="file"
                 accept="image/*,application/pdf"
@@ -1140,10 +1151,20 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
               </div>
             </div>
           ) : (
-            <label onClick={(e) => { if (checkAuth(e)) return; }} className="border-2 border-dashed border-slate-300 hover:border-blue-500 hover:bg-blue-50/30 rounded-xl p-6 flex flex-col items-center justify-center cursor-pointer transition-colors group">
-              <Upload className="w-8 h-8 text-slate-400 group-hover:text-blue-600 mb-2 transition-colors" />
-              <span className="text-xs font-bold text-slate-700">{t.clickUploadArcBack}</span>
-              <span className="text-[10px] text-slate-400 mt-1">{t.uploadArcBackHint}</span>
+            <label
+              onClick={(e) => {
+                if (checkAuth(e)) return;
+              }}
+              className="border-2 border-dashed border-slate-300 hover:border-indigo-500 bg-slate-50/60 hover:bg-indigo-50/35 rounded-xl px-4 py-5 flex flex-col items-center justify-center gap-3 cursor-pointer transition-all group"
+            >
+              <DocumentSilhouette type="arc-back" />
+              <div className="flex flex-col items-center text-center">
+                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-white border border-slate-200 group-hover:border-indigo-300 group-hover:text-indigo-700 text-xs font-bold text-slate-700 shadow-2xs transition-colors">
+                  <Upload className="w-3.5 h-3.5 text-slate-500 group-hover:text-indigo-600 transition-colors" />
+                  <span>{t.clickUploadArcBack}</span>
+                </span>
+                <span className="text-[11px] text-slate-400 mt-1.5">{t.uploadArcBackHint}</span>
+              </div>
               <input
                 type="file"
                 accept="image/*,application/pdf"
@@ -1418,9 +1439,27 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
               </div>
             ))}
 
-            <label onClick={(e) => { if (checkAuth(e)) return; }} className="border-2 border-dashed border-slate-300 hover:border-indigo-500 hover:bg-indigo-50/30 rounded-xl p-4 flex items-center justify-center gap-2 cursor-pointer transition-colors group">
-              <Upload className="w-5 h-5 text-slate-400 group-hover:text-indigo-600" />
-              <span className="text-xs font-bold text-slate-700">{t.addMoreTopik}</span>
+            <label
+              onClick={(e) => {
+                if (checkAuth(e)) return;
+              }}
+              className={`border-2 border-dashed border-slate-300 hover:border-indigo-500 bg-slate-50/60 hover:bg-indigo-50/35 rounded-xl cursor-pointer transition-all group ${
+                docs.topikCertList.length === 0
+                  ? 'px-4 py-5 flex flex-col items-center justify-center gap-3'
+                  : 'p-3.5 flex items-center justify-center gap-2'
+              }`}
+            >
+              {docs.topikCertList.length === 0 && <DocumentSilhouette type="topik" />}
+              <span
+                className={
+                  docs.topikCertList.length === 0
+                    ? 'inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-white border border-slate-200 group-hover:border-indigo-300 group-hover:text-indigo-700 text-xs font-bold text-slate-700 shadow-2xs transition-colors'
+                    : 'inline-flex items-center gap-2 text-xs font-bold text-slate-700 group-hover:text-indigo-700'
+                }
+              >
+                <Upload className="w-3.5 h-3.5 text-slate-500 group-hover:text-indigo-600 transition-colors" />
+                <span>{t.addMoreTopik}</span>
+              </span>
               <input
                 type="file"
                 multiple
@@ -1558,12 +1597,28 @@ export const Step1Upload: React.FC<Step1UploadProps> = ({
               </div>
             ))}
 
-            <label onClick={(e) => { if (checkAuth(e)) return; }} className={`border-2 border-dashed rounded-xl p-4 flex items-center justify-center gap-2 cursor-pointer transition-colors group ${
-              hasPassport ? 'border-slate-300 hover:border-slate-500 hover:bg-slate-50' : 'border-rose-300 bg-rose-50/20 hover:border-rose-500'
-            }`}>
-              <Upload className={`w-5 h-5 ${hasPassport ? 'text-slate-400 group-hover:text-slate-700' : 'text-rose-500'}`} />
-              <span className={`text-xs font-bold ${hasPassport ? 'text-slate-700' : 'text-rose-700'}`}>
-                {docs.passportList.length > 0 ? t.uploadPassportMulti : '+ បញ្ចូលរូបថត/Scan លិខិតឆ្លងដែន (Passport)'}
+            <label
+              onClick={(e) => {
+                if (checkAuth(e)) return;
+              }}
+              className={`border-2 border-dashed rounded-xl cursor-pointer transition-all group ${
+                hasPassport
+                  ? 'border-slate-300 hover:border-slate-500 hover:bg-slate-50 p-3.5 flex items-center justify-center gap-2'
+                  : 'border-rose-300/90 bg-slate-50/60 hover:border-blue-500 hover:bg-blue-50/35 px-4 py-5 flex flex-col items-center justify-center gap-3'
+              }`}
+            >
+              {!hasPassport && <DocumentSilhouette type="passport" />}
+              <span
+                className={
+                  !hasPassport
+                    ? 'inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-white border border-rose-200 group-hover:border-blue-300 group-hover:text-blue-700 text-xs font-bold text-rose-700 shadow-2xs transition-colors'
+                    : 'inline-flex items-center gap-2 text-xs font-bold text-slate-700'
+                }
+              >
+                <Upload className={`w-3.5 h-3.5 ${hasPassport ? 'text-slate-500 group-hover:text-slate-700' : 'text-rose-500 group-hover:text-blue-600'}`} />
+                <span>
+                  {docs.passportList.length > 0 ? t.uploadPassportMulti : '+ បញ្ចូលរូបថត/Scan លិខិតឆ្លងដែន (Passport)'}
+                </span>
               </span>
               <input
                 type="file"
